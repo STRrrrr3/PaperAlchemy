@@ -1,0 +1,16 @@
+# 忽略 Python 的编译垃圾
+__pycache__/
+*.py[cod]
+
+# 忽略虚拟环境 (这行最重要！！)
+venv/
+.venv/
+env/
+
+# 忽略 IDE 的配置文件 (不需要上传你的编辑器设置)
+.vscode/
+.idea/
+
+# 忽略数据文件 (PDF 和解析结果不传)
+data/
+.env
