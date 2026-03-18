@@ -215,6 +215,13 @@ class PagePlan(BaseModel):
             "injected into those DOM nodes."
         ),
     )
+    selectors_to_remove: List[str] = Field(
+        default_factory=list,
+        description=(
+            "CSS selectors for residual template elements that should be completely removed from the "
+            "DOM, such as dummy text blocks, legacy paper content, placeholder images, or irrelevant widgets."
+        ),
+    )
     coder_handoff: CoderHandoff
     quality_checks: List[QualityCheck]
     open_questions: List[str]

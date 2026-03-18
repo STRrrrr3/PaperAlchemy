@@ -322,6 +322,31 @@ def coder_node(state: CoderState) -> dict[str, Any]:
                     f"selector '{selector_text}' target #{index}: {exc}"
                 )
 
+    selectors_to_remove = page_plan.selectors_to_remove or []
+    for css_selector in selectors_to_remove:
+        selector_text = str(css_selector or "").strip()
+        if not selector_text:
+            continue
+
+        try:
+            targets = soup.select(selector_text)
+        except Exception as exc:
+            print(f"[PaperAlchemy-Coder] warning: invalid removal selector '{selector_text}': {exc}")
+            continue
+
+        if not targets:
+            print(f"[PaperAlchemy-Coder] warning: removal selector '{selector_text}' matched no elements.")
+            continue
+
+        for index, target in enumerate(targets, start=1):
+            try:
+                target.decompose()
+            except Exception as exc:
+                print(
+                    "[PaperAlchemy-Coder] warning: failed to remove "
+                    f"selector '{selector_text}' target #{index}: {exc}"
+                )
+
     entry_html_path.write_text(str(soup), encoding="utf-8")
 
     artifact = CoderArtifact(
@@ -331,8 +356,8 @@ def coder_node(state: CoderState) -> dict[str, Any]:
         copied_assets=copied_assets,
         edited_files=[str(entry_html_path.relative_to(site_dir)).replace("\\", "/")],
         notes=(
-            "v2-dom-injection: preserved the original template DOM and injected page_plan.dom_mapping "
-            "content with BeautifulSoup."
+            "v2-dom-injection-wash: preserved the original template DOM, injected page_plan.dom_mapping "
+            "content with BeautifulSoup, and decompose()-removed selectors_to_remove."
         ),
     )
     return {"coder_artifact": artifact}
