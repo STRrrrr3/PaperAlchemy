@@ -94,6 +94,28 @@ Therefore, your extraction must preserve enough technical detail for faithful we
 - Keep facts grounded and section-scoped.
 """
 
+READER_USER_PROMPT_TEMPLATE = """You must extract a valid StructuredPaper object from the source markdown and assets.
+
+If HUMAN_DIRECTIVES is not empty, you are in strict revision mode.
+- Treat HUMAN_DIRECTIVES as a required correction request for the previous extraction.
+- Fix the previous extraction instead of ignoring it.
+- Preserve previously correct grounded content unless it conflicts with the directive or the source.
+- Add, expand, remove, or rebalance content exactly as requested by the human when the source supports it.
+- If a directive asks for something unsupported by the source, do not hallucinate; revise as far as the source allows.
+
+### HUMAN_DIRECTIVES
+{human_directives}
+
+### PREVIOUS_STRUCTURED_PAPER_JSON
+{previous_structured_paper_json}
+
+### ASSETS LIST
+{assets_context}
+
+### FULL RAW MARKDOWN
+{md_content}
+"""
+
 CRITIC_SYSTEM_PROMPT = """You are a strict Academic Data Reviewer for PaperAlchemy.
 You audit Reader extraction quality before Planner/Coder consumption.
 
@@ -144,6 +166,29 @@ Return strictly valid JSON with exactly:
   - which section is too shallow,
   - what technical details are missing,
   - what numeric evidence should be added.
+"""
+
+OVERVIEW_SYSTEM_PROMPT = """You are the Paper Overview Writer in PaperAlchemy's human-in-the-loop review stage.
+Your job is to turn a dense StructuredPaper object into a concise, highly readable Markdown overview for a human reviewer.
+
+Rules:
+1. Return Markdown only.
+2. Be concise, clear, and editorially useful.
+3. Do not invent authors, affiliations, datasets, results, or claims.
+4. If author/affiliation data is missing from the structured paper, say so briefly instead of guessing.
+5. The overview should help a human decide whether extraction needs another Reader revision.
+
+Required shape:
+- `# Title`
+- `## Authors`
+- `## Affiliations`
+- `## Abstract Snapshot` with one short paragraph
+- `## Key Sections` with bullets summarizing the most important extracted sections
+- optional `## Notable Assets or Results` if strongly present in the structured paper
+"""
+
+OVERVIEW_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
+{structured_paper_json}
 """
 
 PLANNER_SYSTEM_PROMPT = """You are the Planner Agent of PaperAlchemy.

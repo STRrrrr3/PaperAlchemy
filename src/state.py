@@ -7,6 +7,8 @@ from src.schemas import CoderArtifact, PagePlan, SemanticPlan, StructuredPaper, 
 class ReaderState(TypedDict):
     raw_markdown: str
     assets_list: List[dict]
+    human_directives: str
+    previous_structured_paper: Optional[StructuredPaper]
     feedback_history: Annotated[List[str], operator.add]
     structured_paper: Optional[StructuredPaper]
     critic_passed: bool
@@ -46,6 +48,8 @@ class WorkflowState(TypedDict):
     user_constraints: dict[str, str]
     generation_constraints: dict[str, Any]
     human_directives: str
+    paper_overview: str
+    is_approved: bool
     structured_paper: Optional[StructuredPaper]
     page_plan: Optional[PagePlan]
     coder_artifact: Optional[CoderArtifact]

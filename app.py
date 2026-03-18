@@ -11,6 +11,7 @@ try:
 except ImportError as exc:
     raise RuntimeError("Gradio is required to launch the PaperAlchemy web UI.") from exc
 
+from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
@@ -18,7 +19,9 @@ from src.agent_coder import run_coder_agent
 from src.agent_planner import run_planner_agent
 from src.agent_reader import run_reader_agent
 from src.deterministic_template_selector import score_and_select_templates
+from src.llm import get_llm
 from src.parser import parse_pdf
+from src.prompts import OVERVIEW_SYSTEM_PROMPT, OVERVIEW_USER_PROMPT_TEMPLATE
 from src.schemas import CoderArtifact, PagePlan, StructuredPaper
 from src.state import WorkflowState
 from src.template_resources import SyncedTemplateAssets, ensure_autopage_template_assets
@@ -271,6 +274,26 @@ def build_placeholder_preview(message: str) -> str:
     """
 
 
+def _message_content_to_text(message: Any) -> str:
+    content = getattr(message, "content", message)
+    if isinstance(content, str):
+        return content.strip()
+
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str) and item.strip():
+                parts.append(item.strip())
+                continue
+            if isinstance(item, dict):
+                text = str(item.get("text") or "").strip()
+                if text:
+                    parts.append(text)
+        return "\n".join(parts).strip()
+
+    return str(content or "").strip()
+
+
 def _coerce_string_list(value: Any) -> list[str]:
     if isinstance(value, str):
         cleaned = value.strip()
@@ -454,11 +477,29 @@ def reader_phase_node(state: WorkflowState) -> dict[str, Any]:
     if not paper_folder_name:
         raise ValueError("paper_folder_name is missing for reader phase.")
 
+    human_directives = str(state.get("human_directives") or "").strip()
+    previous_structured_paper = state.get("structured_paper")
+    previous_structured_data: StructuredPaper | None = None
+    if previous_structured_paper:
+        try:
+            previous_structured_data = StructuredPaper.model_validate(previous_structured_paper)
+        except Exception:
+            previous_structured_data = None
+
     _, structured_json_path, _, _ = get_output_paths(paper_folder_name)
-    structured_data = load_cached_structured_data(structured_json_path)
+    structured_data: StructuredPaper | None = None
+    if not human_directives:
+        structured_data = load_cached_structured_data(structured_json_path)
+
+    if human_directives:
+        print("[Reader] Revising structured extraction from human directives...")
     if not structured_data:
         print("[Reader] Running reader agent...")
-        structured_data = run_reader_agent(paper_folder_name)
+        structured_data = run_reader_agent(
+            paper_folder_name,
+            human_directives=human_directives,
+            previous_structured_paper=previous_structured_data,
+        )
         if not structured_data:
             raise RuntimeError("Reader agent failed to produce structured paper data.")
         save_structured_data(structured_json_path, structured_data)
@@ -467,6 +508,34 @@ def reader_phase_node(state: WorkflowState) -> dict[str, Any]:
         print(f"[Reader] Reused cached structured paper from {structured_json_path}")
 
     return {"structured_paper": structured_data}
+
+
+def overview_node(state: WorkflowState) -> dict[str, Any]:
+    structured_data = StructuredPaper.model_validate(state.get("structured_paper"))
+    structured_json = json.dumps(structured_data.model_dump(), indent=2, ensure_ascii=False)
+    llm = get_llm(temperature=0.2, use_smart_model=False)
+
+    print("[Overview] Generating human-readable paper overview...")
+    try:
+        response = llm.invoke(
+            [
+                SystemMessage(content=OVERVIEW_SYSTEM_PROMPT),
+                HumanMessage(
+                    content=OVERVIEW_USER_PROMPT_TEMPLATE.format(
+                        structured_paper_json=structured_json,
+                    )
+                ),
+            ]
+        )
+        paper_overview = _message_content_to_text(response)
+    except Exception as exc:
+        print(f"[Overview] Warning: overview generation failed, falling back to deterministic formatter: {exc}")
+        paper_overview = format_paper_to_markdown(structured_data.model_dump())
+
+    if not paper_overview:
+        paper_overview = format_paper_to_markdown(structured_data.model_dump())
+
+    return {"paper_overview": paper_overview}
 
 
 def planner_phase_node(state: WorkflowState) -> dict[str, Any]:
@@ -520,19 +589,34 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
     return {"coder_artifact": coder_artifact}
 
 
+def human_review_router(state: WorkflowState) -> str:
+    if bool(state.get("is_approved")):
+        return "planner"
+    return "reader"
+
+
 def build_hitl_workflow():
     workflow = StateGraph(WorkflowState)
     workflow.add_node("reader", reader_phase_node)
+    workflow.add_node("overview", overview_node)
     workflow.add_node("planner", planner_phase_node)
     workflow.add_node("coder", coder_phase_node)
 
     workflow.set_entry_point("reader")
-    workflow.add_edge("reader", "planner")
+    workflow.add_edge("reader", "overview")
+    workflow.add_conditional_edges(
+        "overview",
+        human_review_router,
+        {
+            "planner": "planner",
+            "reader": "reader",
+        },
+    )
     workflow.add_edge("planner", "coder")
     workflow.add_edge("coder", END)
 
     memory = MemorySaver()
-    return workflow.compile(checkpointer=memory, interrupt_before=["planner"])
+    return workflow.compile(checkpointer=memory, interrupt_after=["overview"])
 
 
 HITL_WORKFLOW = build_hitl_workflow()
@@ -629,7 +713,7 @@ def find_templates(
     density: str,
     navigation: str,
     layout: str,
-) -> tuple[Any, dict[str, Any], Any, str, str, Any, Any, str, str, str]:
+) -> tuple[Any, dict[str, Any], Any, str, str, Any, Any, Any, str, str, str]:
     log_lines: list[str] = []
     preview_html = build_placeholder_preview(
         "Select one of the Top 5 candidates to preview it here before generation."
@@ -671,7 +755,8 @@ def find_templates(
             interactive=True,
         )
         step1_update = gr.update(interactive=False)
-        step2_update = gr.update(interactive=False)
+        revise_update = gr.update(interactive=False)
+        approve_update = gr.update(interactive=False)
         return (
             radio_update,
             search_state,
@@ -679,7 +764,8 @@ def find_templates(
             "\n".join(log_lines),
             preview_html,
             step1_update,
-            step2_update,
+            revise_update,
+            approve_update,
             "",
             "",
             "",
@@ -689,7 +775,8 @@ def find_templates(
         empty_state = {"user_constraints": {}, "tags_json_path": "", "candidates": []}
         radio_update = gr.update(choices=[], value=None, interactive=False)
         step1_update = gr.update(interactive=False)
-        step2_update = gr.update(interactive=False)
+        revise_update = gr.update(interactive=False)
+        approve_update = gr.update(interactive=False)
         error_preview = build_placeholder_preview(f"Template search failed: {exc}")
         return (
             radio_update,
@@ -698,7 +785,8 @@ def find_templates(
             "\n".join(log_lines),
             error_preview,
             step1_update,
-            step2_update,
+            revise_update,
+            approve_update,
             "",
             "",
             "",
@@ -709,7 +797,7 @@ def preview_selected_template(
     selected_label: str | None,
     search_state: dict[str, Any] | None,
     current_logs: str,
-) -> tuple[str, dict[str, Any] | None, str, Any, Any, str, str, str]:
+) -> tuple[str, dict[str, Any] | None, str, Any, Any, Any, str, str, str]:
     candidate = resolve_selected_candidate(selected_label, search_state)
     if not candidate:
         preview_html = build_placeholder_preview(
@@ -719,6 +807,7 @@ def preview_selected_template(
             preview_html,
             None,
             current_logs,
+            gr.update(interactive=False),
             gr.update(interactive=False),
             gr.update(interactive=False),
             "",
@@ -739,6 +828,7 @@ def preview_selected_template(
             updated_logs,
             gr.update(interactive=True),
             gr.update(interactive=False),
+            gr.update(interactive=False),
             "",
             "",
             "",
@@ -750,6 +840,7 @@ def preview_selected_template(
             preview_html,
             None,
             updated_logs,
+            gr.update(interactive=False),
             gr.update(interactive=False),
             gr.update(interactive=False),
             "",
@@ -764,7 +855,7 @@ def run_extraction(
     search_state: dict[str, Any] | None,
     selected_candidate_state: dict[str, Any] | None,
     current_logs: str,
-) -> tuple[str, str, str, Any, str]:
+) -> tuple[str, str, str, Any, Any, str]:
     selected_candidate = selected_candidate_state or resolve_selected_candidate(selected_label, search_state)
     if not selected_candidate:
         raise gr.Error("Select and preview one of the Top 5 candidate templates before running Step 1.")
@@ -819,26 +910,94 @@ def run_extraction(
             "user_constraints": user_constraints,
             "generation_constraints": generation_constraints,
             "human_directives": "",
+            "paper_overview": "",
+            "is_approved": False,
             "structured_paper": None,
             "page_plan": None,
             "coder_artifact": None,
         }
 
-        log("[Reader] Running workflow until HITL breakpoint before planner...")
+        log("[Reader] Running workflow until HITL breakpoint after overview...")
         HITL_WORKFLOW.invoke(initial_state, config=config)
         paused_state = HITL_WORKFLOW.get_state(config)
         paused_values = dict(paused_state.values or {})
-        structured_data = StructuredPaper.model_validate(paused_values.get("structured_paper"))
-        paper_markdown = format_paper_to_markdown(structured_data.model_dump())
-        log("[Reader] Extraction complete. Review the readable paper summary, add Human Directives, then click Step 2.")
-        return "\n".join(run_log_lines), paper_markdown, "", gr.update(interactive=True), thread_id
+        paper_overview = str(paused_values.get("paper_overview") or "").strip()
+        if not paper_overview:
+            structured_data = StructuredPaper.model_validate(paused_values.get("structured_paper"))
+            paper_overview = format_paper_to_markdown(structured_data.model_dump())
+        log("[Overview] Extraction complete. Review the overview, revise if needed, or approve to continue.")
+        return (
+            "\n".join(run_log_lines),
+            paper_overview,
+            "",
+            gr.update(interactive=True),
+            gr.update(interactive=True),
+            thread_id,
+        )
     except Exception as exc:
         log(f"[Error] {exc}")
-        return "\n".join(run_log_lines), "", "", gr.update(interactive=False), ""
+        return (
+            "\n".join(run_log_lines),
+            "",
+            "",
+            gr.update(interactive=False),
+            gr.update(interactive=False),
+            "",
+        )
 
 
-def resume_generation(
+def revise_extraction(
     human_directives_text: str,
+    workflow_thread_id: str,
+    current_logs: str,
+    current_overview: str,
+) -> tuple[str, str]:
+    run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
+
+    def log(message: str) -> None:
+        print(message)
+        run_log_lines.append(message)
+
+    try:
+        thread_id = str(workflow_thread_id or "").strip()
+        if not thread_id:
+            raise ValueError("No paused workflow was found. Run Step 1 before requesting a revision.")
+
+        config = {"configurable": {"thread_id": thread_id}}
+        snapshot = HITL_WORKFLOW.get_state(config)
+        snapshot_values = dict(snapshot.values or {})
+        paper_folder_name = str(snapshot_values.get("paper_folder_name") or "").strip()
+        if not paper_folder_name:
+            raise ValueError("The paused workflow state is missing paper metadata. Run Step 1 again.")
+
+        human_directives = str(human_directives_text or "").strip()
+        if not human_directives:
+            raise ValueError("Enter Human Directives before requesting an extraction revision.")
+
+        log(f"[HITL] Human directives captured for Reader revision: {human_directives}")
+
+        HITL_WORKFLOW.update_state(
+            config,
+            {"human_directives": human_directives, "is_approved": False},
+            as_node="overview",
+        )
+
+        log("[Reader] Resuming workflow to revise extraction...")
+        HITL_WORKFLOW.invoke(None, config=config)
+        paused_state = HITL_WORKFLOW.get_state(config)
+        paused_values = dict(paused_state.values or {})
+        paper_overview = str(paused_values.get("paper_overview") or "").strip()
+        if not paper_overview:
+            structured_data = StructuredPaper.model_validate(paused_values.get("structured_paper"))
+            paper_overview = format_paper_to_markdown(structured_data.model_dump())
+        log("[Overview] Revised extraction complete. Review the updated overview or approve to continue.")
+        return "\n".join(run_log_lines), paper_overview
+    except Exception as exc:
+        log(f"[Error] {exc}")
+        return "\n".join(run_log_lines), current_overview
+
+
+def approve_and_generate(
     workflow_thread_id: str,
     current_logs: str,
     current_preview: str,
@@ -852,7 +1011,7 @@ def resume_generation(
     try:
         thread_id = str(workflow_thread_id or "").strip()
         if not thread_id:
-            raise ValueError("No paused workflow was found. Run Step 1 before Step 2.")
+            raise ValueError("No paused workflow was found. Run Step 1 before approving.")
 
         config = {"configurable": {"thread_id": thread_id}}
         snapshot = HITL_WORKFLOW.get_state(config)
@@ -861,19 +1020,13 @@ def resume_generation(
         if not paper_folder_name:
             raise ValueError("The paused workflow state is missing paper metadata. Run Step 1 again.")
 
-        human_directives = str(human_directives_text or "").strip()
-        if human_directives:
-            log(f"[HITL] Human directives captured: {human_directives}")
-        else:
-            log("[HITL] No additional human directives were provided. Planner will use the extracted paper as-is.")
-
         HITL_WORKFLOW.update_state(
             config,
-            {"human_directives": human_directives},
-            as_node="reader",
+            {"human_directives": "", "is_approved": True},
+            as_node="overview",
         )
 
-        log("[Planner] Resuming workflow from HITL checkpoint...")
+        log("[Planner] Approval received. Resuming workflow toward webpage generation...")
         HITL_WORKFLOW.invoke(None, config=config)
         final_state = HITL_WORKFLOW.get_state(config)
         final_values = dict(final_state.values or {})
@@ -982,24 +1135,30 @@ def build_app() -> gr.Blocks:
                 )
                 gr.Markdown("### Extracted Paper Overview")
                 paper_markdown = gr.Markdown(
-                    value="Run Step 1 to extract the paper into a readable review summary."
+                    value="Run Step 1 to extract the paper into a readable review overview."
                 )
                 human_directives = gr.Textbox(
-                    label="Human Directives (e.g., 'Skip section 3')",
-                    placeholder="Example: Skip related work, emphasize authors and experimental results.",
+                    label="Human Directives (e.g., 'Extract more details about the dataset')",
+                    placeholder="Example: Extract more dataset details, shorten related work, and preserve all author affiliations.",
                     lines=3,
                     value="",
                 )
-                step2_button = gr.Button(
-                    "Step 2: Confirm & Generate Webpage",
+                revise_button = gr.Button(
+                    "Revise Extraction",
+                    variant="secondary",
+                    interactive=False,
+                )
+                approve_button = gr.Button(
+                    "Approve & Generate Webpage",
                     variant="primary",
                     interactive=False,
                 )
                 system_logs = gr.Textbox(
                     label="System Logs",
                     value=(
-                        "Choose constraints, click Find Templates, preview a candidate, run Step 1 to extract a "
-                        "readable paper summary, then enter Human Directives before Step 2 generates the webpage."
+                        "Choose constraints, click Find Templates, preview a candidate, then run Step 1 to extract "
+                        "a readable overview. Use Human Directives plus Revise Extraction until satisfied, then "
+                        "approve to generate the webpage."
                     ),
                     lines=24,
                     interactive=False,
@@ -1024,7 +1183,8 @@ def build_app() -> gr.Blocks:
                 system_logs,
                 preview_html,
                 step1_button,
-                step2_button,
+                revise_button,
+                approve_button,
                 paper_markdown,
                 human_directives,
                 workflow_thread_state,
@@ -1040,7 +1200,8 @@ def build_app() -> gr.Blocks:
                 selected_candidate_state,
                 system_logs,
                 step1_button,
-                step2_button,
+                revise_button,
+                approve_button,
                 paper_markdown,
                 human_directives,
                 workflow_thread_state,
@@ -1051,15 +1212,29 @@ def build_app() -> gr.Blocks:
         step1_button.click(
             fn=run_extraction,
             inputs=[pdf_dropdown, candidates_radio, search_state, selected_candidate_state, system_logs],
-            outputs=[system_logs, paper_markdown, human_directives, step2_button, workflow_thread_state],
+            outputs=[
+                system_logs,
+                paper_markdown,
+                human_directives,
+                revise_button,
+                approve_button,
+                workflow_thread_state,
+            ],
             api_name="extract_and_review",
         )
 
-        step2_button.click(
-            fn=resume_generation,
-            inputs=[human_directives, workflow_thread_state, system_logs, preview_html],
+        revise_button.click(
+            fn=revise_extraction,
+            inputs=[human_directives, workflow_thread_state, system_logs, paper_markdown],
+            outputs=[system_logs, paper_markdown],
+            api_name="revise_extraction",
+        )
+
+        approve_button.click(
+            fn=approve_and_generate,
+            inputs=[workflow_thread_state, system_logs, preview_html],
             outputs=[system_logs, preview_html],
-            api_name="confirm_and_render",
+            api_name="approve_and_generate",
         )
 
     return demo
