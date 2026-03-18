@@ -19,9 +19,11 @@ class PlannerState(TypedDict):
     template_link_map: dict[str, str]
     module_index: dict[str, Any]
     generation_constraints: dict[str, Any]
+    user_constraints: dict[str, Any]
     semantic_plan: Optional[SemanticPlan]
     template_candidates: List[TemplateCandidate]
     selected_template: Optional[TemplateCandidate]
+    selected_template_path: Optional[str]
     planner_feedback_history: Annotated[List[str], operator.add]
     page_plan: Optional[PagePlan]
     planner_critic_passed: bool

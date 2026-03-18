@@ -1,4 +1,4 @@
-﻿import json
+import json
 from pathlib import Path
 from typing import Any
 
@@ -7,7 +7,10 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from src.agent_planner_critic import build_planner_critic_router, planner_critic_node
+from src.deterministic_template_selector import score_and_select_template
+from src.json_utils import to_pretty_json
 from src.llm import get_llm
+from src.planner_template_catalog import build_template_catalog, load_module_index, load_template_link_map
 from src.prompts import (
     SEMANTIC_PLANNER_SYSTEM_PROMPT,
     SEMANTIC_PLANNER_USER_PROMPT_TEMPLATE,
@@ -16,8 +19,7 @@ from src.prompts import (
 )
 from src.schemas import PagePlan, SemanticPlan, StructuredPaper, TemplateCandidate
 from src.state import PlannerState
-from src.planner_template_catalog import build_template_catalog, load_module_index, load_template_link_map
-from src.planner_template_selector import select_template_candidates
+from src.template_resources import ensure_autopage_template_assets
 
 
 def _normalize_structured_paper(paper: Any) -> StructuredPaper | None:
@@ -53,63 +55,36 @@ def _normalize_template_candidate(candidate: Any) -> TemplateCandidate | None:
         return None
 
 
-def _pick_candidate_by_id(
-    candidates: list[TemplateCandidate],
-    template_id: str | None,
-) -> TemplateCandidate | None:
-    if not template_id:
-        return None
-    target = str(template_id).strip()
-    if not target:
-        return None
-    for candidate in candidates:
-        if candidate.template_id == target:
-            return candidate
-    return None
-
-
-def _choose_template_with_human(
-    candidates: list[TemplateCandidate],
-    template_link_map: dict[str, str],
-) -> TemplateCandidate:
-    print("[PaperAlchemy-TemplateSelector] template recommendations:")
-    for idx, candidate in enumerate(candidates, start=1):
-        source_url = template_link_map.get(candidate.template_id, "")
-        reason_text = ", ".join(candidate.reasons[:3]) if candidate.reasons else "no reason"
-        print(
-            f"  [{idx}] {candidate.template_id} "
-            f"(score={candidate.score}, entry={candidate.chosen_entry_html})"
-        )
-        if source_url:
-            print(f"      source: {source_url}")
-        print(f"      reasons: {reason_text}")
-
-    prompt = (
-        "Select template by index or template_id "
-        "(press Enter to use #1): "
-    )
+def _to_project_relative_path(path: Path, project_root: Path) -> str:
     try:
-        raw = input(prompt).strip()
-    except EOFError:
-        print("[PaperAlchemy-TemplateSelector] non-interactive shell detected, fallback to #1.")
-        return candidates[0]
+        return str(path.resolve().relative_to(project_root.resolve())).replace("\\", "/")
+    except ValueError:
+        return str(path.resolve())
 
-    if not raw:
-        return candidates[0]
 
-    if raw.isdigit():
-        index = int(raw)
-        if 1 <= index <= len(candidates):
-            return candidates[index - 1]
-        print("[PaperAlchemy-TemplateSelector] invalid index, fallback to #1.")
-        return candidates[0]
+def _candidate_from_ranked_match(
+    ranked_match: dict[str, Any],
+    project_root: Path,
+) -> TemplateCandidate | None:
+    template_id = str(ranked_match.get("template_id") or "").strip()
+    template_path = str(ranked_match.get("template_path") or "").strip()
+    entry_html = str(ranked_match.get("entry_html") or "").strip()
+    if not template_id or not template_path or not entry_html:
+        return None
 
-    by_id = _pick_candidate_by_id(candidates, raw)
-    if by_id:
-        return by_id
+    reasons = [
+        str(item).strip()
+        for item in (ranked_match.get("reasons") or [])
+        if str(item).strip()
+    ]
 
-    print("[PaperAlchemy-TemplateSelector] unknown template_id, fallback to #1.")
-    return candidates[0]
+    return TemplateCandidate(
+        template_id=template_id,
+        root_dir=_to_project_relative_path(Path(template_path), project_root),
+        chosen_entry_html=entry_html,
+        score=float(ranked_match.get("score") or 0.0),
+        reasons=reasons[:8],
+    )
 
 
 def semantic_planner_node(state: PlannerState) -> dict[str, Any]:
@@ -125,12 +100,12 @@ def semantic_planner_node(state: PlannerState) -> dict[str, Any]:
     structured_paper = _normalize_structured_paper(state.get("structured_paper"))
     if not structured_paper:
         print("[PaperAlchemy-SemanticPlanner] missing structured_paper, cannot proceed.")
-        return {}
+        return {"semantic_plan": None, "page_plan": None}
 
     feedback_history = state.get("planner_feedback_history") or []
 
     user_msg = SEMANTIC_PLANNER_USER_PROMPT_TEMPLATE.format(
-        structured_paper_json=structured_paper.model_dump_json(indent=2, ensure_ascii=False),
+        structured_paper_json=to_pretty_json(structured_paper),
         generation_constraints_json=json.dumps(constraints, indent=2, ensure_ascii=False),
         prior_feedback=json.dumps(feedback_history, indent=2, ensure_ascii=False),
     )
@@ -147,51 +122,64 @@ def semantic_planner_node(state: PlannerState) -> dict[str, Any]:
 
         return {
             "semantic_plan": result,
-            "template_candidates": [],
-            "selected_template": None,
             "page_plan": None,
         }
     except Exception as exc:
         print(f"[PaperAlchemy-SemanticPlanner] generation error: {exc}")
-        return {}
+        return {"semantic_plan": None, "page_plan": None}
 
 
 def template_selector_node(state: PlannerState) -> dict[str, Any]:
-    print("[PaperAlchemy-TemplateSelector] ranking templates against semantic plan...")
+    print("[PaperAlchemy-TemplateSelector] selecting template from user constraints...")
 
-    semantic_plan = _normalize_semantic_plan(state.get("semantic_plan"))
-    template_catalog = state.get("template_catalog") or []
+    project_root = Path(__file__).resolve().parent.parent
     constraints = state.get("generation_constraints") or {}
+    user_constraints = state.get("user_constraints") or {}
+    tags_json_path = str(constraints.get("template_tags_json_path") or "").strip()
 
-    if not semantic_plan:
-        print("[PaperAlchemy-TemplateSelector] semantic_plan is missing.")
-        return {}
+    if not tags_json_path:
+        print("[PaperAlchemy-TemplateSelector] template_tags_json_path is missing.")
+        return {
+            "template_candidates": [],
+            "selected_template": None,
+            "selected_template_path": None,
+        }
 
-    top_k = int(constraints.get("template_candidate_top_k", 3))
-    candidates = select_template_candidates(
-        template_catalog=template_catalog,
-        semantic_plan=semantic_plan,
-        top_k=top_k,
-    )
+    try:
+        selection_result = score_and_select_template(
+            user_constraints=user_constraints,
+            tags_json_path=tags_json_path,
+        )
+    except Exception as exc:
+        print(f"[PaperAlchemy-TemplateSelector] deterministic selection failed: {exc}")
+        return {
+            "template_candidates": [],
+            "selected_template": None,
+            "selected_template_path": None,
+        }
+
+    top_k = max(1, int(constraints.get("template_candidate_top_k", 3)))
+    ranked_matches = list(selection_result.get("ranking") or [])
+    candidates = [
+        candidate
+        for candidate in (
+            _candidate_from_ranked_match(item, project_root)
+            for item in ranked_matches[:top_k]
+        )
+        if candidate is not None
+    ]
+
+    selected = _candidate_from_ranked_match(selection_result, project_root)
+    if selected is None:
+        print("[PaperAlchemy-TemplateSelector] selected template candidate is invalid.")
+        return {
+            "template_candidates": [],
+            "selected_template": None,
+            "selected_template_path": None,
+        }
 
     if not candidates:
-        print("[PaperAlchemy-TemplateSelector] no template candidates were selected.")
-        return {}
-
-    template_link_map = state.get("template_link_map") or {}
-    selection_mode = str(constraints.get("template_selection_mode", "human")).strip().lower()
-    configured_id = str(
-        constraints.get("selected_template_id")
-        or constraints.get("template_selection_id")
-        or ""
-    ).strip()
-
-    selected = _pick_candidate_by_id(candidates, configured_id)
-    if selected is None:
-        if selection_mode in {"human", "human_in_the_loop", "manual"}:
-            selected = _choose_template_with_human(candidates, template_link_map)
-        else:
-            selected = candidates[0]
+        candidates = [selected]
 
     print(
         "[PaperAlchemy-TemplateSelector] selected="
@@ -201,6 +189,7 @@ def template_selector_node(state: PlannerState) -> dict[str, Any]:
     return {
         "template_candidates": candidates,
         "selected_template": selected,
+        "selected_template_path": str(selection_result.get("selected_template_path") or ""),
         "generation_constraints": {
             **constraints,
             "selected_template_id": selected.template_id,
@@ -241,8 +230,8 @@ def template_binder_node(state: PlannerState) -> dict[str, Any]:
     planner_feedback_history = state.get("planner_feedback_history") or []
 
     user_msg = TEMPLATE_BINDER_USER_PROMPT_TEMPLATE.format(
-        structured_paper_json=structured_paper.model_dump_json(indent=2, ensure_ascii=False),
-        semantic_plan_json=semantic_plan.model_dump_json(indent=2, ensure_ascii=False),
+        structured_paper_json=to_pretty_json(structured_paper),
+        semantic_plan_json=to_pretty_json(semantic_plan),
         template_candidates_json=json.dumps(
             [candidate.model_dump() for candidate in candidates],
             indent=2,
@@ -265,7 +254,6 @@ def template_binder_node(state: PlannerState) -> dict[str, Any]:
         if not result:
             raise ValueError("Template binder returned empty result")
 
-        # Enforce consistency with selected candidate to reduce downstream ambiguity.
         result.plan_meta.planning_mode = "hybrid_template_bind"
         result.template_selection.selected_template_id = selected.template_id
         result.template_selection.selected_root_dir = selected.root_dir
@@ -282,14 +270,14 @@ def template_binder_node(state: PlannerState) -> dict[str, Any]:
 
 def build_planner_graph(max_retry: int = 2):
     workflow = StateGraph(PlannerState)
-    workflow.add_node("semantic_planner", semantic_planner_node)
     workflow.add_node("template_selector", template_selector_node)
+    workflow.add_node("semantic_planner", semantic_planner_node)
     workflow.add_node("template_binder", template_binder_node)
     workflow.add_node("planner_critic", planner_critic_node)
 
-    workflow.set_entry_point("semantic_planner")
-    workflow.add_edge("semantic_planner", "template_selector")
-    workflow.add_edge("template_selector", "template_binder")
+    workflow.set_entry_point("template_selector")
+    workflow.add_edge("template_selector", "semantic_planner")
+    workflow.add_edge("semantic_planner", "template_binder")
     workflow.add_edge("template_binder", "planner_critic")
 
     workflow.add_conditional_edges(
@@ -306,16 +294,32 @@ def run_planner_agent(
     paper_folder_name: str,
     structured_data: StructuredPaper,
     generation_constraints: dict[str, Any] | None = None,
+    user_constraints: dict[str, Any] | None = None,
     max_retry: int = 2,
 ):
     current_file = Path(__file__).resolve()
     project_root = current_file.parent.parent
 
-    templates_dir = project_root / "templates"
-    template_links_path = templates_dir / "template_link.json"
+    constraints = generation_constraints or {}
+    synced_assets = ensure_autopage_template_assets(
+        project_root=project_root,
+        force=bool(constraints.get("force_template_sync")),
+    )
+
+    templates_dir = synced_assets.templates_dir
+    template_links_path = synced_assets.template_link_json_path
     module_index_path = project_root / "data" / "collectors" / "modules" / "module_index.json"
 
-    constraints = generation_constraints or {}
+    if synced_assets.missing_template_ids:
+        print(
+            "[PaperAlchemy-Planner] warning: missing AutoPage templates for tagged ids: "
+            f"{synced_assets.missing_template_ids[:8]}"
+        )
+
+    constraints = {
+        **constraints,
+        "template_tags_json_path": str(synced_assets.tags_json_path),
+    }
     max_templates = int(constraints.get("max_templates_for_planner", 120))
     max_entry_candidates = int(constraints.get("max_entry_candidates", 3))
 
@@ -345,16 +349,18 @@ def run_planner_agent(
         "template_link_map": template_link_map,
         "module_index": module_index,
         "generation_constraints": constraints,
+        "user_constraints": user_constraints or {},
         "semantic_plan": None,
         "template_candidates": [],
         "selected_template": None,
+        "selected_template_path": None,
         "planner_feedback_history": [],
         "page_plan": None,
         "planner_critic_passed": False,
         "planner_retry_count": 0,
     }
 
-    print("[PaperAlchemy-Planner] running SemanticPlanner + Selector + Binder + Critic graph...")
+    print("[PaperAlchemy-Planner] running Selector + SemanticPlanner + Binder + Critic graph...")
     for _ in app.stream(initial_state, thread):
         pass
 

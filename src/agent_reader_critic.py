@@ -5,6 +5,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from src.json_utils import to_pretty_json
 from src.llm import get_llm
 from src.prompts import CRITIC_SYSTEM_PROMPT
 from src.schemas import CriticReport, StructuredPaper
@@ -223,7 +224,7 @@ def critic_node(state: ReaderState) -> dict[str, Any]:
     critiques = run_code_critic(structured_paper, assets_list)
 
     if structured_paper:
-        paper_json_str = structured_paper.model_dump_json(indent=2, ensure_ascii=False)
+        paper_json_str = to_pretty_json(structured_paper)
         report = run_semantic_critic(
             raw_markdown=raw_markdown,
             structured_json=paper_json_str,

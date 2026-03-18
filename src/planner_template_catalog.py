@@ -45,7 +45,7 @@ def _iter_files_limited(root: Path, max_depth: int) -> list[Path]:
     return files
 
 
-def _find_entry_html_candidates(template_root: Path, max_candidates: int = 3) -> list[str]:
+def find_entry_html_candidates(template_root: Path, max_candidates: int = 3) -> list[str]:
     candidates: list[Path] = []
     root_index = template_root / "index.html"
     if root_index.exists():
@@ -69,6 +69,10 @@ def _find_entry_html_candidates(template_root: Path, max_candidates: int = 3) ->
             break
 
     return [str(p.relative_to(template_root)).replace("\\", "/") for p in candidates[:max_candidates]]
+
+
+def _find_entry_html_candidates(template_root: Path, max_candidates: int = 3) -> list[str]:
+    return find_entry_html_candidates(template_root, max_candidates=max_candidates)
 
 
 def _sample_files(template_root: Path, suffixes: set[str], max_files: int = 5) -> list[str]:
@@ -96,7 +100,7 @@ def build_template_catalog(
 
     catalog: list[dict[str, Any]] = []
     for template_dir in template_dirs:
-        entry_candidates = _find_entry_html_candidates(template_dir, max_candidates=max_entry_candidates)
+        entry_candidates = find_entry_html_candidates(template_dir, max_candidates=max_entry_candidates)
         if not entry_candidates:
             continue
 

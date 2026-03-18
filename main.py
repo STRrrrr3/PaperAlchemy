@@ -1,195 +1,299 @@
-﻿import json
-import re
+import json
 from pathlib import Path
+from typing import Any
+
+try:
+    import gradio as gr
+except ImportError as exc:
+    raise RuntimeError("Gradio is required to launch the PaperAlchemy web UI.") from exc
 
 from src.agent_coder import run_coder_agent
 from src.agent_planner import run_planner_agent
 from src.agent_reader import run_reader_agent
+from src.deterministic_template_selector import score_and_select_template
 from src.parser import parse_pdf
 from src.schemas import CoderArtifact, PagePlan, StructuredPaper
+from src.template_resources import ensure_autopage_template_assets
 
 PROJECT_ROOT = Path(__file__).resolve().parent
+INPUT_DIR = PROJECT_ROOT / "data" / "input"
+OUTPUT_DIR = PROJECT_ROOT / "data" / "output"
 
 
 def load_cached_structured_data(path: Path) -> StructuredPaper | None:
     if not path.exists():
         return None
 
-    print("[PaperAlchemy]发现本地已有结构化存档，正在加载...")
+    print("[PaperAlchemy] Found cached structured paper, loading...")
     try:
         with open(path, "r", encoding="utf-8") as f:
             data_dict = json.load(f)
         structured_data = StructuredPaper(**data_dict)
-        print(f"[PaperAlchemy]成功加载存档: {structured_data.paper_title}")
+        print(f"[PaperAlchemy] Structured paper loaded: {structured_data.paper_title}")
         return structured_data
-    except Exception as e:
-        print(f"[PaperAlchemy]🤡存档损坏，将重新运行 Reader: {e}🤡")
+    except Exception as exc:
+        print(f"[PaperAlchemy] Structured cache is invalid, rerunning Reader: {exc}")
         return None
-
-
-def load_cached_page_plan(path: Path) -> PagePlan | None:
-    if not path.exists():
-        return None
-
-    print("[PaperAlchemy]发现本地已有页面规划存档，正在加载...")
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            plan_dict = json.load(f)
-        page_plan = PagePlan(**plan_dict)
-        print(
-            "[PaperAlchemy]成功加载页面规划: "
-            f"{page_plan.template_selection.selected_template_id}"
-        )
-        return page_plan
-    except Exception as e:
-        print(f"[PaperAlchemy]页面规划存档损坏，将重新运行 Planner: {e}")
-        return None
-
-
-def load_cached_coder_artifact(path: Path) -> CoderArtifact | None:
-    if not path.exists():
-        return None
-
-    print("[PaperAlchemy]发现本地已有网页构建存档，正在加载...")
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            artifact_dict = json.load(f)
-        artifact = CoderArtifact(**artifact_dict)
-        if "v1-clean-body-rewrite" not in artifact.notes:
-            print("[PaperAlchemy]检测到旧版 Coder 产物，准备重新生成...")
-            return None
-
-        entry_path = Path(artifact.entry_html)
-        if not entry_path.exists():
-            print("[PaperAlchemy]缓存网页入口不存在，准备重新生成...")
-            return None
-
-        html_text = entry_path.read_text(encoding="utf-8", errors="ignore")
-        title_count = len(re.findall(r"<title\b", html_text, flags=re.IGNORECASE))
-        if title_count != 1:
-            print("[PaperAlchemy]检测到缓存页面结构异常（title 标签数量不正确），准备重新生成...")
-            return None
-
-        print(f"[PaperAlchemy]成功加载网页构建存档: {artifact.entry_html}")
-        return artifact
-    except Exception as e:
-        print(f"[PaperAlchemy]网页构建存档损坏，将重新运行 Coder: {e}")
-        return None
-
-
-def ensure_parsed_output(pdf_filename: str, output_md_path: Path) -> bool:
-    if output_md_path.exists():
-        print("[PaperAlchemy]已有解析数据，跳过。")
-        return True
-
-    print("[PaperAlchemy]解析 PDF...")
-    parse_pdf(pdf_filename)
-
-    if not output_md_path.exists():
-        print(f"[PaperAlchemy]🤡解析阶段失败，未找到输出文件: {output_md_path}🤡")
-        return False
-
-    return True
 
 
 def save_structured_data(path: Path, structured_data: StructuredPaper) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    print("[PaperAlchemy]保存结构化数据到硬盘...")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(structured_data.model_dump(), f, indent=2, ensure_ascii=False)
 
 
 def save_page_plan(path: Path, page_plan: PagePlan) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    print("[PaperAlchemy]保存页面规划到硬盘...")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(page_plan.model_dump(), f, indent=2, ensure_ascii=False)
 
 
 def save_coder_artifact(path: Path, artifact: CoderArtifact) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    print("[PaperAlchemy]保存网页构建结果到硬盘...")
     with open(path, "w", encoding="utf-8") as f:
         json.dump(artifact.model_dump(), f, indent=2, ensure_ascii=False)
 
 
-def main(pdf_filename: str) -> None:
-    input_path = PROJECT_ROOT / "data" / "input" / pdf_filename
-    if not input_path.exists():
-        print(f"[PaperAlchemy]🤡输入文件不存在: {input_path}🤡")
-        return
-
-    paper_folder_name = Path(pdf_filename).stem
-    output_dir = PROJECT_ROOT / "data" / "output" / paper_folder_name
+def ensure_parsed_output(pdf_filename: str, output_dir: Path) -> bool:
     output_md_path = output_dir / "full_paper.md"
-    structured_json_path = output_dir / "structured_paper.json"
-    planner_json_path = output_dir / "page_plan.json"
-    coder_json_path = output_dir / "coder_artifact.json"
+    parsed_json_path = output_dir / "parsed_data.json"
+    if output_md_path.exists() and parsed_json_path.exists():
+        print("[PaperAlchemy] Parsed PDF assets already exist, skipping parser.")
+        return True
 
-    if not ensure_parsed_output(pdf_filename, output_md_path):
-        return
+    print("[PaperAlchemy] Parsing PDF...")
+    parse_pdf(pdf_filename)
 
-    structured_data = load_cached_structured_data(structured_json_path)
+    if output_md_path.exists() and parsed_json_path.exists():
+        return True
 
-    if not structured_data:
-        print("[PaperAlchemy]启动 Reader Agent...")
-        structured_data = run_reader_agent(paper_folder_name)
+    print("[PaperAlchemy] Parser output is incomplete: missing full_paper.md or parsed_data.json.")
+    return False
 
+
+def list_available_pdfs() -> list[str]:
+    INPUT_DIR.mkdir(parents=True, exist_ok=True)
+    return sorted(path.name for path in INPUT_DIR.glob("*.pdf"))
+
+
+def build_user_constraints(
+    background_color: str,
+    density: str,
+    navigation: str,
+    layout: str,
+) -> dict[str, str]:
+    return {
+        "background_color": background_color,
+        "page_density": density,
+        "has_navigation": navigation,
+        "image_layout": layout,
+    }
+
+
+def _build_planner_constraints(tags_json_path: Path) -> dict[str, Any]:
+    return {
+        "target_framework": "static-html",
+        "max_templates_for_planner": 120,
+        "max_entry_candidates": 3,
+        "template_candidate_top_k": 3,
+        "max_blocks": 10,
+        "min_blocks": 6,
+        "template_tags_json_path": str(tags_json_path),
+    }
+
+
+def _format_selection_summary(
+    page_plan: PagePlan,
+    selection_preview: dict[str, Any],
+) -> dict[str, Any]:
+    selected_root_dir = page_plan.template_selection.selected_root_dir
+    selected_root_path = (PROJECT_ROOT / selected_root_dir).resolve()
+
+    return {
+        "selected_template_id": page_plan.template_selection.selected_template_id,
+        "selected_template_path": str(selected_root_path),
+        "selected_entry_html": page_plan.template_selection.selected_entry_html,
+        "selection_rationale": selection_preview.get("selection_rationale"),
+        "score": selection_preview.get("score"),
+        "matched_features": selection_preview.get("matched_features"),
+        "mismatched_features": selection_preview.get("mismatched_features"),
+        "template_tags": selection_preview.get("template_tags"),
+        "ranking": list(selection_preview.get("ranking") or [])[:3],
+    }
+
+
+def run_generation_request(
+    pdf_filename: str,
+    background_color: str,
+    density: str,
+    navigation: str,
+    layout: str,
+) -> tuple[str, dict[str, Any], str, str]:
+    run_log: list[str] = []
+
+    def log(message: str) -> None:
+        print(message)
+        run_log.append(message)
+
+    selection_payload: dict[str, Any] = {}
+    page_plan_path_text = ""
+    entry_html_path_text = ""
+
+    try:
+        safe_pdf_filename = str(pdf_filename or "").strip()
+        if not safe_pdf_filename:
+            raise ValueError("Please select a PDF from data/input before generating.")
+
+        input_path = INPUT_DIR / safe_pdf_filename
+        if not input_path.exists():
+            raise FileNotFoundError(f"Input PDF not found: {input_path}")
+
+        user_constraints = build_user_constraints(
+            background_color=background_color,
+            density=density,
+            navigation=navigation,
+            layout=layout,
+        )
+        log(f"[UI] user_constraints={json.dumps(user_constraints, ensure_ascii=False)}")
+
+        synced_assets = ensure_autopage_template_assets(PROJECT_ROOT)
+        log(f"[Assets] template resources ready at {synced_assets.templates_dir}")
+
+        selection_preview = score_and_select_template(
+            user_constraints=user_constraints,
+            tags_json_path=synced_assets.tags_json_path,
+        )
+        log(
+            "[Selector] preview selected template="
+            f"{selection_preview['selected_template_id']} "
+            f"(score={selection_preview['score']})"
+        )
+
+        paper_folder_name = Path(safe_pdf_filename).stem
+        output_dir = OUTPUT_DIR / paper_folder_name
+        structured_json_path = output_dir / "structured_paper.json"
+        planner_json_path = output_dir / "page_plan.json"
+        coder_json_path = output_dir / "coder_artifact.json"
+
+        if not ensure_parsed_output(safe_pdf_filename, output_dir):
+            raise RuntimeError("PDF parsing failed. Please inspect the parser output logs.")
+
+        structured_data = load_cached_structured_data(structured_json_path)
         if not structured_data:
-            print("[PaperAlchemy]🤡Reader Agent 失败，流程终止🤡")
-            return
+            log("[Reader] running reader agent...")
+            structured_data = run_reader_agent(paper_folder_name)
+            if not structured_data:
+                raise RuntimeError("Reader agent failed to produce structured paper data.")
+            save_structured_data(structured_json_path, structured_data)
+            log(f"[Reader] saved structured paper to {structured_json_path}")
+        else:
+            log(f"[Reader] reused cached structured paper from {structured_json_path}")
 
-        save_structured_data(structured_json_path, structured_data)
-
-    print("[PaperAlchemy]Reader 阶段数据准备就绪。")
-
-    page_plan = load_cached_page_plan(planner_json_path)
-    if not page_plan:
-        print("[PaperAlchemy]启动 Planner Agent...")
-        planner_constraints = {
-            "target_framework": "static-html",
-            "max_templates_for_planner": 120,
-            "max_entry_candidates": 3,
-            "template_candidate_top_k": 3,
-            "template_selection_mode": "human",
-            "max_blocks": 10,
-            "min_blocks": 6,
-        }
+        log("[Planner] running template-first planner graph...")
         page_plan = run_planner_agent(
             paper_folder_name=paper_folder_name,
             structured_data=structured_data,
-            generation_constraints=planner_constraints,
+            generation_constraints=_build_planner_constraints(synced_assets.tags_json_path),
+            user_constraints=user_constraints,
             max_retry=2,
         )
-
         if not page_plan:
-            print("[PaperAlchemy]🤡Planner Agent 失败，流程终止🤡")
-            return
+            raise RuntimeError("Planner agent failed to produce a page plan.")
 
         save_page_plan(planner_json_path, page_plan)
+        page_plan_path_text = str(planner_json_path)
+        log(
+            "[Planner] saved page plan with template "
+            f"{page_plan.template_selection.selected_template_id}"
+        )
 
-    print("[PaperAlchemy]Planner 阶段数据准备就绪。")
-
-    coder_artifact = load_cached_coder_artifact(coder_json_path)
-    if not coder_artifact:
-        print("[PaperAlchemy]启动 Coder Agent...")
+        log("[Coder] running coder agent...")
         coder_artifact = run_coder_agent(
             paper_folder_name=paper_folder_name,
             structured_data=structured_data,
             page_plan=page_plan,
             max_retry=1,
         )
-
         if not coder_artifact:
-            print("[PaperAlchemy]🤡Coder Agent 失败，流程终止🤡")
-            return
+            raise RuntimeError("Coder agent failed to build the final webpage.")
 
         save_coder_artifact(coder_json_path, coder_artifact)
+        entry_html_path_text = coder_artifact.entry_html
+        log(f"[Coder] generated entry html at {coder_artifact.entry_html}")
 
-    print("[PaperAlchemy]Coder 阶段数据准备就绪。")
-    print(f"[PaperAlchemy]网页入口文件: {coder_artifact.entry_html}")
+        selection_payload = _format_selection_summary(page_plan, selection_preview)
+        log("[Done] generation completed successfully.")
+    except Exception as exc:
+        log(f"[Error] {exc}")
+
+    return "\n".join(run_log), selection_payload, page_plan_path_text, entry_html_path_text
+
+
+def build_app() -> gr.Blocks:
+    available_pdfs = list_available_pdfs()
+    default_pdf = available_pdfs[0] if available_pdfs else None
+
+    with gr.Blocks(title="PaperAlchemy Template-First Generator") as demo:
+        gr.Markdown(
+            """
+            # PaperAlchemy
+            Template selection now happens before LangGraph planning. Choose a local PDF and the visual constraints,
+            then PaperAlchemy will deterministically select a local template and run the full pipeline.
+            """
+        )
+
+        pdf_dropdown = gr.Dropdown(
+            choices=available_pdfs,
+            value=default_pdf,
+            allow_custom_value=True,
+            label="Paper PDF",
+        )
+
+        with gr.Row():
+            background_color = gr.Radio(
+                choices=["light", "dark"],
+                value="light",
+                label="Background Color",
+            )
+            density = gr.Radio(
+                choices=["spacious", "compact"],
+                value="spacious",
+                label="Density",
+            )
+
+        with gr.Row():
+            navigation = gr.Radio(
+                choices=["yes", "no"],
+                value="no",
+                label="Navigation",
+            )
+            layout = gr.Radio(
+                choices=["parallelism", "rotation"],
+                value="parallelism",
+                label="Layout",
+            )
+
+        generate_button = gr.Button("Generate", variant="primary")
+
+        run_log = gr.Textbox(label="Run Log", lines=18)
+        selection_json = gr.JSON(label="Selected Template")
+        page_plan_path = gr.Textbox(label="Saved Page Plan Path")
+        entry_html_path = gr.Textbox(label="Generated Entry HTML Path")
+
+        generate_button.click(
+            fn=run_generation_request,
+            inputs=[pdf_dropdown, background_color, density, navigation, layout],
+            outputs=[run_log, selection_json, page_plan_path, entry_html_path],
+            api_name="generate",
+        )
+
+    return demo
+
+
+def main() -> None:
+    app = build_app()
+    app.launch(server_name="127.0.0.1", server_port=7860, share=False)
 
 
 if __name__ == "__main__":
-    target_pdf = "Achilles.pdf"
-    main(target_pdf)
+    main()
