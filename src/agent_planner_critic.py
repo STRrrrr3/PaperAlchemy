@@ -4,6 +4,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from src.json_utils import to_pretty_json
 from src.llm import get_llm
 from src.prompts import PLANNER_CRITIC_SYSTEM_PROMPT
 from src.schemas import PagePlan, PlannerCriticReport, StructuredPaper, TemplateCandidate
@@ -144,11 +145,11 @@ def run_planner_semantic_critic(
 
     user_msg = (
         "### STRUCTURED_PAPER_JSON\n"
-        f"{structured_paper.model_dump_json(indent=2, ensure_ascii=False)}\n\n"
+        f"{to_pretty_json(structured_paper)}\n\n"
         "### TEMPLATE_CATALOG_JSON\n"
         f"{json.dumps(template_catalog, indent=2, ensure_ascii=False)}\n\n"
         "### CANDIDATE_PAGE_PLAN_JSON\n"
-        f"{page_plan.model_dump_json(indent=2, ensure_ascii=False)}\n"
+        f"{to_pretty_json(page_plan)}\n"
     )
 
     try:
