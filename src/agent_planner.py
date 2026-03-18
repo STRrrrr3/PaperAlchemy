@@ -24,6 +24,8 @@ TEMPLATE_BINDER_DOM_SYSTEM_PROMPT = """You are Template Binder Planner (Stage B)
 You are a frontend integration expert who preserves the original template DOM.
 Your job is to bind a semantic paper plan onto the selected template candidate and output final PagePlan.
 
+The final PagePlan will be reviewed by a human before rendering, so it must communicate clearly what content you want to put on the webpage and what content you intentionally leave out.
+
 Rules:
 1. selected template must come from TEMPLATE_CANDIDATES_JSON.
 2. selected_entry_html must equal chosen_entry_html of selected candidate.
@@ -36,12 +38,25 @@ Rules:
 9. dom_mapping values must be HTML/text strings intended for inner-content injection into the matched element.
 10. Rich HTML is allowed in dom_mapping values, including inline formatting and image tags.
 11. When referencing paper figures, only use grounded figure_paths from STRUCTURED_PAPER_JSON for src/href values. Do not invent asset paths.
-12. Populate selectors_to_remove with CSS selectors for residual template garbage: dummy text, legacy paper content, placeholder images, irrelevant widgets, stale leaderboards, or unrelated footers.
-13. selectors_to_remove must target the wrapper element that should be deleted cleanly with DOM decompose(), not a child text node.
-14. Do not include selectors_to_remove entries that would delete newly injected paper content or essential layout scaffolding.
-15. Target content containers instead of root layout wrappers whenever possible so the original layout and CSS remain intact.
-16. Keep the rest of PagePlan coherent for downstream audit and asset-copy steps.
-17. Return strict JSON matching PagePlan schema only.
+12. Be selective: the webpage should present the most important content, not every paper section. Omit or merge lower-value material when appropriate.
+13. If author names and affiliations are visible in STRUCTURED_PAPER_JSON, consider surfacing them in a hero/about/meta area rather than dropping them entirely.
+14. Write decision_summary.design_goal, decision_summary.novelty_points, decision_summary.tradeoffs, and open_questions in plain human-readable language so a reviewer can understand your editorial intent quickly.
+15. Use open_questions to surface human-review decisions such as:
+   - which sections should be cut or merged,
+   - which figures are worth keeping,
+   - whether author/affiliation metadata should be shown prominently,
+   - whether evaluation detail is too dense or too sparse.
+16. You must STRICTLY follow any instructions provided in HUMAN_DIRECTIVES.
+   - If the human says to omit a section, do not bind it into the final PagePlan.
+   - If the human says to emphasize something, map it to a prominent region.
+   - If the human says to simplify or shorten, reduce block density accordingly.
+17. Populate selectors_to_remove with CSS selectors for residual template garbage: dummy text, legacy paper content, placeholder images, irrelevant widgets, stale leaderboards, or unrelated footers.
+18. selectors_to_remove must target the wrapper element that should be deleted cleanly with DOM decompose(), not a child text node.
+19. Do not include selectors_to_remove entries that overlap any dom_mapping target, any wrapper that contains a dom_mapping target, or any child that will be part of injected paper content.
+20. Do not include selectors_to_remove entries that would delete newly injected paper content or essential layout scaffolding.
+21. Target content containers instead of root layout wrappers whenever possible so the original layout and CSS remain intact.
+22. Keep the rest of PagePlan coherent for downstream audit and asset-copy steps.
+23. Return strict JSON matching PagePlan schema only.
 """
 
 
@@ -263,10 +278,12 @@ def semantic_planner_node(state: PlannerState) -> dict[str, Any]:
         return {"semantic_plan": None, "page_plan": None}
 
     feedback_history = state.get("planner_feedback_history") or []
+    human_directives = str(state.get("human_directives") or "").strip()
 
     user_msg = SEMANTIC_PLANNER_USER_PROMPT_TEMPLATE.format(
         structured_paper_json=to_pretty_json(structured_paper),
         generation_constraints_json=json.dumps(constraints, indent=2, ensure_ascii=False),
+        human_directives=human_directives,
         prior_feedback=json.dumps(feedback_history, indent=2, ensure_ascii=False),
     )
 
@@ -420,6 +437,7 @@ def template_binder_node(state: PlannerState) -> dict[str, Any]:
     template_link_map = state.get("template_link_map") or {}
     module_index = state.get("module_index") or {}
     planner_feedback_history = state.get("planner_feedback_history") or []
+    human_directives = str(state.get("human_directives") or "").strip()
 
     user_msg = (
         "### STRUCTURED_PAPER_JSON\n"
@@ -437,13 +455,16 @@ def template_binder_node(state: PlannerState) -> dict[str, Any]:
         "### CLEANUP_OBJECTIVE\n"
         "Identify selectors_to_remove for residual template garbage such as lorem ipsum text, old paper abstracts, "
         "placeholder images, irrelevant widgets, stale leaderboards, or unrelated footers. Target wrapper elements "
-        "that should be fully deleted with DOM decompose().\n\n"
+        "that should be fully deleted with DOM decompose(), but never any selector that overlaps with dom_mapping "
+        "targets or their descendants/ancestors.\n\n"
         "### TEMPLATE_LINK_MAP_JSON\n"
         f"{json.dumps(template_link_map, indent=2, ensure_ascii=False)}\n\n"
         "### MODULE_INDEX_JSON\n"
         f"{json.dumps(module_index, indent=2, ensure_ascii=False)}\n\n"
         "### GENERATION_CONSTRAINTS_JSON\n"
         f"{json.dumps(constraints, indent=2, ensure_ascii=False)}\n\n"
+        "### HUMAN_DIRECTIVES\n"
+        f"{human_directives}\n\n"
         "### PRIOR_FEEDBACK\n"
         f"{json.dumps(planner_feedback_history, indent=2, ensure_ascii=False)}\n\n"
         "Generate final PagePlan JSON only."
@@ -521,6 +542,7 @@ def run_planner_agent(
     structured_data: StructuredPaper,
     generation_constraints: dict[str, Any] | None = None,
     user_constraints: dict[str, Any] | None = None,
+    human_directives: str = "",
     max_retry: int = 2,
 ):
     current_file = Path(__file__).resolve()
@@ -576,6 +598,7 @@ def run_planner_agent(
         "module_index": module_index,
         "generation_constraints": constraints,
         "user_constraints": user_constraints or {},
+        "human_directives": str(human_directives or ""),
         "semantic_plan": None,
         "template_candidates": [],
         "selected_template": None,

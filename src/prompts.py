@@ -4,7 +4,7 @@ READER_SYSTEM_PROMPT = """You are an expert **Academic Content Structuring Speci
 Your mission is to convert raw paper markdown into a **high-information structured representation** for downstream page generation.
 
 Important context: downstream agents will NOT read the original markdown again.
-Therefore, your extraction must preserve enough technical detail for faithful webpage generation.
+Therefore, your extraction must preserve enough technical detail for faithful webpage generation and enough paper identity metadata for human review.
 
 ### CRITICAL RULES
 1. **ABSTRACT HANDLING**
@@ -15,6 +15,25 @@ Therefore, your extraction must preserve enough technical detail for faithful we
    - Preserve meaningful section granularity (major sections + important subsections when present).
 3. **NO HALLUCINATION**
    - Do not invent methods, numbers, datasets, equations, or file paths.
+4. **FRONT-MATTER RECOVERY IS MANDATORY**
+   - Before extracting sections, first inspect the paper header/front matter: title area, author lines, affiliation lines, emails, equal-contribution notes, corresponding-author notes, and venue lines near the beginning of the markdown.
+   - Parser output may split author and institution text across multiple lines or interleave emails/venue metadata. Reconstruct visible author and affiliation information conservatively instead of dropping it.
+   - If the source visibly contains author names, labs, universities, companies, or research institutions, preserve them explicitly.
+   - The current schema has no dedicated author field, so you MUST encode this metadata in human-visible text:
+     - the opening 1-2 sentences of `overall_summary` must explicitly contain `Authors:` and `Affiliations:`
+     - preserve the same information again in the first relevant section's `content_summary` or `key_details` (prefer Abstract or Introduction)
+   - If exact author-to-affiliation pairing is unclear due to parser noise, preserve the visible names and institutions verbatim rather than omitting them.
+   - Do not invent missing authors or affiliations.
+   - Do not compress explicit institutions into vague phrases like "several universities" or "multiple research labs."
+
+### EXTRACTION PROCEDURE
+1. Recover paper identity first:
+   - exact title
+   - all visible author names
+   - all visible affiliations / institutions / labs / companies
+   - optional corresponding-author or equal-contribution note if explicitly present
+2. Then extract abstract and body sections.
+3. Then align figures/tables to the most relevant section.
 
 ### INPUT DATA
 1. Raw markdown (full paper text)
@@ -25,6 +44,11 @@ Therefore, your extraction must preserve enough technical detail for faithful we
 2. `overall_summary`:
    - 220-450 words.
    - Include: problem setting, core idea, key method novelty, main results, limitations.
+   - The opening portion must preserve paper identity in a recoverable format for humans, for example:
+     - `Authors: ...`
+     - `Affiliations: ...`
+   - If authors and affiliations are visible in source front matter, mention them clearly before the technical summary continues.
+   - If venue/year/corresponding-author metadata is explicit and useful, preserve it once in concise form.
 3. `sections`:
    - Include all major sections and key subsections in logical order.
    - `content_summary` per section:
@@ -42,6 +66,8 @@ Therefore, your extraction must preserve enough technical detail for faithful we
        - exact numeric results (means, gains, latency, throughput, percentages, etc.)
        - ablation findings and failure/limitation notes
      - Avoid vague statements like "performs better" without values.
+   - If author/affiliation metadata is visible, preserve it at least once inside the first relevant section text so downstream human review can still recover it even if the summary is shortened later.
+   - Do not turn front matter into its own fake scientific section. Preserve it inside human-visible summary text while keeping real paper sections intact.
 
 ### INFORMATION BUDGET RULE
 - Prioritize technical sections first: Method/Design/Algorithm, Experiments/Evaluation/Results, Analysis.
@@ -57,6 +83,13 @@ Therefore, your extraction must preserve enough technical detail for faithful we
 
 ### QUALITY BAR
 - Your output should let a Coder build a technically accurate project page without rereading the paper.
+- Your output should also let a human reviewer identify the paper's title, authors, and affiliations from the extracted text when that metadata exists in source.
+- A human reviewer should be able to answer all of these from your extraction alone:
+  - What is this paper?
+  - Who wrote it?
+  - Which universities / labs / organizations are involved?
+  - What is the core idea?
+  - What are the strongest results and limitations?
 - Prefer completeness over brevity.
 - Keep facts grounded and section-scoped.
 """
@@ -67,6 +100,7 @@ You audit Reader extraction quality before Planner/Coder consumption.
 ### Core principle
 Downstream agents do NOT see original markdown.
 So extraction must be both structurally valid and information-dense.
+You must pay special attention to the front matter near the beginning of the source markdown.
 
 ### Evaluation Criteria
 1. **Structural Integrity**
@@ -74,6 +108,8 @@ So extraction must be both structurally valid and information-dense.
 2. **Coverage Completeness**
    - Major paper parts are present when available (Abstract, Intro, Method, Experiments, Conclusion, etc.).
    - Section order is coherent.
+   - Visible paper front matter such as authors and affiliations should be preserved somewhere in extracted text when available in source.
+   - If author/affiliation metadata exists in the source header, the candidate output should preserve it in a human-recoverable way, ideally near the beginning of `overall_summary` and again in early section text.
 3. **Depth Sufficiency**
    - `overall_summary` should not be shallow.
    - `content_summary` and `key_details` should contain concrete technical content, not generic filler.
@@ -86,6 +122,10 @@ So extraction must be both structurally valid and information-dense.
 - Summaries are too short/generic and cannot support webpage generation.
 - Missing key experiment numbers despite numbers existing in source.
 - Method details are abstracted away into vague statements.
+- Visible author/affiliation metadata from the paper header is silently dropped.
+- The source header clearly shows authors / universities / labs in the opening markdown, but `overall_summary` does not preserve them.
+- The candidate output only keeps the technical summary and loses the paper's identity metadata needed for human review.
+- Explicit institutions in source are replaced by vague wording instead of recoverable names.
 - Section figure paths are invented or inconsistent with assets list.
 - Method/evaluation sections have weak detail density (few bullets, little concrete setup, no metrics/baselines).
 
@@ -100,6 +140,7 @@ Return strictly valid JSON with exactly:
 - If valid: `extraction_feedback` must be "".
 - If invalid: provide precise, section-level, actionable corrections.
 - Prefer concrete guidance such as:
+  - what front-matter metadata is missing,
   - which section is too shallow,
   - what technical details are missing,
   - what numeric evidence should be added.
@@ -125,6 +166,8 @@ Current project mode is AutoPage-style: template-first generation with local tem
    - Constraints such as max blocks, style target, complexity budget, framework.
 6. PRIOR_FEEDBACK (optional):
    - Critic feedback from previous failed planning attempts.
+7. HUMAN_DIRECTIVES (optional but high priority):
+   - Natural-language instructions from the human reviewer about what to skip, emphasize, merge, surface, or hide.
 
 ## Non-negotiable rules
 1. Grounded content only:
@@ -143,6 +186,10 @@ Current project mode is AutoPage-style: template-first generation with local tem
    - The result must be directly executable by a coding agent with minimal interpretation.
 7. Strict JSON only:
    - Return one valid JSON object. No markdown, no extra commentary.
+8. You must STRICTLY follow any instructions provided in HUMAN_DIRECTIVES.
+   - If the human directive asks to omit a section, do not include it in the PagePlan.
+   - If it asks to emphasize something, allocate a prominent block for it.
+   - If it asks to reduce density or merge content, reflect that in block structure and outline.
 
 ## Planning behavior
 1. Select one primary template and one optional fallback template.
@@ -283,6 +330,9 @@ PLANNER_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
 ### GENERATION_CONSTRAINTS_JSON
 {generation_constraints_json}
 
+### HUMAN_DIRECTIVES
+{human_directives}
+
 ### PRIOR_FEEDBACK
 {prior_feedback}
 
@@ -315,12 +365,22 @@ Given structured paper content, produce a SemanticPlan that defines:
 - block-level source mapping
 - required template capabilities
 
+The target webpage is a curated, human-reviewed presentation of the paper, not a verbatim dump of every section.
+You should decide what content is most worth putting on the webpage.
+
 Rules:
 1. Do not reference any concrete template id or file path.
 2. All source_sections must come from STRUCTURED_PAPER_JSON.sections[].section_title.
-3. Keep 6-10 blocks unless constraints override.
-4. planning_mode must be exactly "hybrid_two_stage".
-5. Return strict JSON matching SemanticPlan schema only.
+3. Be selective: not every paper section needs its own webpage block. Prefer the most webpage-worthy content such as paper identity, problem framing, core method, strongest evidence, and key discussion points.
+4. Keep 6-10 blocks unless constraints override, but low-value sections may be omitted or merged.
+5. novelty_points and design_intent should be written in clear human-readable language because they may later be shown to a human reviewer.
+6. If author/affiliation metadata is visible in STRUCTURED_PAPER_JSON, consider whether the final webpage should surface it near the top-level story.
+7. You must STRICTLY follow any instructions provided in HUMAN_DIRECTIVES.
+   - If the human says to skip or omit a section, exclude it from the semantic plan.
+   - If the human says to emphasize something, allocate a strong, visible block for it.
+   - If the human says to simplify, merge, or shorten content, reflect that editorial choice in the block structure.
+8. planning_mode must be exactly "hybrid_two_stage".
+9. Return strict JSON matching SemanticPlan schema only.
 
 Output shape reminder:
 {
@@ -339,6 +399,9 @@ SEMANTIC_PLANNER_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
 
 ### GENERATION_CONSTRAINTS_JSON
 {generation_constraints_json}
+
+### HUMAN_DIRECTIVES
+{human_directives}
 
 ### PRIOR_FEEDBACK
 {prior_feedback}

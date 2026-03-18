@@ -239,6 +239,27 @@ def _inject_content_into_target(target: Tag, content: str, copied_asset_map: dic
         target.append(node)
 
 
+def _tag_contains(container: Tag, other: Tag) -> bool:
+    current = other
+    while isinstance(current, Tag):
+        if current is container:
+            return True
+        parent = current.parent
+        current = parent if isinstance(parent, Tag) else None
+    return False
+
+
+def _overlaps_injected_content(target: Tag, injected_targets: list[Tag]) -> bool:
+    for injected_target in injected_targets:
+        if target is injected_target:
+            return True
+        if _tag_contains(target, injected_target):
+            return True
+        if _tag_contains(injected_target, target):
+            return True
+    return False
+
+
 def coder_node(state: CoderState) -> dict[str, Any]:
     print(
         f"[PaperAlchemy-Coder] building site "
@@ -298,6 +319,7 @@ def coder_node(state: CoderState) -> dict[str, Any]:
     if not dom_mapping:
         print("[PaperAlchemy-Coder] warning: page_plan.dom_mapping is empty; template HTML will be preserved as-is.")
 
+    injected_targets: list[Tag] = []
     for css_selector, content in dom_mapping.items():
         selector_text = str(css_selector or "").strip()
         if not selector_text:
@@ -316,6 +338,7 @@ def coder_node(state: CoderState) -> dict[str, Any]:
         for index, target in enumerate(targets, start=1):
             try:
                 _inject_content_into_target(target, str(content or ""), copied_asset_map)
+                injected_targets.append(target)
             except Exception as exc:
                 print(
                     "[PaperAlchemy-Coder] warning: failed to inject "
@@ -339,6 +362,12 @@ def coder_node(state: CoderState) -> dict[str, Any]:
             continue
 
         for index, target in enumerate(targets, start=1):
+            if _overlaps_injected_content(target, injected_targets):
+                print(
+                    "[PaperAlchemy-Coder] warning: skipped removal selector "
+                    f"'{selector_text}' target #{index} because it overlaps injected content."
+                )
+                continue
             try:
                 target.decompose()
             except Exception as exc:

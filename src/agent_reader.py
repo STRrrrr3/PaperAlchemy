@@ -30,7 +30,12 @@ def reader_node(state: ReaderState):
         )
 
     system_msg = READER_SYSTEM_PROMPT + feedback_section
-    user_msg = f"### ASSETS LIST:\n{assets_context}\n\n### FULL RAW MARKDOWN:\n{md_content}\n"
+    user_msg = (
+        "Recover the paper's front matter before anything else. "
+        "Look carefully at the beginning of the markdown for author names, affiliations, labs, universities, "
+        "companies, equal-contribution notes, and corresponding-author notes.\n\n"
+        f"### ASSETS LIST:\n{assets_context}\n\n### FULL RAW MARKDOWN:\n{md_content}\n"
+    )
 
     try:
         result = structured_llm.invoke(

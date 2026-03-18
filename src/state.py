@@ -20,6 +20,7 @@ class PlannerState(TypedDict):
     module_index: dict[str, Any]
     generation_constraints: dict[str, Any]
     user_constraints: dict[str, Any]
+    human_directives: str
     semantic_plan: Optional[SemanticPlan]
     template_candidates: List[TemplateCandidate]
     selected_template: Optional[TemplateCandidate]
@@ -38,3 +39,13 @@ class CoderState(TypedDict):
     coder_artifact: Optional[CoderArtifact]
     coder_critic_passed: bool
     coder_retry_count: int
+
+
+class WorkflowState(TypedDict):
+    paper_folder_name: str
+    user_constraints: dict[str, str]
+    generation_constraints: dict[str, Any]
+    human_directives: str
+    structured_paper: Optional[StructuredPaper]
+    page_plan: Optional[PagePlan]
+    coder_artifact: Optional[CoderArtifact]
