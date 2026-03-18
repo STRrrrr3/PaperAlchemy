@@ -38,6 +38,10 @@ class CoderState(TypedDict):
     structured_paper: StructuredPaper
     page_plan: PagePlan
     coder_feedback_history: Annotated[List[str], operator.add]
+    visual_feedback: Annotated[List[str], operator.add]
+    visual_screenshot_path: str
+    visual_iterations: int
+    is_visually_approved: bool
     coder_artifact: Optional[CoderArtifact]
     coder_critic_passed: bool
     coder_retry_count: int
