@@ -6,3 +6,4 @@ pydantic
 python-dotenv
 docling
 beautifulsoup4
+playwright

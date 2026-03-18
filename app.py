@@ -1,15 +1,21 @@
-import html
 import json
 import re
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote, unquote, urlparse
 from uuid import uuid4
 
 try:
     import gradio as gr
 except ImportError as exc:
     raise RuntimeError("Gradio is required to launch the PaperAlchemy web UI.") from exc
+
+from bs4 import BeautifulSoup, Tag
+try:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    PlaywrightTimeoutError = RuntimeError
+    sync_playwright = None
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import MemorySaver
@@ -22,24 +28,15 @@ from src.deterministic_template_selector import score_and_select_templates
 from src.llm import get_llm
 from src.parser import parse_pdf
 from src.prompts import OVERVIEW_SYSTEM_PROMPT, OVERVIEW_USER_PROMPT_TEMPLATE
-from src.schemas import CoderArtifact, PagePlan, StructuredPaper
+from src.schemas import CoderArtifact, PagePlan, StructuredPaper, VisualTweakPlan
 from src.state import WorkflowState
 from src.template_resources import SyncedTemplateAssets, ensure_autopage_template_assets
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 INPUT_DIR = PROJECT_ROOT / "data" / "input"
 OUTPUT_DIR = PROJECT_ROOT / "data" / "output"
+PREVIEW_CACHE_DIR = OUTPUT_DIR / "_preview_cache"
 TEMPLATE_TOP_K = 5
-
-WINDOWS_ABS_PATH_PATTERN = re.compile(r"^[a-zA-Z]:[\\/]")
-LOCAL_ASSET_ATTR_PATTERN = re.compile(
-    r'(?P<prefix>\b(?:src|href|poster)\s*=\s*)(?P<quote>["\'])(?P<url>[^"\']+)(?P=quote)',
-    flags=re.IGNORECASE,
-)
-INLINE_STYLE_URL_PATTERN = re.compile(
-    r'url\((?P<quote>["\']?)(?P<url>[^)"\']+)(?P=quote)\)',
-    flags=re.IGNORECASE,
-)
 
 APP_CSS = """
 #paperalchemy-preview {
@@ -51,8 +48,10 @@ APP_CSS = """
   box-shadow: 0 18px 40px rgba(15, 23, 42, 0.08);
 }
 
-#paperalchemy-preview > div {
-  min-height: 78vh;
+#paperalchemy-preview img {
+  width: 100%;
+  height: auto;
+  display: block;
 }
 
 #paperalchemy-logs textarea {
@@ -201,77 +200,71 @@ def append_log_lines(existing_text: str, new_lines: list[str]) -> str:
     return "\n".join(merged)
 
 
-def read_text_with_fallback(path: Path) -> str:
+def _sanitize_preview_name(value: str) -> str:
+    normalized = re.sub(r"[^a-zA-Z0-9._-]+", "_", str(value or "").strip())
+    return normalized.strip("._") or "preview"
+
+
+def build_template_preview_path(candidate: dict[str, Any]) -> Path:
+    template_id = _sanitize_preview_name(str(candidate.get("template_id") or "template"))
+    entry_name = _sanitize_preview_name(Path(str(candidate.get("entry_html") or "index.html")).stem)
+    PREVIEW_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return PREVIEW_CACHE_DIR / f"{template_id}_{entry_name}.png"
+
+
+def build_final_preview_path(entry_html_path: Path) -> Path:
+    site_dir = entry_html_path.parent
+    site_dir.mkdir(parents=True, exist_ok=True)
+    return site_dir / "final_render.png"
+
+
+def take_local_screenshot(html_absolute_path: str, output_image_path: str) -> str:
+    html_path = Path(html_absolute_path).absolute()
+    image_path = Path(output_image_path).absolute()
+
+    if not html_path.exists():
+        print(f"[Preview] Screenshot skipped: HTML file not found at {html_path}")
+        return ""
+
+    if sync_playwright is None:
+        print("[Preview] Screenshot skipped: playwright is not installed.")
+        return ""
+
+    image_path.parent.mkdir(parents=True, exist_ok=True)
+    target_uri = html_path.as_uri()
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context(viewport={"width": 1920, "height": 1080})
+            page = context.new_page()
+
+            try:
+                page.goto(target_uri, wait_until="networkidle", timeout=45000)
+            except PlaywrightTimeoutError as exc:
+                print(f"[Preview] networkidle timeout for {target_uri}: {exc}. Capturing best-effort screenshot.")
+                try:
+                    page.wait_for_timeout(1500)
+                except Exception:
+                    pass
+
+            page.screenshot(path=str(image_path), full_page=True)
+            context.close()
+            browser.close()
+            return str(image_path)
+    except Exception as exc:
+        print(
+            "[Preview] Playwright screenshot failed for "
+            f"{html_path}: {exc}. Ensure `playwright` is installed and Chromium is available."
+        )
+        return ""
+
+
+def _read_text_with_fallback(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return path.read_text(encoding="latin-1")
-
-
-def _is_external_url(url: str) -> bool:
-    lower_url = url.lower()
-    return lower_url.startswith(
-        ("http://", "https://", "data:", "blob:", "mailto:", "javascript:", "#", "/file=")
-    )
-
-
-def _resolve_local_asset_path(url: str, base_dir: Path) -> Path | None:
-    clean_url = str(url or "").strip()
-    if not clean_url or _is_external_url(clean_url):
-        return None
-
-    if WINDOWS_ABS_PATH_PATTERN.match(clean_url):
-        asset_path = Path(clean_url)
-        return asset_path if asset_path.exists() and asset_path.is_file() else None
-
-    parsed = urlparse(clean_url)
-    if parsed.scheme or parsed.netloc:
-        return None
-
-    asset_path = (base_dir / Path(unquote(parsed.path))).resolve()
-    return asset_path if asset_path.exists() and asset_path.is_file() else None
-
-
-def _to_gradio_file_url(path: Path) -> str:
-    normalized = path.resolve().as_posix()
-    return f"/file={quote(normalized, safe='/:')}"
-
-
-def rewrite_local_asset_urls_for_gradio(html_text: str, entry_html_path: Path) -> str:
-    base_dir = entry_html_path.parent
-
-    def _replace_attr(match: re.Match[str]) -> str:
-        asset_path = _resolve_local_asset_path(match.group("url"), base_dir)
-        if not asset_path:
-            return match.group(0)
-        return f"{match.group('prefix')}{match.group('quote')}{_to_gradio_file_url(asset_path)}{match.group('quote')}"
-
-    rewritten = LOCAL_ASSET_ATTR_PATTERN.sub(_replace_attr, html_text)
-
-    def _replace_style_url(match: re.Match[str]) -> str:
-        asset_path = _resolve_local_asset_path(match.group("url"), base_dir)
-        if not asset_path:
-            return match.group(0)
-        return f"url({match.group('quote')}{_to_gradio_file_url(asset_path)}{match.group('quote')})"
-
-    return INLINE_STYLE_URL_PATTERN.sub(_replace_style_url, rewritten)
-
-
-def load_preview_html(entry_html_path: Path) -> str:
-    if not entry_html_path.exists():
-        raise FileNotFoundError(f"HTML file not found: {entry_html_path}")
-    html_text = read_text_with_fallback(entry_html_path)
-    return rewrite_local_asset_urls_for_gradio(html_text, entry_html_path)
-
-
-def build_placeholder_preview(message: str) -> str:
-    safe_message = html.escape(message.strip())
-    return f"""
-    <div style="padding: 32px; font-family: 'Segoe UI', sans-serif; color: #334155;">
-      <h2 style="margin: 0 0 12px;">PaperAlchemy Preview</h2>
-      <p style="margin: 0; line-height: 1.7;">{safe_message}</p>
-    </div>
-    """
 
 
 def _message_content_to_text(message: Any) -> str:
@@ -292,6 +285,188 @@ def _message_content_to_text(message: Any) -> str:
         return "\n".join(parts).strip()
 
     return str(content or "").strip()
+
+
+def _selector_component(tag: Tag) -> str:
+    tag_name = tag.name or "div"
+    element_id = tag.get("id")
+    if element_id:
+        return f"{tag_name}#{element_id}"
+
+    classes = [str(item).strip() for item in tag.get("class", []) if str(item).strip()]
+    if classes:
+        return tag_name + "".join(f".{class_name}" for class_name in classes[:3])
+
+    return tag_name
+
+
+def _selector_hint(tag: Tag, max_depth: int = 3) -> str:
+    parts: list[str] = []
+    current: Tag | None = tag
+
+    while current is not None and len(parts) < max_depth:
+        parts.append(_selector_component(current))
+        if current.get("id"):
+            break
+
+        parent = current.parent
+        current = parent if isinstance(parent, Tag) else None
+
+    return " > ".join(reversed(parts))
+
+
+def _build_html_outline(html_text: str, max_lines: int = 120) -> str:
+    soup = BeautifulSoup(html_text, "html.parser")
+    root = soup.body or soup
+    lines: list[str] = []
+    seen: set[str] = set()
+
+    for tag in root.find_all(True):
+        if tag.name in {"script", "style", "noscript"}:
+            continue
+
+        selector = _selector_hint(tag)
+        if selector in seen:
+            continue
+        seen.add(selector)
+
+        attrs: list[str] = []
+        for attr_name in ("id", "class", "src", "href", "alt", "aria-label", "style"):
+            value = tag.get(attr_name)
+            if not value:
+                continue
+            if isinstance(value, list):
+                value_text = " ".join(str(item).strip() for item in value if str(item).strip())
+            else:
+                value_text = str(value).strip()
+            if value_text:
+                attrs.append(f'{attr_name}="{value_text[:100]}"')
+
+        text_preview = " ".join(tag.get_text(" ", strip=True).split())
+        attrs_suffix = f" ({', '.join(attrs)})" if attrs else ""
+        preview_suffix = f' text="{text_preview[:120]}"' if text_preview else ""
+        lines.append(f"- {selector}{attrs_suffix}{preview_suffix}")
+
+        if len(lines) >= max_lines:
+            break
+
+    return "\n".join(lines) if lines else "- <empty body>"
+
+
+def _normalize_string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        clean = value.strip()
+        return [clean] if clean else []
+
+    if not isinstance(value, list):
+        return []
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        clean = str(item or "").strip()
+        if clean and clean not in seen:
+            seen.add(clean)
+            normalized.append(clean)
+    return normalized
+
+
+def apply_visual_tweak(current_html_path: str, human_command: str) -> str:
+    html_path = Path(str(current_html_path or "").strip()).resolve()
+    tweak_command = str(human_command or "").strip()
+
+    if not html_path.exists():
+        raise FileNotFoundError(f"Current HTML file not found: {html_path}")
+    if not tweak_command:
+        raise ValueError("Visual tweak command is empty.")
+
+    html_text = _read_text_with_fallback(html_path)
+    soup = BeautifulSoup(html_text, "html.parser")
+    body_html = str(soup.body or soup)[:12000]
+    dom_outline = _build_html_outline(html_text)
+
+    system_prompt = (
+        "You are a precise CSS and DOM manipulator.\n"
+        f"The human wants to tweak the webpage: '{tweak_command}'.\n"
+        "Do NOT rewrite the whole HTML.\n"
+        "You must return a response that matches the VisualTweakPlan schema exactly.\n"
+        "Rules:\n"
+        "- Use only selectors that plausibly exist in the provided DOM outline/body snippet.\n"
+        "- Prefer targeted selectors over broad selectors.\n"
+        "- If the human asks to hide/remove something, use elements_to_remove when safe.\n"
+        "- If the human asks for a purely stylistic change, use css_patches.\n"
+        "- css_patches values must be inline CSS declaration strings.\n"
+        "- Leave fields empty instead of inventing unsafe selectors."
+    )
+    user_prompt = (
+        f"### HUMAN_COMMAND\n{tweak_command}\n\n"
+        f"### DOM_OUTLINE\n{dom_outline}\n\n"
+        f"### BODY_HTML_SNIPPET\n{body_html}\n"
+    )
+
+    llm = get_llm(temperature=0, use_smart_model=True)
+    structured_llm = llm.with_structured_output(VisualTweakPlan)
+    response = structured_llm.invoke(
+        [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt),
+        ]
+    )
+    try:
+        tweak_plan = response if isinstance(response, VisualTweakPlan) else VisualTweakPlan.model_validate(response)
+    except Exception as exc:
+        raise ValueError(f"Visual Editor Agent returned invalid structured output: {exc}") from exc
+
+    css_patches: dict[str, str] = {}
+    for selector, style_text in (tweak_plan.css_patches or {}).items():
+        selector_text = str(selector or "").strip()
+        style_value = str(style_text or "").strip()
+        if selector_text and style_value:
+            css_patches[selector_text] = style_value
+
+    elements_to_remove = _normalize_string_list(tweak_plan.elements_to_remove)
+
+    for selector in elements_to_remove:
+        try:
+            targets = soup.select(selector)
+        except Exception as exc:
+            print(f"[VisualTweak] warning: invalid removal selector '{selector}': {exc}")
+            continue
+
+        if not targets:
+            print(f"[VisualTweak] warning: removal selector '{selector}' matched no elements.")
+            continue
+
+        for target in targets:
+            try:
+                target.decompose()
+            except Exception as exc:
+                print(f"[VisualTweak] warning: failed removing selector '{selector}': {exc}")
+
+    for selector, new_style in css_patches.items():
+        try:
+            targets = soup.select(selector)
+        except Exception as exc:
+            print(f"[VisualTweak] warning: invalid css patch selector '{selector}': {exc}")
+            continue
+
+        if not targets:
+            print(f"[VisualTweak] warning: css patch selector '{selector}' matched no elements.")
+            continue
+
+        for target in targets:
+            try:
+                existing_style = str(target.get("style") or "").strip().rstrip(";")
+                patch_style = new_style.strip().lstrip(";")
+                if existing_style and patch_style:
+                    target["style"] = f"{existing_style}; {patch_style}"
+                elif patch_style:
+                    target["style"] = patch_style
+            except Exception as exc:
+                print(f"[VisualTweak] warning: failed applying css patch to '{selector}': {exc}")
+
+    html_path.write_text(str(soup), encoding="utf-8")
+    return str(html_path)
 
 
 def _coerce_string_list(value: Any) -> list[str]:
@@ -713,11 +888,9 @@ def find_templates(
     density: str,
     navigation: str,
     layout: str,
-) -> tuple[Any, dict[str, Any], Any, str, str, Any, Any, Any, str, str, str]:
+) -> tuple[Any, dict[str, Any], Any, str, str | None, Any, Any, Any, str, str, str, str, Any, str]:
     log_lines: list[str] = []
-    preview_html = build_placeholder_preview(
-        "Select one of the Top 5 candidates to preview it here before generation."
-    )
+    preview_image_path: str | None = None
 
     try:
         user_constraints = build_user_constraints(
@@ -762,12 +935,15 @@ def find_templates(
             search_state,
             None,
             "\n".join(log_lines),
-            preview_html,
+            preview_image_path,
             step1_update,
             revise_update,
             approve_update,
             "",
             "",
+            "",
+            "",
+            gr.update(interactive=False),
             "",
         )
     except Exception as exc:
@@ -777,18 +953,20 @@ def find_templates(
         step1_update = gr.update(interactive=False)
         revise_update = gr.update(interactive=False)
         approve_update = gr.update(interactive=False)
-        error_preview = build_placeholder_preview(f"Template search failed: {exc}")
         return (
             radio_update,
             empty_state,
             None,
             "\n".join(log_lines),
-            error_preview,
+            None,
             step1_update,
             revise_update,
             approve_update,
             "",
             "",
+            "",
+            "",
+            gr.update(interactive=False),
             "",
         )
 
@@ -797,14 +975,12 @@ def preview_selected_template(
     selected_label: str | None,
     search_state: dict[str, Any] | None,
     current_logs: str,
-) -> tuple[str, dict[str, Any] | None, str, Any, Any, Any, str, str, str]:
+    current_preview_path: str | None,
+) -> tuple[str | None, dict[str, Any] | None, str, Any, Any, Any, str, str, str, str, Any, str]:
     candidate = resolve_selected_candidate(selected_label, search_state)
     if not candidate:
-        preview_html = build_placeholder_preview(
-            "Select one of the Top 5 candidates to preview it here before generation."
-        )
         return (
-            preview_html,
+            None,
             None,
             current_logs,
             gr.update(interactive=False),
@@ -813,17 +989,28 @@ def preview_selected_template(
             "",
             "",
             "",
+            "",
+            gr.update(interactive=False),
+            "",
         )
 
     try:
-        entry_html_path = Path(str(candidate.get("entry_html_path") or ""))
-        preview_html = load_preview_html(entry_html_path)
+        entry_html_path = Path(str(candidate.get("entry_html_path") or "")).resolve()
+        preview_image_path = take_local_screenshot(
+            str(entry_html_path),
+            str(build_template_preview_path(candidate)),
+        )
+        if not preview_image_path:
+            raise RuntimeError(f"Failed to render screenshot for {entry_html_path}")
         updated_logs = append_log_lines(
             current_logs,
-            [f"[Preview] Loaded template {candidate['template_id']} from {entry_html_path}"],
+            [
+                f"[Preview] Rendered template screenshot for {candidate['template_id']} from {entry_html_path}",
+                f"[Preview] Screenshot path: {preview_image_path}",
+            ],
         )
         return (
-            preview_html,
+            preview_image_path,
             candidate,
             updated_logs,
             gr.update(interactive=True),
@@ -832,12 +1019,14 @@ def preview_selected_template(
             "",
             "",
             "",
+            "",
+            gr.update(interactive=False),
+            "",
         )
     except Exception as exc:
-        updated_logs = append_log_lines(current_logs, [f"[Error] Failed to preview template: {exc}"])
-        preview_html = build_placeholder_preview(f"Template preview failed: {exc}")
+        updated_logs = append_log_lines(current_logs, [f"[Error] Failed to render template preview: {exc}"])
         return (
-            preview_html,
+            current_preview_path,
             None,
             updated_logs,
             gr.update(interactive=False),
@@ -845,6 +1034,9 @@ def preview_selected_template(
             gr.update(interactive=False),
             "",
             "",
+            "",
+            "",
+            gr.update(interactive=False),
             "",
         )
 
@@ -855,7 +1047,7 @@ def run_extraction(
     search_state: dict[str, Any] | None,
     selected_candidate_state: dict[str, Any] | None,
     current_logs: str,
-) -> tuple[str, str, str, Any, Any, str]:
+) -> tuple[str, str, str, Any, Any, str, str, Any, str]:
     selected_candidate = selected_candidate_state or resolve_selected_candidate(selected_label, search_state)
     if not selected_candidate:
         raise gr.Error("Select and preview one of the Top 5 candidate templates before running Step 1.")
@@ -933,6 +1125,9 @@ def run_extraction(
             gr.update(interactive=True),
             gr.update(interactive=True),
             thread_id,
+            "",
+            gr.update(interactive=False),
+            "",
         )
     except Exception as exc:
         log(f"[Error] {exc}")
@@ -941,6 +1136,9 @@ def run_extraction(
             "",
             "",
             gr.update(interactive=False),
+            gr.update(interactive=False),
+            "",
+            "",
             gr.update(interactive=False),
             "",
         )
@@ -1000,8 +1198,9 @@ def revise_extraction(
 def approve_and_generate(
     workflow_thread_id: str,
     current_logs: str,
-    current_preview: str,
-) -> tuple[str, str]:
+    current_preview: str | None,
+    current_html_path: str,
+) -> tuple[str, str | None, str, Any]:
     run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
 
     def log(message: str) -> None:
@@ -1031,13 +1230,57 @@ def approve_and_generate(
         final_state = HITL_WORKFLOW.get_state(config)
         final_values = dict(final_state.values or {})
         coder_artifact = CoderArtifact.model_validate(final_values.get("coder_artifact"))
-        preview_html = load_preview_html(Path(coder_artifact.entry_html))
-        log(f"[Preview] Loaded generated webpage from {coder_artifact.entry_html}")
+        entry_html_path = Path(coder_artifact.entry_html).resolve()
+        preview_image_path = take_local_screenshot(
+            str(entry_html_path),
+            str(build_final_preview_path(entry_html_path)),
+        )
+        if not preview_image_path:
+            raise RuntimeError(f"Failed to render final screenshot for {entry_html_path}")
+        log(f"[Preview] Rendered generated webpage screenshot from {entry_html_path}")
         log("[Done] Generation completed successfully.")
-        return "\n".join(run_log_lines), preview_html
+        return "\n".join(run_log_lines), preview_image_path, str(entry_html_path), gr.update(interactive=True)
     except Exception as exc:
         log(f"[Error] {exc}")
-        return "\n".join(run_log_lines), current_preview
+        return "\n".join(run_log_lines), current_preview, str(current_html_path or ""), gr.update(interactive=False)
+
+
+def apply_visual_tweak_from_ui(
+    human_command: str,
+    current_html_path: str,
+    current_logs: str,
+    current_preview: str | None,
+) -> tuple[str, str | None, str, str]:
+    run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
+
+    def log(message: str) -> None:
+        print(message)
+        run_log_lines.append(message)
+
+    html_path = str(current_html_path or "").strip()
+    tweak_command = str(human_command or "").strip()
+    if not html_path:
+        log("[Error] No generated webpage is available for visual tweaking yet.")
+        return "\n".join(run_log_lines), current_preview, human_command, current_html_path
+    if not tweak_command:
+        log("[Error] Visual tweak command is empty.")
+        return "\n".join(run_log_lines), current_preview, human_command, current_html_path
+
+    try:
+        updated_html_path = apply_visual_tweak(html_path, tweak_command)
+        preview_image_path = take_local_screenshot(
+            updated_html_path,
+            str(build_final_preview_path(Path(updated_html_path))),
+        )
+        if not preview_image_path:
+            raise RuntimeError(f"Failed to render screenshot after visual tweak for {updated_html_path}")
+
+        log(f"[VisualTweak] Applied tweak: {tweak_command}")
+        log(f"[Preview] Re-rendered tweaked webpage screenshot from {updated_html_path}")
+        return "\n".join(run_log_lines), preview_image_path, "", updated_html_path
+    except Exception as exc:
+        log(f"[Error] Visual tweak failed: {exc}")
+        return "\n".join(run_log_lines), current_preview, human_command, current_html_path
 
 
 def confirm_and_start_generation(
@@ -1046,7 +1289,7 @@ def confirm_and_start_generation(
     search_state: dict[str, Any] | None,
     selected_candidate_state: dict[str, Any] | None,
     current_logs: str,
-) -> tuple[str, str]:
+) -> tuple[str, str | None]:
     selected_candidate = selected_candidate_state or resolve_selected_candidate(selected_label, search_state)
     if not selected_candidate:
         raise gr.Error("Select and preview one of the Top 5 candidate templates before starting generation.")
@@ -1061,7 +1304,7 @@ def confirm_and_start_generation(
         print(message)
         run_log_lines.append(message)
 
-    preview_html = build_placeholder_preview("Generation is running. The final webpage will appear here shortly.")
+    preview_image_path: str | None = None
 
     try:
         coder_artifact = run_langgraph_batch(
@@ -1071,13 +1314,19 @@ def confirm_and_start_generation(
             ranked_candidates=ranked_candidates,
             log=log,
         )
-        preview_html = load_preview_html(Path(coder_artifact.entry_html))
-        log(f"[Preview] Loaded generated webpage from {coder_artifact.entry_html}")
+        entry_html_path = Path(coder_artifact.entry_html).resolve()
+        preview_image_path = take_local_screenshot(
+            str(entry_html_path),
+            str(build_final_preview_path(entry_html_path)),
+        )
+        if not preview_image_path:
+            raise RuntimeError(f"Failed to render final screenshot for {entry_html_path}")
+        log(f"[Preview] Rendered generated webpage screenshot from {entry_html_path}")
     except Exception as exc:
         log(f"[Error] {exc}")
-        preview_html = build_placeholder_preview(f"Generation failed: {exc}")
+        preview_image_path = None
 
-    return "\n".join(run_log_lines), preview_html
+    return "\n".join(run_log_lines), preview_image_path
 
 
 def build_app() -> gr.Blocks:
@@ -1088,6 +1337,7 @@ def build_app() -> gr.Blocks:
         search_state = gr.State({"user_constraints": {}, "tags_json_path": "", "candidates": []})
         selected_candidate_state = gr.State(None)
         workflow_thread_state = gr.State("")
+        current_render_html_state = gr.State("")
 
         gr.Markdown("# PaperAlchemy")
 
@@ -1153,12 +1403,23 @@ def build_app() -> gr.Blocks:
                     variant="primary",
                     interactive=False,
                 )
+                visual_tweak_command = gr.Textbox(
+                    label="Visual Tweak Command (e.g., 'Hide the second image')",
+                    placeholder="Example: Make the title red, hide the bottom table, or reduce hero spacing.",
+                    lines=2,
+                    value="",
+                )
+                apply_tweak_button = gr.Button(
+                    "Apply Tweak",
+                    variant="secondary",
+                    interactive=False,
+                )
                 system_logs = gr.Textbox(
                     label="System Logs",
                     value=(
                         "Choose constraints, click Find Templates, preview a candidate, then run Step 1 to extract "
                         "a readable overview. Use Human Directives plus Revise Extraction until satisfied, then "
-                        "approve to generate the webpage."
+                        "approve to generate the webpage. After generation, you can issue natural-language visual tweaks."
                     ),
                     lines=24,
                     interactive=False,
@@ -1166,10 +1427,11 @@ def build_app() -> gr.Blocks:
                 )
 
             with gr.Column(scale=2):
-                preview_html = gr.HTML(
-                    value=build_placeholder_preview(
-                        "Template previews and the generated webpage will appear here."
-                    ),
+                preview_image = gr.Image(
+                    value=None,
+                    type="filepath",
+                    interactive=False,
+                    label="Live Webpage Preview",
                     elem_id="paperalchemy-preview",
                 )
 
@@ -1181,22 +1443,25 @@ def build_app() -> gr.Blocks:
                 search_state,
                 selected_candidate_state,
                 system_logs,
-                preview_html,
+                preview_image,
                 step1_button,
                 revise_button,
                 approve_button,
                 paper_markdown,
                 human_directives,
                 workflow_thread_state,
+                visual_tweak_command,
+                apply_tweak_button,
+                current_render_html_state,
             ],
             api_name="find_templates",
         )
 
         candidates_radio.change(
             fn=preview_selected_template,
-            inputs=[candidates_radio, search_state, system_logs],
+            inputs=[candidates_radio, search_state, system_logs, preview_image],
             outputs=[
-                preview_html,
+                preview_image,
                 selected_candidate_state,
                 system_logs,
                 step1_button,
@@ -1205,6 +1470,9 @@ def build_app() -> gr.Blocks:
                 paper_markdown,
                 human_directives,
                 workflow_thread_state,
+                visual_tweak_command,
+                apply_tweak_button,
+                current_render_html_state,
             ],
             api_name="preview_template",
         )
@@ -1219,6 +1487,9 @@ def build_app() -> gr.Blocks:
                 revise_button,
                 approve_button,
                 workflow_thread_state,
+                visual_tweak_command,
+                apply_tweak_button,
+                current_render_html_state,
             ],
             api_name="extract_and_review",
         )
@@ -1232,9 +1503,16 @@ def build_app() -> gr.Blocks:
 
         approve_button.click(
             fn=approve_and_generate,
-            inputs=[workflow_thread_state, system_logs, preview_html],
-            outputs=[system_logs, preview_html],
+            inputs=[workflow_thread_state, system_logs, preview_image, current_render_html_state],
+            outputs=[system_logs, preview_image, current_render_html_state, apply_tweak_button],
             api_name="approve_and_generate",
+        )
+
+        apply_tweak_button.click(
+            fn=apply_visual_tweak_from_ui,
+            inputs=[visual_tweak_command, current_render_html_state, system_logs, preview_image],
+            outputs=[system_logs, preview_image, visual_tweak_command, current_render_html_state],
+            api_name="apply_visual_tweak",
         )
 
     return demo

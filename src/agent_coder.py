@@ -1,3 +1,4 @@
+import json
 import os
 import re
 import shutil
@@ -8,7 +9,13 @@ from bs4 import BeautifulSoup, Tag
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
-from src.agent_coder_critic import build_coder_critic_router, coder_critic_node
+from src.agent_coder_critic import (
+    build_coder_critic_router,
+    build_vision_qa_router,
+    coder_critic_node,
+    take_screenshot_action,
+    vision_critic_node,
+)
 from src.schemas import CoderArtifact, PagePlan, StructuredPaper
 from src.state import CoderState
 
@@ -260,6 +267,139 @@ def _overlaps_injected_content(target: Tag, injected_targets: list[Tag]) -> bool
     return False
 
 
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    raw_text = str(text or "").strip()
+    if not raw_text:
+        return None
+
+    try:
+        payload = json.loads(raw_text)
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        pass
+
+    start = raw_text.find("{")
+    end = raw_text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+
+    try:
+        payload = json.loads(raw_text[start : end + 1])
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def _normalize_string_list(value: Any) -> list[str]:
+    if isinstance(value, str):
+        clean = value.strip()
+        return [clean] if clean else []
+
+    if not isinstance(value, list):
+        return []
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        clean = str(item or "").strip()
+        if clean and clean not in seen:
+            seen.add(clean)
+            normalized.append(clean)
+    return normalized
+
+
+def _collect_visual_feedback_actions(visual_feedback: Any) -> tuple[list[str], list[str]]:
+    selectors_to_remove: list[str] = []
+    css_rules_to_inject: list[str] = []
+    seen_selectors: set[str] = set()
+    seen_css_rules: set[str] = set()
+
+    if not isinstance(visual_feedback, list):
+        return selectors_to_remove, css_rules_to_inject
+
+    for feedback_entry in visual_feedback:
+        payload = _extract_json_object(str(feedback_entry or ""))
+        if not payload:
+            continue
+
+        for selector in _normalize_string_list(payload.get("selectors_to_remove")):
+            if selector not in seen_selectors:
+                seen_selectors.add(selector)
+                selectors_to_remove.append(selector)
+
+        css_values = payload.get("css_rules_to_inject") or payload.get("css_rules")
+        for css_rule in _normalize_string_list(css_values):
+            if css_rule not in seen_css_rules:
+                seen_css_rules.add(css_rule)
+                css_rules_to_inject.append(css_rule)
+
+    return selectors_to_remove, css_rules_to_inject
+
+
+def _ensure_head_tag(soup: BeautifulSoup) -> Tag:
+    if soup.head is not None:
+        return soup.head
+
+    html_tag = soup.html
+    if html_tag is None:
+        html_tag = soup.new_tag("html")
+        for child in list(soup.contents):
+            html_tag.append(child.extract())
+        soup.append(html_tag)
+
+    head_tag = soup.new_tag("head")
+    html_tag.insert(0, head_tag)
+    return head_tag
+
+
+def _apply_visual_feedback(
+    soup: BeautifulSoup,
+    visual_feedback: Any,
+    injected_targets: list[Tag],
+) -> None:
+    selectors_to_remove, css_rules_to_inject = _collect_visual_feedback_actions(visual_feedback)
+
+    for css_selector in selectors_to_remove:
+        selector_text = str(css_selector or "").strip()
+        if not selector_text:
+            continue
+
+        try:
+            targets = soup.select(selector_text)
+        except Exception as exc:
+            print(f"[PaperAlchemy-Coder] warning: invalid visual removal selector '{selector_text}': {exc}")
+            continue
+
+        if not targets:
+            print(f"[PaperAlchemy-Coder] warning: visual removal selector '{selector_text}' matched no elements.")
+            continue
+
+        for index, target in enumerate(targets, start=1):
+            if _overlaps_injected_content(target, injected_targets):
+                print(
+                    "[PaperAlchemy-Coder] warning: skipped visual removal selector "
+                    f"'{selector_text}' target #{index} because it overlaps injected content."
+                )
+                continue
+            try:
+                target.decompose()
+            except Exception as exc:
+                print(
+                    "[PaperAlchemy-Coder] warning: failed visual removal "
+                    f"selector '{selector_text}' target #{index}: {exc}"
+                )
+
+    if css_rules_to_inject:
+        head_tag = _ensure_head_tag(soup)
+        existing_style = soup.find("style", attrs={"id": "paperalchemy-visual-qa-overrides"})
+        if existing_style is not None:
+            existing_style.decompose()
+
+        style_tag = soup.new_tag("style", id="paperalchemy-visual-qa-overrides")
+        style_tag.string = "\n\n".join(css_rules_to_inject)
+        head_tag.append(style_tag)
+
+
 def coder_node(state: CoderState) -> dict[str, Any]:
     print(
         f"[PaperAlchemy-Coder] building site "
@@ -315,6 +455,12 @@ def coder_node(state: CoderState) -> dict[str, Any]:
         entry_html_path=entry_html_path,
         figure_paths=figure_paths,
     )
+    visual_feedback = state.get("visual_feedback") or []
+    if visual_feedback:
+        print(
+            "[PaperAlchemy-Coder] applying visual feedback iteration "
+            f"{int(state.get('visual_iterations', 0)) + 1} with {len(visual_feedback)} feedback item(s)."
+        )
 
     if not dom_mapping:
         print("[PaperAlchemy-Coder] warning: page_plan.dom_mapping is empty; template HTML will be preserved as-is.")
@@ -376,6 +522,13 @@ def coder_node(state: CoderState) -> dict[str, Any]:
                     f"selector '{selector_text}' target #{index}: {exc}"
                 )
 
+    if visual_feedback:
+        _apply_visual_feedback(
+            soup=soup,
+            visual_feedback=visual_feedback,
+            injected_targets=injected_targets,
+        )
+
     entry_html_path.write_text(str(soup), encoding="utf-8")
 
     artifact = CoderArtifact(
@@ -386,7 +539,7 @@ def coder_node(state: CoderState) -> dict[str, Any]:
         edited_files=[str(entry_html_path.relative_to(site_dir)).replace("\\", "/")],
         notes=(
             "v2-dom-injection-wash: preserved the original template DOM, injected page_plan.dom_mapping "
-            "content with BeautifulSoup, and decompose()-removed selectors_to_remove."
+            "content with BeautifulSoup, decompose()-removed selectors_to_remove, and applied visual QA fixes."
         ),
     )
     return {"coder_artifact": artifact}
@@ -396,12 +549,20 @@ def build_coder_graph(max_retry: int = 1):
     workflow = StateGraph(CoderState)
     workflow.add_node("coder", coder_node)
     workflow.add_node("coder_critic", coder_critic_node)
+    workflow.add_node("take_screenshot", take_screenshot_action)
+    workflow.add_node("vision_critic", vision_critic_node)
 
     workflow.set_entry_point("coder")
     workflow.add_edge("coder", "coder_critic")
     workflow.add_conditional_edges(
         "coder_critic",
         build_coder_critic_router(max_retry=max_retry),
+        {"retry": "coder", "visual_qa": "take_screenshot", "end": END},
+    )
+    workflow.add_edge("take_screenshot", "vision_critic")
+    workflow.add_conditional_edges(
+        "vision_critic",
+        build_vision_qa_router(),
         {"retry": "coder", "end": END},
     )
 
@@ -423,6 +584,10 @@ def run_coder_agent(
         "structured_paper": structured_data,
         "page_plan": page_plan,
         "coder_feedback_history": [],
+        "visual_feedback": [],
+        "visual_screenshot_path": "",
+        "visual_iterations": 0,
+        "is_visually_approved": False,
         "coder_artifact": None,
         "coder_critic_passed": False,
         "coder_retry_count": 0,
@@ -444,6 +609,9 @@ def run_coder_agent(
     if not normalized_artifact or not final_state.values.get("coder_critic_passed"):
         print("[PaperAlchemy-Coder] coder completed but critic did not fully pass.")
         return None
+
+    if not final_state.values.get("is_visually_approved") and int(final_state.values.get("visual_iterations", 0)) > 0:
+        print("[PaperAlchemy-Coder] visual QA ended without full approval, returning the latest artifact after retry cap.")
 
     print(f"[PaperAlchemy-Coder] build completed: {normalized_artifact.entry_html}")
     return normalized_artifact
