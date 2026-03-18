@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from bs4 import BeautifulSoup, Tag
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
@@ -14,12 +15,31 @@ from src.planner_template_catalog import build_template_catalog, load_module_ind
 from src.prompts import (
     SEMANTIC_PLANNER_SYSTEM_PROMPT,
     SEMANTIC_PLANNER_USER_PROMPT_TEMPLATE,
-    TEMPLATE_BINDER_SYSTEM_PROMPT,
-    TEMPLATE_BINDER_USER_PROMPT_TEMPLATE,
 )
 from src.schemas import PagePlan, SemanticPlan, StructuredPaper, TemplateCandidate
 from src.state import PlannerState
 from src.template_resources import ensure_autopage_template_assets
+
+TEMPLATE_BINDER_DOM_SYSTEM_PROMPT = """You are Template Binder Planner (Stage B) in PaperAlchemy.
+You are a frontend integration expert who preserves the original template DOM.
+Your job is to bind a semantic paper plan onto the selected template candidate and output final PagePlan.
+
+Rules:
+1. selected template must come from TEMPLATE_CANDIDATES_JSON.
+2. selected_entry_html must equal chosen_entry_html of selected candidate.
+3. source_sections and figure_paths must be grounded in STRUCTURED_PAPER_JSON.
+4. planning_mode must be 'hybrid_template_bind'.
+5. Do not redesign or rebuild the template structure. Reuse the existing DOM.
+6. Populate dom_mapping with CSS selectors that already exist in TEMPLATE_DOM_OUTLINE.
+7. Prefer stable selectors such as #id, .class, or short anchored descendant selectors.
+8. Avoid overly broad selectors like "div", "section", or "p" unless the outline proves they are uniquely correct.
+9. dom_mapping values must be HTML/text strings intended for inner-content injection into the matched element.
+10. Rich HTML is allowed in dom_mapping values, including inline formatting and image tags.
+11. When referencing paper figures, only use grounded figure_paths from STRUCTURED_PAPER_JSON for src/href values. Do not invent asset paths.
+12. Target content containers instead of root layout wrappers whenever possible so the original layout and CSS remain intact.
+13. Keep the rest of PagePlan coherent for downstream audit and asset-copy steps.
+14. Return strict JSON matching PagePlan schema only.
+"""
 
 
 def _normalize_structured_paper(paper: Any) -> StructuredPaper | None:
@@ -62,6 +82,79 @@ def _to_project_relative_path(path: Path, project_root: Path) -> str:
         return str(path.resolve())
 
 
+def _read_text_with_fallback(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="latin-1")
+
+
+def _selector_component(tag: Tag) -> str:
+    tag_name = tag.name or "div"
+    element_id = tag.get("id")
+    if element_id:
+        return f"{tag_name}#{element_id}"
+
+    classes = [str(item).strip() for item in tag.get("class", []) if str(item).strip()]
+    if classes:
+        return tag_name + "".join(f".{class_name}" for class_name in classes[:3])
+
+    return tag_name
+
+
+def _selector_hint(tag: Tag, max_depth: int = 3) -> str:
+    parts: list[str] = []
+    current: Tag | None = tag
+
+    while current is not None and len(parts) < max_depth:
+        parts.append(_selector_component(current))
+        if current.get("id"):
+            break
+
+        parent = current.parent
+        current = parent if isinstance(parent, Tag) else None
+
+    return " > ".join(reversed(parts))
+
+
+def _build_dom_outline(template_html: str, max_lines: int = 120) -> str:
+    soup = BeautifulSoup(template_html, "html.parser")
+    root = soup.body or soup
+    lines: list[str] = []
+    seen: set[str] = set()
+
+    for tag in root.find_all(True):
+        if tag.name in {"script", "style", "noscript"}:
+            continue
+
+        selector = _selector_hint(tag)
+        if selector in seen:
+            continue
+        seen.add(selector)
+
+        attrs: list[str] = []
+        for attr_name in ("id", "class", "src", "href", "alt", "aria-label"):
+            value = tag.get(attr_name)
+            if not value:
+                continue
+            if isinstance(value, list):
+                value_text = " ".join(str(item).strip() for item in value if str(item).strip())
+            else:
+                value_text = str(value).strip()
+            if value_text:
+                attrs.append(f'{attr_name}="{value_text[:100]}"')
+
+        text_preview = " ".join(tag.get_text(" ", strip=True).split())
+        attrs_suffix = f" ({', '.join(attrs)})" if attrs else ""
+        preview_suffix = f' text="{text_preview[:120]}"' if text_preview else ""
+        lines.append(f"- {selector}{attrs_suffix}{preview_suffix}")
+
+        if len(lines) >= max_lines:
+            break
+
+    return "\n".join(lines) if lines else "- <empty template body>"
+
+
 def _candidate_from_ranked_match(
     ranked_match: dict[str, Any],
     project_root: Path,
@@ -85,6 +178,70 @@ def _candidate_from_ranked_match(
         score=float(ranked_match.get("score") or 0.0),
         reasons=reasons[:8],
     )
+
+
+def _select_designated_template(
+    constraints: dict[str, Any],
+    project_root: Path,
+) -> tuple[list[TemplateCandidate], TemplateCandidate | None, str | None]:
+    raw_candidates = constraints.get("ui_ranked_candidates") or []
+    if not isinstance(raw_candidates, list):
+        raw_candidates = []
+
+    top_k = max(1, int(constraints.get("template_candidate_top_k", 3)))
+    candidates = [
+        candidate
+        for candidate in (
+            _candidate_from_ranked_match(item, project_root)
+            for item in raw_candidates[:top_k]
+            if isinstance(item, dict)
+        )
+        if candidate is not None
+    ]
+
+    designated_template_id = str(constraints.get("designated_template_id") or "").strip()
+    designated_template_path = str(constraints.get("designated_template_path") or "").strip()
+    designated_entry_html = str(constraints.get("designated_entry_html") or "").strip()
+
+    if not (designated_template_id and designated_template_path and designated_entry_html):
+        return candidates, None, None
+
+    selected_match = next(
+        (
+            item
+            for item in raw_candidates
+            if isinstance(item, dict)
+            and str(item.get("template_id") or "").strip() == designated_template_id
+            and str(item.get("entry_html") or "").strip() == designated_entry_html
+        ),
+        None,
+    )
+
+    if selected_match is None:
+        selected_match = {
+            "template_id": designated_template_id,
+            "template_name": designated_template_id,
+            "template_path": designated_template_path,
+            "entry_html": designated_entry_html,
+            "entry_html_path": str((Path(designated_template_path) / designated_entry_html).resolve()),
+            "score": float(constraints.get("designated_template_score") or 0.0),
+            "reasons": ["manual_ui_selection"],
+        }
+
+    selected = _candidate_from_ranked_match(selected_match, project_root)
+    if selected is None:
+        return candidates, None, None
+
+    existing_ids = {candidate.template_id for candidate in candidates}
+    if selected.template_id not in existing_ids:
+        candidates = [selected, *candidates]
+    else:
+        candidates = [
+            selected,
+            *[candidate for candidate in candidates if candidate.template_id != selected.template_id],
+        ]
+
+    return candidates, selected, designated_template_path
 
 
 def semantic_planner_node(state: PlannerState) -> dict[str, Any]:
@@ -136,6 +293,25 @@ def template_selector_node(state: PlannerState) -> dict[str, Any]:
     constraints = state.get("generation_constraints") or {}
     user_constraints = state.get("user_constraints") or {}
     tags_json_path = str(constraints.get("template_tags_json_path") or "").strip()
+
+    designated_candidates, designated_selected, designated_path = _select_designated_template(
+        constraints=constraints,
+        project_root=project_root,
+    )
+    if designated_selected is not None:
+        print(
+            "[PaperAlchemy-TemplateSelector] using designated template from UI selection: "
+            f"{designated_selected.template_id} entry={designated_selected.chosen_entry_html}"
+        )
+        return {
+            "template_candidates": designated_candidates or [designated_selected],
+            "selected_template": designated_selected,
+            "selected_template_path": designated_path,
+            "generation_constraints": {
+                **constraints,
+                "selected_template_id": designated_selected.template_id,
+            },
+        }
 
     if not tags_json_path:
         print("[PaperAlchemy-TemplateSelector] template_tags_json_path is missing.")
@@ -221,6 +397,19 @@ def template_binder_node(state: PlannerState) -> dict[str, Any]:
         print("[PaperAlchemy-TemplateBinder] selected template is missing.")
         return {}
 
+    project_root = Path(__file__).resolve().parent.parent
+    template_entry_path = project_root / selected.root_dir / selected.chosen_entry_html
+    if not template_entry_path.exists():
+        print(f"[PaperAlchemy-TemplateBinder] template entry html not found: {template_entry_path}")
+        return {}
+
+    try:
+        template_html = _read_text_with_fallback(template_entry_path)
+    except Exception as exc:
+        print(f"[PaperAlchemy-TemplateBinder] failed reading template html: {exc}")
+        return {}
+
+    template_dom_outline = _build_dom_outline(template_html)
     constraints = state.get("generation_constraints") or {}
     llm = get_llm(temperature=0.2, use_smart_model=True)
     structured_llm = llm.with_structured_output(PagePlan)
@@ -229,25 +418,34 @@ def template_binder_node(state: PlannerState) -> dict[str, Any]:
     module_index = state.get("module_index") or {}
     planner_feedback_history = state.get("planner_feedback_history") or []
 
-    user_msg = TEMPLATE_BINDER_USER_PROMPT_TEMPLATE.format(
-        structured_paper_json=to_pretty_json(structured_paper),
-        semantic_plan_json=to_pretty_json(semantic_plan),
-        template_candidates_json=json.dumps(
-            [candidate.model_dump() for candidate in candidates],
-            indent=2,
-            ensure_ascii=False,
-        ),
-        selected_template_json=json.dumps(selected.model_dump(), indent=2, ensure_ascii=False),
-        template_link_map_json=json.dumps(template_link_map, indent=2, ensure_ascii=False),
-        module_index_json=json.dumps(module_index, indent=2, ensure_ascii=False),
-        generation_constraints_json=json.dumps(constraints, indent=2, ensure_ascii=False),
-        prior_feedback=json.dumps(planner_feedback_history, indent=2, ensure_ascii=False),
+    user_msg = (
+        "### STRUCTURED_PAPER_JSON\n"
+        f"{to_pretty_json(structured_paper)}\n\n"
+        "### SEMANTIC_PLAN_JSON\n"
+        f"{to_pretty_json(semantic_plan)}\n\n"
+        "### TEMPLATE_CANDIDATES_JSON\n"
+        f"{json.dumps([candidate.model_dump() for candidate in candidates], indent=2, ensure_ascii=False)}\n\n"
+        "### SELECTED_TEMPLATE_CANDIDATE_JSON\n"
+        f"{json.dumps(selected.model_dump(), indent=2, ensure_ascii=False)}\n\n"
+        "### TEMPLATE_ENTRY_HTML_PATH\n"
+        f"{_to_project_relative_path(template_entry_path, project_root)}\n\n"
+        "### TEMPLATE_DOM_OUTLINE\n"
+        f"{template_dom_outline}\n\n"
+        "### TEMPLATE_LINK_MAP_JSON\n"
+        f"{json.dumps(template_link_map, indent=2, ensure_ascii=False)}\n\n"
+        "### MODULE_INDEX_JSON\n"
+        f"{json.dumps(module_index, indent=2, ensure_ascii=False)}\n\n"
+        "### GENERATION_CONSTRAINTS_JSON\n"
+        f"{json.dumps(constraints, indent=2, ensure_ascii=False)}\n\n"
+        "### PRIOR_FEEDBACK\n"
+        f"{json.dumps(planner_feedback_history, indent=2, ensure_ascii=False)}\n\n"
+        "Generate final PagePlan JSON only."
     )
 
     try:
         result = structured_llm.invoke(
             [
-                SystemMessage(content=TEMPLATE_BINDER_SYSTEM_PROMPT),
+                SystemMessage(content=TEMPLATE_BINDER_DOM_SYSTEM_PROMPT),
                 HumanMessage(content=user_msg),
             ]
         )
@@ -262,6 +460,17 @@ def template_binder_node(state: PlannerState) -> dict[str, Any]:
         if not result.template_selection.fallback_template_id and len(candidates) > 1:
             result.template_selection.fallback_template_id = candidates[1].template_id
 
+        normalized_dom_mapping: dict[str, str] = {}
+        for selector, content in (result.dom_mapping or {}).items():
+            selector_text = str(selector or "").strip()
+            if not selector_text:
+                continue
+            normalized_dom_mapping[selector_text] = str(content or "")
+
+        if not normalized_dom_mapping:
+            raise ValueError("Template binder returned empty dom_mapping")
+
+        result.dom_mapping = normalized_dom_mapping
         return {"page_plan": result}
     except Exception as exc:
         print(f"[PaperAlchemy-TemplateBinder] generation error: {exc}")

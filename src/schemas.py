@@ -208,6 +208,13 @@ class PagePlan(BaseModel):
     global_design: GlobalDesign
     page_outline: List[PageOutlineItem]
     blocks: List[BlockPlan]
+    dom_mapping: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Mapping of existing template CSS selectors to the HTML/text snippets that should be "
+            "injected into those DOM nodes."
+        ),
+    )
     coder_handoff: CoderHandoff
     quality_checks: List[QualityCheck]
     open_questions: List[str]

@@ -3,6 +3,8 @@ from pathlib import Path
 import re
 from typing import Any
 
+from bs4 import BeautifulSoup
+
 from src.schemas import CoderArtifact, CoderCriticReport
 from src.state import CoderState
 
@@ -43,25 +45,50 @@ def run_coder_code_critic(artifact: CoderArtifact | None) -> list[str]:
         critiques.append(f"Cannot read entry html: {exc}")
         return critiques
 
-    if "PaperAlchemy Generated Body Start" not in html_text or "PaperAlchemy Generated Body End" not in html_text:
-        critiques.append("Generated body markers are missing in entry html.")
+    try:
+        soup = BeautifulSoup(html_text, "html.parser")
+    except Exception as exc:
+        critiques.append(f"Cannot parse entry html: {exc}")
+        return critiques
 
-    body_start_pattern = re.compile(
-        r"<body[^>]*>\s*<!--\s*PaperAlchemy Generated Body Start\s*-->",
-        flags=re.IGNORECASE | re.DOTALL,
-    )
-    if not body_start_pattern.search(html_text):
-        critiques.append("Generated body marker is not at body start; template content leakage is likely.")
+    body_tag = soup.body
+    if body_tag is None:
+        critiques.append("Entry html does not contain a <body> element.")
+
+    is_dom_injection_build = "v2-dom-injection" in (artifact.notes or "")
+    if not is_dom_injection_build:
+        if "PaperAlchemy Generated Body Start" not in html_text or "PaperAlchemy Generated Body End" not in html_text:
+            critiques.append("Generated body markers are missing in entry html.")
+
+        body_start_pattern = re.compile(
+            r"<body[^>]*>\s*<!--\s*PaperAlchemy Generated Body Start\s*-->",
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not body_start_pattern.search(html_text):
+            critiques.append("Generated body marker is not at body start; template content leakage is likely.")
+    elif body_tag is not None:
+        visible_text = " ".join(body_tag.get_text(" ", strip=True).split())
+        has_media = body_tag.find(["img", "video", "iframe", "svg", "canvas"]) is not None
+        if not visible_text and not has_media:
+            critiques.append("DOM-injection build produced an empty body.")
 
     title_count = len(re.findall(r"<title\b", html_text, flags=re.IGNORECASE))
     if title_count != 1:
         critiques.append(f"Expected exactly one <title> tag, found {title_count}.")
 
+    referenced_values: list[str] = []
+    for element in soup.find_all(True):
+        for attr_name in ("src", "href", "data-src", "poster"):
+            attr_value = element.get(attr_name)
+            if isinstance(attr_value, str) and attr_value.strip():
+                referenced_values.append(attr_value.strip().replace("\\", "/"))
+
     for rel_asset in artifact.copied_assets:
         asset_path = site_dir / rel_asset
         if not asset_path.exists():
             critiques.append(f"Copied asset missing: {asset_path}")
-        if rel_asset not in html_text:
+        rel_asset_norm = rel_asset.replace("\\", "/")
+        if not any(rel_asset_norm in value for value in referenced_values):
             critiques.append(f"Copied asset is not referenced in entry html: {rel_asset}")
 
     return critiques
