@@ -36,9 +36,12 @@ Rules:
 9. dom_mapping values must be HTML/text strings intended for inner-content injection into the matched element.
 10. Rich HTML is allowed in dom_mapping values, including inline formatting and image tags.
 11. When referencing paper figures, only use grounded figure_paths from STRUCTURED_PAPER_JSON for src/href values. Do not invent asset paths.
-12. Target content containers instead of root layout wrappers whenever possible so the original layout and CSS remain intact.
-13. Keep the rest of PagePlan coherent for downstream audit and asset-copy steps.
-14. Return strict JSON matching PagePlan schema only.
+12. Populate selectors_to_remove with CSS selectors for residual template garbage: dummy text, legacy paper content, placeholder images, irrelevant widgets, stale leaderboards, or unrelated footers.
+13. selectors_to_remove must target the wrapper element that should be deleted cleanly with DOM decompose(), not a child text node.
+14. Do not include selectors_to_remove entries that would delete newly injected paper content or essential layout scaffolding.
+15. Target content containers instead of root layout wrappers whenever possible so the original layout and CSS remain intact.
+16. Keep the rest of PagePlan coherent for downstream audit and asset-copy steps.
+17. Return strict JSON matching PagePlan schema only.
 """
 
 
@@ -431,6 +434,10 @@ def template_binder_node(state: PlannerState) -> dict[str, Any]:
         f"{_to_project_relative_path(template_entry_path, project_root)}\n\n"
         "### TEMPLATE_DOM_OUTLINE\n"
         f"{template_dom_outline}\n\n"
+        "### CLEANUP_OBJECTIVE\n"
+        "Identify selectors_to_remove for residual template garbage such as lorem ipsum text, old paper abstracts, "
+        "placeholder images, irrelevant widgets, stale leaderboards, or unrelated footers. Target wrapper elements "
+        "that should be fully deleted with DOM decompose().\n\n"
         "### TEMPLATE_LINK_MAP_JSON\n"
         f"{json.dumps(template_link_map, indent=2, ensure_ascii=False)}\n\n"
         "### MODULE_INDEX_JSON\n"
@@ -471,6 +478,16 @@ def template_binder_node(state: PlannerState) -> dict[str, Any]:
             raise ValueError("Template binder returned empty dom_mapping")
 
         result.dom_mapping = normalized_dom_mapping
+        normalized_selectors_to_remove: list[str] = []
+        seen_remove_selectors: set[str] = set()
+        for selector in (result.selectors_to_remove or []):
+            selector_text = str(selector or "").strip()
+            if not selector_text or selector_text in seen_remove_selectors:
+                continue
+            seen_remove_selectors.add(selector_text)
+            normalized_selectors_to_remove.append(selector_text)
+
+        result.selectors_to_remove = normalized_selectors_to_remove
         return {"page_plan": result}
     except Exception as exc:
         print(f"[PaperAlchemy-TemplateBinder] generation error: {exc}")
