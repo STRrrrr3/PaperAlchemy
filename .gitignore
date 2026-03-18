@@ -1,16 +1,35 @@
-# 忽略 Python 的编译垃圾
+﻿# 忽略 Python 的编译垃圾
 __pycache__/
 *.py[cod]
 
-# 忽略虚拟环境 (这行最重要！！)
+# 忽略虚拟环境
 venv/
 .venv/
 env/
 
-# 忽略 IDE 的配置文件 (不需要上传你的编辑器设置)
+# 忽略 IDE 的配置文件
 .vscode/
 .idea/
 
-# 忽略数据文件 (PDF 和解析结果不传)
-data/
+# 忽略敏感信息
 .env
+
+# 忽略论文原始与中间数据（体积大、不可复现）
+data/input/
+data/output/
+
+# 忽略采集与提取生成物（可通过脚本重建）
+data/collectors/raw/
+data/collectors/output/
+data/collectors/modules/
+
+# 保留采集脚本与文档（用于开源复现）
+!data/collectors/
+!data/collectors/*.py
+!data/collectors/README.md
+
+# 保留可复现锁文件
+!data/collectors/locks/
+!data/collectors/locks/*.json
+!data/collectors/locks/.gitkeep
+

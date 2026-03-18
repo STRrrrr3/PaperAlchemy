@@ -1,5 +1,4 @@
 import os
-import httpx
 from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
 import ssl
@@ -26,22 +25,21 @@ def get_llm(temperature: float = 0, use_smart_model: bool = True):
 
     if use_smart_model:
         # 价格：2 美元 / 12 美元（<20 万个 token）4 美元 / 18 美元（>20 万个 token）
-        model_name = "gemini-3-pro-preview" 
+        model_name = "gemini-3.1-pro-preview" 
         timeout_setting = 500.0
     else:
         # 价格：$0.50 / $3
         model_name = "gemini-3-flash-preview"
-        timeout_setting = 60.0
+        timeout_setting = 500.0
 
     print(f"[PaperAlchemy] Initializing Gemini: {model_name} (temp={temperature})")
 
     return ChatGoogleGenerativeAI(
         model=model_name,
         temperature=temperature,
-        transport="rest", 
         max_retries=3,
         timeout=timeout_setting,
-        # Gemini 的一个特殊设置，防止它因为安全设置拒绝回答某些学术敏感内容
+        streaming=True,
         safety_settings={
             "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
             "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
