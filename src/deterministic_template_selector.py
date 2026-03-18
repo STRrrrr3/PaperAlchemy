@@ -125,8 +125,10 @@ def _rank_templates_from_tags(
         ranked.append(
             {
                 "template_id": template_id,
+                "template_name": template_id,
                 "template_path": str(template_root.resolve()),
                 "entry_html": entry_candidates[0],
+                "entry_html_path": str((template_root / entry_candidates[0]).resolve()),
                 "entry_html_candidates": entry_candidates,
                 "score": score,
                 "max_possible_score": max_possible_score,
@@ -163,8 +165,10 @@ def _fallback_rank_from_filesystem(tags_json_path: Path) -> list[dict[str, Any]]
         ranked.append(
             {
                 "template_id": template_root.name,
+                "template_name": template_root.name,
                 "template_path": str(template_root.resolve()),
                 "entry_html": entry_candidates[0],
+                "entry_html_path": str((template_root / entry_candidates[0]).resolve()),
                 "entry_html_candidates": entry_candidates,
                 "score": 0.0,
                 "max_possible_score": 0.0,
@@ -185,10 +189,10 @@ def _fallback_rank_from_filesystem(tags_json_path: Path) -> list[dict[str, Any]]
     return ranked
 
 
-def score_and_select_template(
+def _prepare_ranked_templates(
     user_constraints: Mapping[str, Any] | None,
     tags_json_path: str | Path,
-) -> dict[str, Any]:
+) -> tuple[list[dict[str, Any]], dict[str, str]]:
     path = Path(tags_json_path)
     normalized_constraints = normalize_user_constraints(user_constraints)
 
@@ -204,7 +208,51 @@ def score_and_select_template(
     if not ranked:
         raise ValueError("No ranked templates available for selection.")
 
-    winner = dict(ranked[0])
+    return ranked, normalized_constraints
+
+
+def _decorate_ranked_templates(
+    ranked: list[dict[str, Any]],
+    normalized_constraints: dict[str, str],
+) -> list[dict[str, Any]]:
+    decorated: list[dict[str, Any]] = []
+    total_count = len(normalized_constraints)
+
+    for rank, item in enumerate(ranked, start=1):
+        candidate = dict(item)
+        matched_count = len(candidate.get("matched_features") or [])
+        template_name = str(candidate.get("template_name") or candidate.get("template_id") or "").strip()
+
+        candidate["rank"] = rank
+        candidate["template_name"] = template_name
+        candidate["display_name"] = template_name
+        candidate["selection_rationale"] = (
+            f"Matched {matched_count}/{total_count} provided constraints; "
+            f"candidate '{candidate['template_id']}' scored {candidate['score']}."
+        )
+        decorated.append(candidate)
+
+    return decorated
+
+
+def score_and_select_templates(
+    user_constraints: Mapping[str, Any] | None,
+    tags_json_path: str | Path,
+    top_k: int = 5,
+) -> list[dict[str, Any]]:
+    ranked, normalized_constraints = _prepare_ranked_templates(user_constraints, tags_json_path)
+    decorated = _decorate_ranked_templates(ranked, normalized_constraints)
+    limit = max(1, int(top_k or 5))
+    return decorated[:limit]
+
+
+def score_and_select_template(
+    user_constraints: Mapping[str, Any] | None,
+    tags_json_path: str | Path,
+) -> dict[str, Any]:
+    ranked, normalized_constraints = _prepare_ranked_templates(user_constraints, tags_json_path)
+    decorated = _decorate_ranked_templates(ranked, normalized_constraints)
+    winner = dict(decorated[0])
     matched_count = len(winner.get("matched_features") or [])
     total_count = len(normalized_constraints)
 
@@ -216,5 +264,6 @@ def score_and_select_template(
     winner["selected_template_id"] = winner["template_id"]
     winner["selected_template_path"] = winner["template_path"]
     winner["selected_entry_html"] = winner["entry_html"]
-    winner["ranking"] = ranked
+    winner["selected_entry_html_path"] = winner["entry_html_path"]
+    winner["ranking"] = decorated
     return winner
