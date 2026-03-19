@@ -11,8 +11,9 @@ class FigureInfo(BaseModel):
 
 class PaperSection(BaseModel):
     section_title: str = Field(description="Section title, e.g., 'Introduction' or '3. Methodology'.")
-    content_summary: str = Field(description="High-level summary for quick browsing.")
-    key_details: List[str] = Field(description="Detailed technical points.")
+    rich_web_content: str = Field(
+        description="Dense Markdown narrative for webpage generation, preserving core technical paragraphs, equations, and results."
+    )
     related_figures: List[FigureInfo] = Field(description="Figures and tables linked to this section.")
 
 
@@ -21,8 +22,7 @@ class StructuredPaper(BaseModel):
     overall_summary: str = Field(description="Brief summary of the entire paper.")
     sections: List[PaperSection] = Field(
         description=(
-            "Ordered list of extracted sections. If an Abstract exists, it must be first. "
-            "Do not merge sections."
+            "Ordered list of selected landing-page sections. If an Abstract exists, it must be first."
         )
     )
 
