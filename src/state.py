@@ -35,6 +35,7 @@ class PlannerState(TypedDict):
 
 class CoderState(TypedDict):
     paper_folder_name: str
+    human_directives: str
     structured_paper: StructuredPaper
     page_plan: PagePlan
     coder_feedback_history: Annotated[List[str], operator.add]
