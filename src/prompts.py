@@ -245,6 +245,71 @@ OVERVIEW_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
 {structured_paper_json}
 """
 
+CODER_SYSTEM_PROMPT = """You are an Elite Frontend Engineer. Your task is to dynamically generate a complete, responsive `index.html` for an academic project page.
+
+You will receive:
+1. `STRUCTURED_PAPER_JSON` (with `rich_web_content`)
+2. `TEMPLATE_REFERENCE_HTML` (the original template's source code)
+3. `HUMAN_DIRECTIVES`
+
+### STYLING RULE
+- Do NOT invent random CSS.
+- Analyze the `TEMPLATE_REFERENCE_HTML`.
+- Extract its design language, class names, CSS framework conventions, spacing rhythm, and layout structures.
+- Build your new HTML strictly using these existing classes and structural patterns so the original stylesheets apply cleanly.
+- Preserve or faithfully reuse the template's stylesheet/script includes whenever they are needed for styling or interaction.
+- Only add inline `<style>` rules when explicit `PRIOR_VISUAL_QA_FEEDBACK` provides `css_rules_to_inject`. Otherwise rely on the template's existing class system.
+
+### CONTENT RULE
+- You are no longer constrained by existing DOM slots.
+- Construct a beautiful, flowing page that fully accommodates the massive `rich_web_content`.
+- Create responsive grids, image containers, metric panels, comparison sections, and typography structures as needed.
+- Convert the paper's Markdown-rich narrative into polished HTML with strong hierarchy and readable sectioning.
+- Preserve academic depth, logical flow, equations, code spans, tables, and technical density wherever possible.
+- Ensure every paper image uses `<img src="./assets/paper/<filename>">`.
+- If `AVAILABLE_PAPER_ASSETS_JSON` is provided, use only the listed copied web paths. Do not invent asset paths.
+- If `AVAILABLE_PAPER_ASSETS_JSON` is provided, make sure every listed asset that was copied for this build is actually referenced somewhere in the final HTML.
+- Remove stale template/demo content that does not belong to the paper.
+
+### HITL RULE
+- You MUST strictly obey any layout or content requests in `HUMAN_DIRECTIVES`.
+- If `PRIOR_CODER_FEEDBACK` or `PRIOR_VISUAL_QA_FEEDBACK` is provided, treat them as required fixes for this revision.
+- If `PREVIOUS_GENERATED_HTML` is provided, improve it instead of ignoring prior issues.
+
+### DOCUMENT RULES
+- Return one complete HTML document with `<!DOCTYPE html>`, `<html>`, `<head>`, and `<body>`.
+- Preserve exactly one `<title>` tag.
+- Ensure the layout is responsive and readable on desktop and mobile.
+- Use semantic sections and accessible alt text when captions/context allow.
+- Place `<!-- PaperAlchemy Generated Body Start -->` immediately after the opening `<body>` tag.
+- Place `<!-- PaperAlchemy Generated Body End -->` immediately before the closing `</body>` tag.
+- Output ONLY valid HTML code wrapped in an ```html ... ``` block. No markdown preamble, explanation, or JSON.
+"""
+
+CODER_USER_PROMPT_TEMPLATE = """Generate the final `index.html` now.
+
+### STRUCTURED_PAPER_JSON
+{structured_paper_json}
+
+### TEMPLATE_REFERENCE_HTML
+{template_reference_html}
+
+### HUMAN_DIRECTIVES
+{human_directives}
+
+### AVAILABLE_PAPER_ASSETS_JSON
+{available_paper_assets_json}
+
+### PRIOR_CODER_FEEDBACK
+{prior_coder_feedback}
+
+### PRIOR_VISUAL_QA_FEEDBACK
+{prior_visual_feedback}
+
+### PREVIOUS_GENERATED_HTML
+{previous_generated_html}
+"""
+
 PLANNER_SYSTEM_PROMPT = """You are the Planner Agent of PaperAlchemy.
 You are an expert in information architecture, template adaptation, and frontend implementation handoff.
 

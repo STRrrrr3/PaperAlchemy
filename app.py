@@ -737,6 +737,7 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
         paper_folder_name=paper_folder_name,
         structured_data=structured_data,
         page_plan=page_plan,
+        human_directives=str(state.get("human_directives") or ""),
         max_retry=1,
     )
     if not coder_artifact:
@@ -856,6 +857,7 @@ def run_langgraph_batch(
         paper_folder_name=paper_folder_name,
         structured_data=structured_data,
         page_plan=page_plan,
+        human_directives="",
         max_retry=1,
     )
     if not coder_artifact:
