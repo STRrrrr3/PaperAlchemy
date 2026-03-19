@@ -54,11 +54,75 @@ def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
     return any(k in lowered for k in keywords)
 
 
+def _normalize_directives_text(human_directives: str | None) -> str:
+    return str(human_directives or "").strip().lower()
+
+
+def _has_section_shape_override(human_directives: str | None) -> bool:
+    directive_text = _normalize_directives_text(human_directives)
+    if not directive_text:
+        return False
+
+    section_terms = (
+        "section",
+        "sections",
+        "chapter",
+        "chapters",
+        "part",
+        "parts",
+        "\u7ae0\u8282",
+        "\u90e8\u5206",
+        "\u5c0f\u8282",
+    )
+    override_terms = (
+        "add",
+        "added",
+        "append",
+        "include",
+        "insert",
+        "extra",
+        "more",
+        "fewer",
+        "less",
+        "remove",
+        "delete",
+        "drop",
+        "omit",
+        "skip",
+        "merge",
+        "combine",
+        "split",
+        "separate",
+        "only",
+        "just",
+        "focus",
+        "\u4fdd\u7559",
+        "\u589e\u52a0",
+        "\u6dfb\u52a0",
+        "\u5220\u53bb",
+        "\u5220\u9664",
+        "\u53bb\u6389",
+        "\u7701\u7565",
+        "\u8df3\u8fc7",
+        "\u5408\u5e76",
+        "\u62c6\u5206",
+        "\u53ea\u8981",
+        "\u4ec5\u4fdd\u7559",
+    )
+    return any(term in directive_text for term in section_terms) and any(
+        term in directive_text for term in override_terms
+    )
+
+
 def _section_density_target(section_title: str) -> tuple[int, int, str]:
     """Return (min_key_details, min_summary_chars, section_type)."""
     normalized_title = section_title.strip().lower()
 
-    if "system model" in normalized_title or "threat model" in normalized_title or "models and goals" in normalized_title:
+    if (
+        "system model" in normalized_title
+        or "threat model" in normalized_title
+        or "models and goals" in normalized_title
+    ):
         return 4, 160, "context"
     if _contains_any(normalized_title, LOW_SIGNAL_SECTION_KEYWORDS):
         return 1, 60, "low_signal"
@@ -78,12 +142,18 @@ def _section_density_target(section_title: str) -> tuple[int, int, str]:
     return 4, 150, "general"
 
 
-def _run_density_checks(structured_paper: StructuredPaper) -> list[str]:
+def _run_density_checks(
+    structured_paper: StructuredPaper,
+    human_directives: str | None = None,
+) -> list[str]:
     critiques: list[str] = []
 
-    if len(structured_paper.sections) < 6:
+    min_section_count = 3 if _has_section_shape_override(human_directives) else 5
+    if len(structured_paper.sections) < min_section_count:
         critiques.append(
-            f"Insufficient section coverage: only {len(structured_paper.sections)} sections extracted (recommended >= 6)."
+            "Insufficient section coverage: only "
+            f"{len(structured_paper.sections)} sections extracted "
+            f"(recommended >= {min_section_count})."
         )
 
     overall_len = _text_len(structured_paper.overall_summary)
@@ -130,7 +200,8 @@ def _run_density_checks(structured_paper: StructuredPaper) -> list[str]:
             eval_text = (sec.content_summary or "") + " " + " ".join(sec.key_details or [])
             if not re.search(r"\d", eval_text):
                 critiques.append(
-                    f"Section '{sec.section_title}' lacks quantitative evidence. Add metrics, gains, or overhead numbers."
+                    f"Section '{sec.section_title}' lacks quantitative evidence. "
+                    "Add metrics, gains, or overhead numbers."
                 )
 
     if not has_method_like_section:
@@ -153,7 +224,12 @@ def _normalize_structured_paper(paper: Any) -> StructuredPaper | None:
         return None
 
 
-def run_semantic_critic(raw_markdown: str, structured_json: str, assets_list: list[dict]) -> CriticReport:
+def run_semantic_critic(
+    raw_markdown: str,
+    structured_json: str,
+    assets_list: list[dict],
+    human_directives: str = "",
+) -> CriticReport:
     """Run Gemini-Flash semantic audit for Reader output."""
     print("[PaperAlchemy-Critic] Running Gemini-Flash semantic audit...")
 
@@ -163,6 +239,9 @@ def run_semantic_critic(raw_markdown: str, structured_json: str, assets_list: li
     user_msg = f"""
     ### SOURCE DATA (Original Markdown):
     {raw_markdown}
+
+    ### HUMAN_DIRECTIVES:
+    {human_directives or "(none)"}
 
     ### ASSETS LIST:
     {json.dumps(assets_list, indent=2, ensure_ascii=False)}
@@ -179,15 +258,19 @@ def run_semantic_critic(raw_markdown: str, structured_json: str, assets_list: li
             ]
         )
         return report
-    except Exception as e:
-        print(f"[PaperAlchemy-Critic] Semantic audit error: {e}")
+    except Exception as exc:
+        print(f"[PaperAlchemy-Critic] Semantic audit error: {exc}")
         return CriticReport(
             is_extraction_valid=False,
-            extraction_feedback=f"Semantic audit failed with exception: {e}. Please retry Reader generation.",
+            extraction_feedback=f"Semantic audit failed with exception: {exc}. Please retry Reader generation.",
         )
 
 
-def run_code_critic(structured_paper: StructuredPaper | None, assets_list: list[dict]) -> list[str]:
+def run_code_critic(
+    structured_paper: StructuredPaper | None,
+    assets_list: list[dict],
+    human_directives: str = "",
+) -> list[str]:
     """Run deterministic checks (no LLM)."""
     critiques: list[str] = []
 
@@ -208,7 +291,7 @@ def run_code_critic(structured_paper: StructuredPaper | None, assets_list: list[
                     f"Hallucination warning: section '{sec.section_title}' references missing asset path '{fig.image_path}'."
                 )
 
-    critiques.extend(_run_density_checks(structured_paper))
+    critiques.extend(_run_density_checks(structured_paper, human_directives=human_directives))
     return critiques
 
 
@@ -216,12 +299,17 @@ def critic_node(state: ReaderState) -> dict[str, Any]:
     """LangGraph node: audit Reader output and return pass/fail with feedback."""
     print("[PaperAlchemy-Critic] Running audit...")
     raw_markdown = str(state.get("raw_markdown") or "")
+    human_directives = str(state.get("human_directives") or "")
     assets_list = state.get("assets_list")
     if not isinstance(assets_list, list):
         assets_list = []
 
     structured_paper = _normalize_structured_paper(state.get("structured_paper"))
-    critiques = run_code_critic(structured_paper, assets_list)
+    critiques = run_code_critic(
+        structured_paper,
+        assets_list,
+        human_directives=human_directives,
+    )
 
     if structured_paper:
         paper_json_str = to_pretty_json(structured_paper)
@@ -229,6 +317,7 @@ def critic_node(state: ReaderState) -> dict[str, Any]:
             raw_markdown=raw_markdown,
             structured_json=paper_json_str,
             assets_list=assets_list,
+            human_directives=human_directives,
         )
         if not report.is_extraction_valid:
             critiques.append(f"Semantic audit failed: {report.extraction_feedback}")
