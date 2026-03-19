@@ -507,12 +507,9 @@ def _extract_front_matter_candidates(structured_paper_dict: dict[str, Any]) -> t
         candidate_texts.append(overall_summary)
 
     for section in list(structured_paper_dict.get("sections") or [])[:2]:
-        content_summary = str(section.get("content_summary") or "").strip()
-        if content_summary:
-            candidate_texts.append(content_summary)
-        for detail in list(section.get("key_details") or [])[:6]:
-            if isinstance(detail, str) and detail.strip():
-                candidate_texts.append(detail.strip())
+        rich_web_content = str(section.get("rich_web_content") or "").strip()
+        if rich_web_content:
+            candidate_texts.append(rich_web_content)
 
     author_keywords = ("author", "authors", "corresponding author", "affiliated")
     affiliation_keywords = (
@@ -580,24 +577,11 @@ def format_paper_to_markdown(structured_paper_dict: dict[str, Any]) -> str:
 
     for index, section in enumerate(sections, start=1):
         section_title = str(section.get("section_title") or f"Section {index}").strip()
-        content_summary = str(section.get("content_summary") or "").strip()
-        key_details = [
-            str(detail).strip()
-            for detail in list(section.get("key_details") or [])
-            if str(detail).strip()
-        ]
+        rich_web_content = str(section.get("rich_web_content") or "").strip()
         related_figures = list(section.get("related_figures") or [])
 
         lines.extend(["", f"### {index}. {section_title}"])
-        lines.append(content_summary or "No section summary was extracted.")
-
-        if key_details:
-            lines.extend(["", "Key points:"])
-            for detail in key_details[:4]:
-                lines.append(f"- {detail}")
-            remaining_count = len(key_details) - min(len(key_details), 4)
-            if remaining_count > 0:
-                lines.append(f"- ... {remaining_count} more extracted points remain available internally.")
+        lines.append(rich_web_content or "No rich web content was extracted.")
 
         if related_figures:
             lines.extend(["", "Linked assets:"])

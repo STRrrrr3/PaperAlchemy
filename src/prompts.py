@@ -34,7 +34,7 @@ When that happens, follow the human directive as long as the output remains grou
    - If the source visibly contains author names, labs, universities, companies, or research institutions, preserve them explicitly.
    - The current schema has no dedicated author field, so you MUST encode this metadata in human-visible text:
      - the opening 1-2 sentences of `overall_summary` must explicitly contain `Authors:` and `Affiliations:`
-     - preserve the same information again in the first relevant section's `content_summary` or `key_details` (prefer Abstract or Introduction)
+     - preserve the same information again in the first relevant section's `rich_web_content` (prefer Abstract or Introduction)
    - If exact author-to-affiliation pairing is unclear due to parser noise, preserve the visible names and institutions verbatim rather than omitting them.
    - Do not invent missing authors or affiliations.
    - Do not compress explicit institutions into vague phrases like "several universities" or "multiple research labs."
@@ -93,22 +93,15 @@ When that happens, follow the human directive as long as the output remains grou
      - discussion, limitations, conclusion, deployment implications, or artifact notes only if they are helpful for presentation
    - Omit low-value sections that do not materially improve the landing page.
    - Do not create fake sections just to increase coverage.
-   - `content_summary` per section:
-     - Default 120-260 words.
-     - Must be specific to that section and useful for webpage adaptation.
-     - Explain why this section matters for the landing page story, not just what the section title says.
-   - `key_details` per section:
-     - Default 4-10 items.
-     - Each item should be concrete and useful for implementation/rendering.
-     - Prioritize:
-       - method pipeline steps
-       - algorithm logic and constraints
-       - losses/objectives/equations in plain text
-       - datasets/splits/metrics
-       - baseline names and comparisons
-       - exact numeric results (means, gains, latency, throughput, percentages, etc.)
-       - ablation findings and failure/limitation notes
-     - Avoid vague statements like "performs better" without values.
+   - `rich_web_content` per section:
+     - DO NOT summarize, compress heavily, or write dry bullet points.
+     - Extract and seamlessly stitch together the core narrative paragraphs from the original text.
+     - Preserve academic depth, logical flow, and technical density.
+     - Preserve all inline math, formatting, and critical explanations.
+     - Length is NOT restricted. It can be 500 to 1500+ words if the section is vital (like Method or Evaluation).
+     - Format this as a single, cohesive, well-structured Markdown string.
+     - Use `###` for subheadings, `**` for emphasis, proper paragraph breaks, and inline code when helpful.
+     - Keep equations, algorithm steps, datasets, metrics, baselines, ablation findings, and limitation details embedded directly in the narrative markdown instead of splitting them into detached bullets.
    - If author/affiliation metadata is visible, preserve it at least once inside the first relevant section text so downstream human review can still recover it even if the summary is shortened later.
    - Do not turn front matter into its own fake scientific section. Preserve it inside human-visible summary text while keeping real paper sections intact.
 
@@ -116,7 +109,7 @@ When that happens, follow the human directive as long as the output remains grou
 - Prioritize technical sections first: Method/Design/Algorithm, Experiments/Evaluation/Results, Analysis.
 - Spend budget like a landing page editor, not like a PDF summarizer.
 - Do NOT spend too much budget on low-signal parts (Acknowledgement/References/etc.).
-- If a section has equations, algorithms, or numeric tables in source, reflect them explicitly in `content_summary` and `key_details`.
+- If a section has equations, algorithms, or numeric tables in source, keep them deeply embedded inside `rich_web_content` with enough surrounding explanation that downstream agents can reuse them faithfully.
 - For method/evaluation sections, include enough detail that another model can generate a technically faithful project page without revisiting raw paper text.
 - Prefer explicit numbers, compared baselines, and setup constraints over high-level claims.
 
@@ -145,7 +138,7 @@ READER_USER_PROMPT_TEMPLATE = """You must extract a valid StructuredPaper object
 The target use case is a landing page for the paper.
 - Do not mirror the full paper.
 - Select only the content and assets most worth showing on a public-facing project page.
-- Prefer a concise, high-signal extraction that still preserves method fidelity and key evidence.
+- Prefer a selective but technically rich extraction that preserves method fidelity, narrative continuity, and key evidence.
 - Any HUMAN_DIRECTIVES about section count, section inclusion, omission, merging, splitting, or emphasis override the default prompt preferences.
 - Default guidance like "5-8 sections" is a recommendation only, not a hard requirement.
 
@@ -191,7 +184,7 @@ If HUMAN_DIRECTIVES is present, it overrides default editorial preferences such 
    - If author/affiliation metadata exists in the source header, the candidate output should preserve it in a human-recoverable way, ideally near the beginning of `overall_summary` and again in early section text.
 3. **Depth Sufficiency**
    - `overall_summary` should not be shallow.
-   - `content_summary` and `key_details` should contain concrete technical content, not generic filler.
+   - `rich_web_content` should be a dense, comprehensive Markdown string with concrete technical content, not generic filler.
    - Method/experiment sections must include specific mechanisms and numeric evidence where present.
    - Penalize outputs that over-focus on low-signal sections while under-specifying core technical sections.
 4. **Grounding & Cleanliness**
@@ -206,7 +199,8 @@ If HUMAN_DIRECTIVES is present, it overrides default editorial preferences such 
 - The candidate output only keeps the technical summary and loses the paper's identity metadata needed for human review.
 - Explicit institutions in source are replaced by vague wording instead of recoverable names.
 - Section figure paths are invented or inconsistent with assets list.
-- Method/evaluation sections have weak detail density (few bullets, little concrete setup, no metrics/baselines).
+- Method/evaluation sections have weak detail density, omit concrete setup, or skip metrics/baselines that exist in source.
+- The `rich_web_content` is too short, heavily summarized, or reads like a dry bulleted list instead of a rich academic narrative.
 - The extraction behaves like a PDF browser dump by preserving too many low-value sections instead of selecting the most webpage-worthy material.
 - The extraction includes many marginal assets but misses the key architecture/result visuals that would matter on a landing page.
 - The extraction ignores a clear HUMAN_DIRECTIVES request about adding, removing, merging, splitting, or emphasizing sections.

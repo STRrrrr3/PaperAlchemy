@@ -115,7 +115,7 @@ def _has_section_shape_override(human_directives: str | None) -> bool:
 
 
 def _section_density_target(section_title: str) -> tuple[int, int, str]:
-    """Return (min_key_details, min_summary_chars, section_type)."""
+    """Return (min_words, min_chars, section_type) for rich section content."""
     normalized_title = section_title.strip().lower()
 
     if (
@@ -123,23 +123,40 @@ def _section_density_target(section_title: str) -> tuple[int, int, str]:
         or "threat model" in normalized_title
         or "models and goals" in normalized_title
     ):
-        return 4, 160, "context"
+        return 90, 500, "context"
     if _contains_any(normalized_title, LOW_SIGNAL_SECTION_KEYWORDS):
-        return 1, 60, "low_signal"
+        return 40, 220, "low_signal"
     if _contains_any(normalized_title, RELATED_WORK_SECTION_KEYWORDS):
-        return 3, 120, "related_work"
+        return 80, 450, "related_work"
     if _contains_any(normalized_title, CONCLUSION_SECTION_KEYWORDS):
-        return 3, 120, "conclusion"
+        return 80, 420, "conclusion"
     if _contains_any(normalized_title, EVAL_SECTION_KEYWORDS):
-        return 6, 220, "evaluation"
+        return 180, 1100, "evaluation"
     if _contains_any(normalized_title, METHOD_SECTION_KEYWORDS):
-        return 6, 220, "method"
+        return 180, 1100, "method"
     if "abstract" in normalized_title:
-        return 4, 180, "abstract"
+        return 110, 650, "abstract"
     if "introduction" in normalized_title or "background" in normalized_title:
-        return 5, 180, "context"
+        return 120, 750, "context"
 
-    return 4, 150, "general"
+    return 100, 600, "general"
+
+
+def _word_count(text: str | None) -> int:
+    return len(re.findall(r"\b\w+\b", text or ""))
+
+
+def _nonempty_lines(text: str | None) -> list[str]:
+    return [line.strip() for line in (text or "").splitlines() if line.strip()]
+
+
+def _paragraph_count(text: str | None) -> int:
+    blocks = [block.strip() for block in re.split(r"\n\s*\n", text or "") if block.strip()]
+    return len(blocks)
+
+
+def _is_bullet_line(line: str) -> bool:
+    return bool(re.match(r"^([-*+]\s+|\d+\.\s+)", line.strip()))
 
 
 def _run_density_checks(
@@ -167,37 +184,54 @@ def _run_density_checks(
     has_eval_like_section = False
 
     for sec in structured_paper.sections:
-        min_details, min_summary_chars, section_type = _section_density_target(sec.section_title)
-        summary_len = _text_len(sec.content_summary)
-        details_count = len(sec.key_details)
+        min_words, min_chars, section_type = _section_density_target(sec.section_title)
+        rich_text = sec.rich_web_content or ""
+        rich_len = _text_len(rich_text)
+        rich_words = _word_count(rich_text)
+        nonempty_lines = _nonempty_lines(rich_text)
+        paragraph_count = _paragraph_count(rich_text)
+        bullet_lines = sum(1 for line in nonempty_lines if _is_bullet_line(line))
 
         if section_type == "method":
             has_method_like_section = True
         if section_type == "evaluation":
             has_eval_like_section = True
 
-        if summary_len < min_summary_chars:
+        if rich_len < min_chars or rich_words < min_words:
             critiques.append(
-                f"Section '{sec.section_title}' summary is too short "
-                f"({summary_len} < {min_summary_chars}). Add concrete mechanism/process/experiment details."
+                f"Section '{sec.section_title}' rich_web_content is too short "
+                f"({rich_words} words / {rich_len} chars; recommended >= {min_words} words and >= {min_chars} chars). "
+                "Expand it into a fuller technical narrative with mechanism, setup, and results details."
             )
 
-        if details_count < min_details:
+        if paragraph_count < (3 if section_type in {"method", "evaluation"} else 2):
             critiques.append(
-                f"Section '{sec.section_title}' key_details are too few "
-                f"({details_count} < {min_details}). Add more implementation-useful points."
+                f"Section '{sec.section_title}' rich_web_content is not structured as a developed Markdown narrative. "
+                "Add clearer paragraph breaks and richer exposition."
+            )
+
+        if nonempty_lines and bullet_lines / max(len(nonempty_lines), 1) > 0.6 and paragraph_count <= 2:
+            critiques.append(
+                f"Section '{sec.section_title}' rich_web_content reads too much like a bullet list. "
+                "Rewrite it as cohesive academic prose with Markdown subheadings and paragraphs."
+            )
+
+        if section_type in {"method", "evaluation"} and paragraph_count < 4:
+            critiques.append(
+                f"Section '{sec.section_title}' needs deeper rich_web_content coverage. "
+                "Method and evaluation sections should include multiple dense paragraphs, not a compressed synopsis."
             )
 
         if section_type in {"method", "evaluation"}:
-            dense_points = [d for d in sec.key_details if _text_len(d) >= 24]
-            if len(dense_points) < max(4, min_details - 1):
+            technical_markers = ("###", "**", "`", "equation", "algorithm", "dataset", "metric", "baseline", "ablation")
+            if not any(marker in rich_text.lower() for marker in technical_markers):
                 critiques.append(
-                    f"Section '{sec.section_title}' key_details are too terse. "
-                    "Use more specific full-sentence details about steps, constraints, or quantitative outcomes."
+                    f"Section '{sec.section_title}' rich_web_content lacks clear technical density markers. "
+                    "Preserve subheadings, emphasized concepts, inline code/math, datasets, baselines, or algorithm detail in the Markdown."
                 )
 
         if section_type == "evaluation":
-            eval_text = (sec.content_summary or "") + " " + " ".join(sec.key_details or [])
+            eval_text = rich_text
             if not re.search(r"\d", eval_text):
                 critiques.append(
                     f"Section '{sec.section_title}' lacks quantitative evidence. "
