@@ -9,7 +9,6 @@ try:
 except ImportError as exc:
     raise RuntimeError("Gradio is required to launch the PaperAlchemy web UI.") from exc
 
-from bs4 import BeautifulSoup, Tag
 try:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
     from playwright.sync_api import sync_playwright
@@ -21,6 +20,12 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
+from src.agent_patch import (
+    FULL_REGENERATE_REQUIRED,
+    is_full_regenerate_required,
+    patch_agent_node,
+    patch_executor_node,
+)
 from src.agent_coder import run_coder_agent
 from src.agent_planner import run_planner_agent
 from src.agent_reader import run_reader_agent
@@ -34,7 +39,7 @@ from src.human_feedback import (
 from src.llm import get_llm
 from src.parser import parse_pdf
 from src.prompts import OVERVIEW_SYSTEM_PROMPT, OVERVIEW_USER_PROMPT_TEMPLATE
-from src.schemas import CoderArtifact, PagePlan, StructuredPaper, VisualTweakPlan
+from src.schemas import CoderArtifact, PagePlan, StructuredPaper
 from src.state import WorkflowState
 from src.template_resources import SyncedTemplateAssets, ensure_autopage_template_assets
 
@@ -277,13 +282,6 @@ def take_local_screenshot(html_absolute_path: str, output_image_path: str) -> st
         return ""
 
 
-def _read_text_with_fallback(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return path.read_text(encoding="latin-1")
-
-
 def _message_content_to_text(message: Any) -> str:
     content = getattr(message, "content", message)
     if isinstance(content, str):
@@ -302,188 +300,6 @@ def _message_content_to_text(message: Any) -> str:
         return "\n".join(parts).strip()
 
     return str(content or "").strip()
-
-
-def _selector_component(tag: Tag) -> str:
-    tag_name = tag.name or "div"
-    element_id = tag.get("id")
-    if element_id:
-        return f"{tag_name}#{element_id}"
-
-    classes = [str(item).strip() for item in tag.get("class", []) if str(item).strip()]
-    if classes:
-        return tag_name + "".join(f".{class_name}" for class_name in classes[:3])
-
-    return tag_name
-
-
-def _selector_hint(tag: Tag, max_depth: int = 3) -> str:
-    parts: list[str] = []
-    current: Tag | None = tag
-
-    while current is not None and len(parts) < max_depth:
-        parts.append(_selector_component(current))
-        if current.get("id"):
-            break
-
-        parent = current.parent
-        current = parent if isinstance(parent, Tag) else None
-
-    return " > ".join(reversed(parts))
-
-
-def _build_html_outline(html_text: str, max_lines: int = 120) -> str:
-    soup = BeautifulSoup(html_text, "html.parser")
-    root = soup.body or soup
-    lines: list[str] = []
-    seen: set[str] = set()
-
-    for tag in root.find_all(True):
-        if tag.name in {"script", "style", "noscript"}:
-            continue
-
-        selector = _selector_hint(tag)
-        if selector in seen:
-            continue
-        seen.add(selector)
-
-        attrs: list[str] = []
-        for attr_name in ("id", "class", "src", "href", "alt", "aria-label", "style"):
-            value = tag.get(attr_name)
-            if not value:
-                continue
-            if isinstance(value, list):
-                value_text = " ".join(str(item).strip() for item in value if str(item).strip())
-            else:
-                value_text = str(value).strip()
-            if value_text:
-                attrs.append(f'{attr_name}="{value_text[:100]}"')
-
-        text_preview = " ".join(tag.get_text(" ", strip=True).split())
-        attrs_suffix = f" ({', '.join(attrs)})" if attrs else ""
-        preview_suffix = f' text="{text_preview[:120]}"' if text_preview else ""
-        lines.append(f"- {selector}{attrs_suffix}{preview_suffix}")
-
-        if len(lines) >= max_lines:
-            break
-
-    return "\n".join(lines) if lines else "- <empty body>"
-
-
-def _normalize_string_list(value: Any) -> list[str]:
-    if isinstance(value, str):
-        clean = value.strip()
-        return [clean] if clean else []
-
-    if not isinstance(value, list):
-        return []
-
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for item in value:
-        clean = str(item or "").strip()
-        if clean and clean not in seen:
-            seen.add(clean)
-            normalized.append(clean)
-    return normalized
-
-
-def apply_visual_tweak(current_html_path: str, human_command: str) -> str:
-    html_path = Path(str(current_html_path or "").strip()).resolve()
-    tweak_command = str(human_command or "").strip()
-
-    if not html_path.exists():
-        raise FileNotFoundError(f"Current HTML file not found: {html_path}")
-    if not tweak_command:
-        raise ValueError("Visual tweak command is empty.")
-
-    html_text = _read_text_with_fallback(html_path)
-    soup = BeautifulSoup(html_text, "html.parser")
-    body_html = str(soup.body or soup)[:12000]
-    dom_outline = _build_html_outline(html_text)
-
-    system_prompt = (
-        "You are a precise CSS and DOM manipulator.\n"
-        f"The human wants to tweak the webpage: '{tweak_command}'.\n"
-        "Do NOT rewrite the whole HTML.\n"
-        "You must return a response that matches the VisualTweakPlan schema exactly.\n"
-        "Rules:\n"
-        "- Use only selectors that plausibly exist in the provided DOM outline/body snippet.\n"
-        "- Prefer targeted selectors over broad selectors.\n"
-        "- If the human asks to hide/remove something, use elements_to_remove when safe.\n"
-        "- If the human asks for a purely stylistic change, use css_patches.\n"
-        "- css_patches values must be inline CSS declaration strings.\n"
-        "- Leave fields empty instead of inventing unsafe selectors."
-    )
-    user_prompt = (
-        f"### HUMAN_COMMAND\n{tweak_command}\n\n"
-        f"### DOM_OUTLINE\n{dom_outline}\n\n"
-        f"### BODY_HTML_SNIPPET\n{body_html}\n"
-    )
-
-    llm = get_llm(temperature=0, use_smart_model=True)
-    structured_llm = llm.with_structured_output(VisualTweakPlan)
-    response = structured_llm.invoke(
-        [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_prompt),
-        ]
-    )
-    try:
-        tweak_plan = response if isinstance(response, VisualTweakPlan) else VisualTweakPlan.model_validate(response)
-    except Exception as exc:
-        raise ValueError(f"Visual Editor Agent returned invalid structured output: {exc}") from exc
-
-    css_patches: dict[str, str] = {}
-    for selector, style_text in (tweak_plan.css_patches or {}).items():
-        selector_text = str(selector or "").strip()
-        style_value = str(style_text or "").strip()
-        if selector_text and style_value:
-            css_patches[selector_text] = style_value
-
-    elements_to_remove = _normalize_string_list(tweak_plan.elements_to_remove)
-
-    for selector in elements_to_remove:
-        try:
-            targets = soup.select(selector)
-        except Exception as exc:
-            print(f"[VisualTweak] warning: invalid removal selector '{selector}': {exc}")
-            continue
-
-        if not targets:
-            print(f"[VisualTweak] warning: removal selector '{selector}' matched no elements.")
-            continue
-
-        for target in targets:
-            try:
-                target.decompose()
-            except Exception as exc:
-                print(f"[VisualTweak] warning: failed removing selector '{selector}': {exc}")
-
-    for selector, new_style in css_patches.items():
-        try:
-            targets = soup.select(selector)
-        except Exception as exc:
-            print(f"[VisualTweak] warning: invalid css patch selector '{selector}': {exc}")
-            continue
-
-        if not targets:
-            print(f"[VisualTweak] warning: css patch selector '{selector}' matched no elements.")
-            continue
-
-        for target in targets:
-            try:
-                existing_style = str(target.get("style") or "").strip().rstrip(";")
-                patch_style = new_style.strip().lstrip(";")
-                if existing_style and patch_style:
-                    target["style"] = f"{existing_style}; {patch_style}"
-                elif patch_style:
-                    target["style"] = patch_style
-            except Exception as exc:
-                print(f"[VisualTweak] warning: failed applying css patch to '{selector}': {exc}")
-
-    html_path.write_text(str(soup), encoding="utf-8")
-    return str(html_path)
 
 
 def _coerce_string_list(value: Any) -> list[str]:
@@ -766,7 +582,11 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
     _, _, _, coder_json_path = get_output_paths(paper_folder_name)
     save_coder_artifact(coder_json_path, coder_artifact)
     print(f"[Coder] Generated entry html at {coder_artifact.entry_html}")
-    return {"coder_artifact": coder_artifact, "review_stage": "webpage"}
+    return {"coder_artifact": coder_artifact, "patch_error": ""}
+
+
+def webpage_review_node(_: WorkflowState) -> dict[str, Any]:
+    return {"review_stage": "webpage"}
 
 
 def human_review_router(state: WorkflowState) -> str:
@@ -781,12 +601,21 @@ def webpage_review_router(state: WorkflowState) -> str:
     return "translator"
 
 
+def patch_agent_router(state: WorkflowState) -> str:
+    if is_full_regenerate_required(state.get("patch_agent_output")):
+        return "coder"
+    return "patch_executor"
+
+
 def build_hitl_workflow():
     workflow = StateGraph(WorkflowState)
     workflow.add_node("reader", reader_phase_node)
     workflow.add_node("overview", overview_node)
     workflow.add_node("planner", planner_phase_node)
+    workflow.add_node("webpage_review", webpage_review_node)
     workflow.add_node("translator", translator_node)
+    workflow.add_node("patch_agent", patch_agent_node)
+    workflow.add_node("patch_executor", patch_executor_node)
     workflow.add_node("coder", coder_phase_node)
 
     workflow.set_entry_point("reader")
@@ -800,19 +629,28 @@ def build_hitl_workflow():
         },
     )
     workflow.add_edge("planner", "coder")
-    # Pause after each coder draft so human review can resume through Translator -> Coder.
+    workflow.add_edge("coder", "webpage_review")
     workflow.add_conditional_edges(
-        "coder",
+        "webpage_review",
         webpage_review_router,
         {
             "translator": "translator",
             "end": END,
         },
     )
-    workflow.add_edge("translator", "coder")
+    workflow.add_edge("translator", "patch_agent")
+    workflow.add_conditional_edges(
+        "patch_agent",
+        patch_agent_router,
+        {
+            "coder": "coder",
+            "patch_executor": "patch_executor",
+        },
+    )
+    workflow.add_edge("patch_executor", "webpage_review")
 
     memory = MemorySaver()
-    return workflow.compile(checkpointer=memory, interrupt_after=["overview", "coder"])
+    return workflow.compile(checkpointer=memory, interrupt_after=["overview", "webpage_review"])
 
 
 HITL_WORKFLOW = build_hitl_workflow()
@@ -1120,6 +958,8 @@ def run_extraction(
             "generation_constraints": generation_constraints,
             "human_directives": empty_human_feedback(),
             "coder_instructions": "",
+            "patch_agent_output": "",
+            "patch_error": "",
             "paper_overview": "",
             "is_approved": False,
             "is_webpage_approved": False,
@@ -1206,6 +1046,8 @@ def revise_extraction(
             {
                 "human_directives": feedback_payload,
                 "coder_instructions": "",
+                "patch_agent_output": "",
+                "patch_error": "",
                 "is_approved": False,
             },
             as_node="overview",
@@ -1258,6 +1100,8 @@ def approve_extraction_and_generate_draft(
             {
                 "human_directives": empty_human_feedback(),
                 "coder_instructions": "",
+                "patch_agent_output": "",
+                "patch_error": "",
                 "is_approved": True,
                 "is_webpage_approved": False,
             },
@@ -1337,15 +1181,25 @@ def request_webpage_revision(
             {
                 "human_directives": feedback_payload,
                 "coder_instructions": "",
+                "patch_agent_output": "",
+                "patch_error": "",
                 "is_webpage_approved": False,
             },
-            as_node="coder",
+            as_node="webpage_review",
         )
 
-        log("[Translator] Resuming workflow through Translator -> Coder...")
+        log("[Translator] Resuming workflow through Translator -> Patch Agent...")
         HITL_WORKFLOW.invoke(None, config=config)
         paused_state = HITL_WORKFLOW.get_state(config)
         paused_values = dict(paused_state.values or {})
+        patch_error = str(paused_values.get("patch_error") or "").strip()
+        patch_agent_output = str(paused_values.get("patch_agent_output") or "").strip()
+        if patch_error:
+            log(f"[Patch] Safe fail: {patch_error}")
+        elif patch_agent_output == FULL_REGENERATE_REQUIRED:
+            log("[Patch] Full regenerate required. Coder produced a new revised draft.")
+        elif patch_agent_output:
+            log("[Patch] Deterministic Search/Replace patch applied successfully.")
         preview_image_path, entry_html_path = render_current_workflow_preview(paused_values)
         log(f"[Preview] Rendered revised webpage screenshot from {entry_html_path}")
         log("[Webpage] Revised draft ready. Review it, then approve it or request another revision.")
@@ -1399,9 +1253,11 @@ def approve_webpage(
             {
                 "human_directives": empty_human_feedback(),
                 "coder_instructions": "",
+                "patch_agent_output": "",
+                "patch_error": "",
                 "is_webpage_approved": True,
             },
-            as_node="coder",
+            as_node="webpage_review",
         )
 
         log("[Webpage] Final approval received. Completing the workflow...")

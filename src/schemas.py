@@ -244,19 +244,3 @@ class CoderArtifact(BaseModel):
 class CoderCriticReport(BaseModel):
     is_build_valid: bool = Field(description="Whether coder output passes checks.")
     build_feedback: str = Field(description="Actionable feedback when build fails.")
-
-
-class VisualTweakPlan(BaseModel):
-    css_patches: dict[str, str] = Field(
-        default_factory=dict,
-        description=(
-            "Targeted CSS selector to inline-style patch mappings, where each value is a CSS declaration string "
-            "such as 'color: red; font-size: 2em;'."
-        ),
-    )
-    elements_to_remove: List[str] = Field(
-        default_factory=list,
-        description=(
-            "CSS selectors for DOM elements that should be completely removed from the current HTML document."
-        ),
-    )
