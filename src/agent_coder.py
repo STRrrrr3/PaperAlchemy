@@ -18,6 +18,7 @@ from src.agent_coder_critic import (
 from src.human_feedback import extract_human_feedback_text, normalize_human_feedback
 from src.json_utils import to_pretty_json
 from src.llm import get_llm
+from src.page_manifest import build_page_manifest_path, extract_page_manifest, save_page_manifest
 from src.prompts import CODER_SYSTEM_PROMPT, CODER_USER_PROMPT_TEMPLATE
 from src.schemas import CoderArtifact, PagePlan, StructuredPaper
 from src.state import CoderState
@@ -346,6 +347,7 @@ def coder_node(state: CoderState) -> dict[str, Any]:
                 HumanMessage(
                     content=CODER_USER_PROMPT_TEMPLATE.format(
                         structured_paper_json=to_pretty_json(structured_paper),
+                        page_plan_json=to_pretty_json(page_plan),
                         template_reference_html=template_reference_html,
                         coder_instructions=coder_instructions or "(none)",
                         human_directives=human_directives or "(none)",
@@ -368,12 +370,23 @@ def coder_node(state: CoderState) -> dict[str, Any]:
 
     generated_html = _ensure_body_markers(generated_html)
     generated_html = _normalize_html_whitespace(generated_html)
+    try:
+        page_manifest = extract_page_manifest(
+            html_text=generated_html,
+            entry_html=generated_entry_html_path,
+            selected_template_id=page_plan.template_selection.selected_template_id,
+            page_plan=page_plan,
+        )
+    except Exception as exc:
+        print(f"[PaperAlchemy-Coder] generated HTML is missing stable revision anchors: {exc}")
+        return {}
 
     generated_entry_html_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         generated_entry_html_path.write_text(generated_html, encoding="utf-8")
+        save_page_manifest(build_page_manifest_path(generated_entry_html_path), page_manifest)
     except Exception as exc:
-        print(f"[PaperAlchemy-Coder] failed writing generated html: {exc}")
+        print(f"[PaperAlchemy-Coder] failed writing generated html or page manifest: {exc}")
         return {}
 
     edited_files = ["index.html"]
@@ -390,8 +403,8 @@ def coder_node(state: CoderState) -> dict[str, Any]:
         copied_assets=copied_assets,
         edited_files=edited_files,
         notes=(
-            "v3-llm-native-render: generated a complete HTML document from StructuredPaper rich_web_content, "
-            "template reference HTML, coder instructions, human directives, coder critic feedback, and visual QA feedback."
+            "v5-anchored-llm-render: generated a complete HTML document with stable data-pa-block and "
+            "data-pa-slot anchors, plus page_manifest.json for targeted revisions."
         ),
     )
     return {"coder_artifact": artifact}
@@ -429,7 +442,7 @@ def run_coder_agent(
     human_directives: str | dict = "",
     coder_instructions: str = "",
     previous_coder_artifact: CoderArtifact | None = None,
-    max_retry: int = 1,
+    max_retry: int = 2,
 ) -> CoderArtifact | None:
     app = build_coder_graph(max_retry=max_retry)
     thread = {"configurable": {"thread_id": f"coder_{paper_folder_name}"}}

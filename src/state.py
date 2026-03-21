@@ -2,7 +2,15 @@ import operator
 from typing import Annotated, Any, List, Optional, TypedDict
 
 from src.human_feedback import HumanFeedbackPayload
-from src.schemas import CoderArtifact, PagePlan, SemanticPlan, StructuredPaper, TemplateCandidate
+from src.schemas import (
+    CoderArtifact,
+    PagePlan,
+    RevisionPlan,
+    SemanticPlan,
+    StructuredPaper,
+    TargetedReplacementPlan,
+    TemplateCandidate,
+)
 
 
 class ReaderState(TypedDict):
@@ -57,6 +65,8 @@ class WorkflowState(TypedDict):
     human_directives: HumanFeedbackPayload
     coder_instructions: str
     patch_agent_output: str
+    revision_plan: RevisionPlan | None
+    targeted_replacement_plan: TargetedReplacementPlan | None
     patch_error: str
     paper_overview: str
     is_approved: bool

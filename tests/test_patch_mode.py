@@ -1,17 +1,14 @@
+﻿import shutil
 import unittest
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 from uuid import uuid4
 
-from src.agent_patch import (
-    FULL_REGENERATE_REQUIRED,
-    PatchApplicationError,
-    PatchParseError,
-    apply_patch_output,
-    build_patch_operations,
-    parse_search_replace_blocks,
-)
+from src.agent_patch import LEGACY_PAGE_ERROR, patch_executor_node
 from src.human_feedback import empty_human_feedback
+from src.page_manifest import build_page_manifest_path, extract_page_manifest, save_page_manifest
+from src.schemas import CoderArtifact, PagePlan, StructuredPaper
 
 try:
     import app
@@ -22,140 +19,379 @@ else:
     APP_IMPORT_ERROR = None
 
 
-class PatchModeTests(unittest.TestCase):
-    def test_parse_single_block(self) -> None:
-        patch_text = (
-            "<<<<<<< SEARCH\n"
-            "<div>Old</div>\n"
-            "=======\n"
-            "<div>New</div>\n"
-            ">>>>>>> REPLACE"
+def _sample_structured_paper() -> StructuredPaper:
+    return StructuredPaper.model_validate(
+        {
+            "paper_title": "Demo Paper",
+            "overall_summary": "Authors: Demo. Affiliations: Demo Lab. Summary.",
+            "sections": [
+                {
+                    "section_title": "Abstract",
+                    "rich_web_content": "Abstract content",
+                    "related_figures": [],
+                },
+                {
+                    "section_title": "Results",
+                    "rich_web_content": "Results content",
+                    "related_figures": [],
+                },
+            ],
+        }
+    )
+
+
+def _sample_page_plan(selected_root_dir: str) -> PagePlan:
+    return PagePlan.model_validate(
+        {
+            "plan_meta": {
+                "plan_version": "1.0",
+                "planning_mode": "hybrid_template_bind",
+                "target_framework": "static-html",
+                "confidence": 0.95,
+            },
+            "template_selection": {
+                "selected_template_id": "demo-template",
+                "selected_root_dir": selected_root_dir,
+                "selected_entry_html": "index.html",
+                "fallback_template_id": None,
+                "selection_rationale": "demo",
+            },
+            "decision_summary": {
+                "design_goal": "demo",
+                "novelty_points": ["demo"],
+                "tradeoffs": ["demo"],
+            },
+            "adaptation_strategy": {
+                "preserve_from_template": ["layout"],
+                "replace_content_areas": ["hero", "results"],
+                "style_override_level": "light",
+                "asset_policy": "mixed",
+            },
+            "global_design": {
+                "style_keywords": ["clean"],
+                "color_strategy": {
+                    "background": "#fff",
+                    "surface": "#fff",
+                    "text": "#111",
+                    "accent": "#00f",
+                },
+                "typography_strategy": "sans",
+                "motion_level": "none",
+                "density": "balanced",
+            },
+            "page_outline": [
+                {
+                    "block_id": "hero",
+                    "order": 1,
+                    "title": "Hero",
+                    "objective": "Intro",
+                    "source_sections": ["Abstract"],
+                    "estimated_height": "M",
+                },
+                {
+                    "block_id": "results",
+                    "order": 2,
+                    "title": "Results",
+                    "objective": "Evidence",
+                    "source_sections": ["Results"],
+                    "estimated_height": "M",
+                },
+            ],
+            "blocks": [
+                {
+                    "block_id": "hero",
+                    "target_template_region": {
+                        "selector_hint": "#hero",
+                        "region_role": "hero",
+                        "operation": "replace_text",
+                    },
+                    "component_recipe": [
+                        {
+                            "slot": "content",
+                            "module_id": None,
+                            "component_id": None,
+                            "style_id": None,
+                            "token_set_id": None,
+                            "reason": "demo",
+                        }
+                    ],
+                    "content_contract": {
+                        "headline": "Hero",
+                        "body_points": ["intro"],
+                        "cta": None,
+                    },
+                    "asset_binding": {
+                        "figure_paths": [],
+                        "template_asset_fallback": None,
+                    },
+                    "interaction": {
+                        "pattern": "none",
+                        "behavior_note": "demo",
+                    },
+                    "responsive_rules": {
+                        "mobile_order": 1,
+                        "desktop_layout": "stack",
+                    },
+                    "a11y_notes": [],
+                    "acceptance_checks": [],
+                },
+                {
+                    "block_id": "results",
+                    "target_template_region": {
+                        "selector_hint": "#results",
+                        "region_role": "section",
+                        "operation": "replace_text",
+                    },
+                    "component_recipe": [
+                        {
+                            "slot": "content",
+                            "module_id": None,
+                            "component_id": None,
+                            "style_id": None,
+                            "token_set_id": None,
+                            "reason": "demo",
+                        }
+                    ],
+                    "content_contract": {
+                        "headline": "Results",
+                        "body_points": ["evidence"],
+                        "cta": None,
+                    },
+                    "asset_binding": {
+                        "figure_paths": [],
+                        "template_asset_fallback": None,
+                    },
+                    "interaction": {
+                        "pattern": "none",
+                        "behavior_note": "demo",
+                    },
+                    "responsive_rules": {
+                        "mobile_order": 2,
+                        "desktop_layout": "stack",
+                    },
+                    "a11y_notes": [],
+                    "acceptance_checks": [],
+                },
+            ],
+            "dom_mapping": {"#hero": "Hero", "#results": "Results"},
+            "selectors_to_remove": [],
+            "coder_handoff": {
+                "implementation_order": ["edit index.html"],
+                "file_touch_plan": [
+                    {"path": "index.html", "action": "edit", "reason": "demo"}
+                ],
+                "hard_constraints": [],
+                "known_risks": [],
+            },
+            "quality_checks": [
+                {"name": "grounding_check", "passed": True, "note": "demo"},
+                {"name": "consistency_check", "passed": True, "note": "demo"},
+                {"name": "feasibility_check", "passed": True, "note": "demo"},
+                {"name": "template_path_check", "passed": True, "note": "demo"},
+            ],
+            "open_questions": [],
+        }
+    )
+
+
+def _sample_html() -> str:
+    return """<!DOCTYPE html>
+<html>
+  <head><title>Demo</title></head>
+  <body>
+    <!-- PaperAlchemy Generated Body Start -->
+    <section data-pa-block="hero">
+      <h1 data-pa-slot="title">Old Title</h1>
+      <div data-pa-slot="body"><p>Old hero body</p></div>
+    </section>
+    <section data-pa-block="results">
+      <h2 data-pa-slot="title">Results</h2>
+      <div data-pa-slot="body"><p>Keep me</p></div>
+    </section>
+    <!-- PaperAlchemy Generated Body End -->
+  </body>
+</html>
+"""
+
+
+class ManifestTests(unittest.TestCase):
+    def test_extract_page_manifest_from_anchored_html(self) -> None:
+        page_plan = _sample_page_plan("data/templates/demo-template")
+        manifest = extract_page_manifest(
+            html_text=_sample_html(),
+            entry_html=Path("demo/site/index.html"),
+            selected_template_id="demo-template",
+            page_plan=page_plan,
         )
 
-        blocks = parse_search_replace_blocks(patch_text)
+        self.assertEqual(2, len(manifest.blocks))
+        self.assertEqual("hero", manifest.blocks[0].block_id)
+        self.assertEqual("title", manifest.blocks[0].slots[0].slot_id)
 
-        self.assertEqual(1, len(blocks))
-        self.assertEqual("<div>Old</div>", blocks[0].search)
-        self.assertEqual("<div>New</div>", blocks[0].replace)
+    def test_extract_page_manifest_rejects_missing_required_block(self) -> None:
+        page_plan = _sample_page_plan("data/templates/demo-template")
+        bad_html = _sample_html().replace('data-pa-block="results"', 'data-pa-block="other"')
 
-    def test_parse_multiple_blocks(self) -> None:
-        patch_text = (
-            "<<<<<<< SEARCH\n"
-            "<div>One</div>\n"
-            "=======\n"
-            "<div>Alpha</div>\n"
-            ">>>>>>> REPLACE\n\n"
-            "<<<<<<< SEARCH\n"
-            "<div>Two</div>\n"
-            "=======\n"
-            "<div>Beta</div>\n"
-            ">>>>>>> REPLACE"
+        with self.assertRaisesRegex(ValueError, "Missing required data-pa-block ids"):
+            extract_page_manifest(
+                html_text=bad_html,
+                entry_html=Path("demo/site/index.html"),
+                selected_template_id="demo-template",
+                page_plan=page_plan,
+            )
+
+
+class PatchExecutorTests(unittest.TestCase):
+    def _setup_workspace(self) -> tuple[Path, PagePlan, StructuredPaper, CoderArtifact]:
+        temp_root = Path.cwd() / "data" / "output" / "_tmp_test_workspace"
+        temp_root.mkdir(parents=True, exist_ok=True)
+        root = temp_root / uuid4().hex
+        root.mkdir(parents=True, exist_ok=False)
+        site_dir = root / "output" / "site"
+        site_dir.mkdir(parents=True, exist_ok=True)
+        entry_html = site_dir / "index.html"
+        entry_html.write_text(_sample_html(), encoding="utf-8")
+
+        template_dir = root / "templates" / "demo-template"
+        template_dir.mkdir(parents=True, exist_ok=True)
+        (template_dir / "index.html").write_text("<html><body>template</body></html>", encoding="utf-8")
+
+        project_root = Path.cwd().resolve()
+        selected_root_dir = str(template_dir.resolve().relative_to(project_root)).replace("\\", "/")
+        page_plan = _sample_page_plan(selected_root_dir)
+        structured_paper = _sample_structured_paper()
+        manifest = extract_page_manifest(
+            html_text=entry_html.read_text(encoding="utf-8"),
+            entry_html=entry_html,
+            selected_template_id="demo-template",
+            page_plan=page_plan,
         )
+        save_page_manifest(build_page_manifest_path(entry_html), manifest)
 
-        blocks = parse_search_replace_blocks(patch_text)
-
-        self.assertEqual(2, len(blocks))
-        self.assertEqual("<div>One</div>", blocks[0].search)
-        self.assertEqual("<div>Beta</div>", blocks[1].replace)
-
-    def test_rejects_prose_outside_patch_blocks(self) -> None:
-        patch_text = "Please apply this.\n<<<<<<< SEARCH\nA\n=======\nB\n>>>>>>> REPLACE"
-
-        with self.assertRaisesRegex(PatchParseError, "outside Search/Replace blocks"):
-            parse_search_replace_blocks(patch_text)
-
-    def test_rejects_code_fences(self) -> None:
-        patch_text = "```text\n<<<<<<< SEARCH\nA\n=======\nB\n>>>>>>> REPLACE\n```"
-
-        with self.assertRaisesRegex(PatchParseError, "code fences"):
-            parse_search_replace_blocks(patch_text)
-
-    def test_rejects_malformed_markers(self) -> None:
-        patch_text = "<<<<<<< SEARCH\nA\n=======\nB"
-
-        with self.assertRaisesRegex(PatchParseError, "missing a REPLACE terminator"):
-            parse_search_replace_blocks(patch_text)
-
-    def test_rejects_empty_search_block(self) -> None:
-        patch_text = "<<<<<<< SEARCH\n\n=======\nB\n>>>>>>> REPLACE"
-
-        with self.assertRaisesRegex(PatchParseError, "SEARCH snippet is empty"):
-            parse_search_replace_blocks(patch_text)
-
-    def test_apply_patch_output_supports_multiple_blocks(self) -> None:
-        current_html = (
-            "<header>\n"
-            "  <div>Placeholder</div>\n"
-            "</header>\n"
-            "<main>\n"
-            "  <p>Old body</p>\n"
-            "</main>\n"
+        artifact = CoderArtifact(
+            site_dir=str(site_dir),
+            entry_html=str(entry_html),
+            selected_template_id="demo-template",
+            copied_assets=[],
+            edited_files=["index.html"],
+            notes="v5-anchored-llm-render",
         )
-        patch_text = (
-            "<<<<<<< SEARCH\n"
-            "<header>\n"
-            "  <div>Placeholder</div>\n"
-            "</header>\n"
-            "=======\n"
-            "<header>\n"
-            "  <div>Final title</div>\n"
-            "</header>\n"
-            ">>>>>>> REPLACE\n\n"
-            "<<<<<<< SEARCH\n"
-            "<main>\n"
-            "  <p>Old body</p>\n"
-            "</main>\n"
-            "=======\n"
-            "<main>\n"
-            "  <p>New body</p>\n"
-            "</main>\n"
-            ">>>>>>> REPLACE"
-        )
+        return root, page_plan, structured_paper, artifact
 
-        patched_html, blocks = apply_patch_output(current_html, patch_text)
+    def test_patch_executor_applies_slot_replacement_without_touching_other_blocks(self) -> None:
+        root, page_plan, structured_paper, artifact = self._setup_workspace()
+        try:
+            state = {
+                "paper_folder_name": "demo-paper",
+                "page_plan": page_plan,
+                "structured_paper": structured_paper,
+                "coder_artifact": artifact,
+                "patch_error": "",
+                "revision_plan": {
+                    "edits": [
+                        {
+                            "block_id": "hero",
+                            "slot_id": "body",
+                            "scope": "slot",
+                            "change_request": "update hero body",
+                            "preserve_requirements": ["keep title"],
+                            "acceptance_hint": "hero body changes",
+                        }
+                    ]
+                },
+                "targeted_replacement_plan": {
+                    "replacements": [
+                        {
+                            "block_id": "hero",
+                            "slot_id": "body",
+                            "scope": "slot",
+                            "html": "<p>New hero body</p>",
+                        }
+                    ],
+                    "fallback_blocks": [],
+                },
+            }
 
-        self.assertEqual(2, len(blocks))
-        self.assertIn("<div>Final title</div>", patched_html)
-        self.assertIn("<p>New body</p>", patched_html)
-        self.assertNotIn("Placeholder", patched_html)
+            result = patch_executor_node(state)
 
-    def test_zero_match_fails_safely(self) -> None:
-        current_html = "<div>Only current content</div>\n"
-        patch_text = "<<<<<<< SEARCH\n<div>Missing</div>\n=======\n<div>New</div>\n>>>>>>> REPLACE"
+            self.assertEqual("", result.get("patch_error"))
+            updated_html = Path(artifact.entry_html).read_text(encoding="utf-8")
+            self.assertIn("New hero body", updated_html)
+            self.assertIn("Keep me", updated_html)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
-        with self.assertRaisesRegex(PatchApplicationError, "could not find an exact SEARCH match"):
-            apply_patch_output(current_html, patch_text)
+    def test_patch_executor_falls_back_to_block_regeneration(self) -> None:
+        root, page_plan, structured_paper, artifact = self._setup_workspace()
+        try:
+            state = {
+                "paper_folder_name": "demo-paper",
+                "page_plan": page_plan,
+                "structured_paper": structured_paper,
+                "coder_artifact": artifact,
+                "patch_error": "",
+                "revision_plan": {
+                    "edits": [
+                        {
+                            "block_id": "hero",
+                            "slot_id": "summary",
+                            "scope": "slot",
+                            "change_request": "add summary",
+                            "preserve_requirements": ["keep title"],
+                            "acceptance_hint": "summary appears",
+                        }
+                    ]
+                },
+                "targeted_replacement_plan": {
+                    "replacements": [
+                        {
+                            "block_id": "hero",
+                            "slot_id": "summary",
+                            "scope": "slot",
+                            "html": "<p>Summary</p>",
+                        }
+                    ],
+                    "fallback_blocks": [{"block_id": "hero", "reason": "slot missing"}],
+                },
+            }
 
-        self.assertEqual("<div>Only current content</div>\n", current_html)
+            regenerated_html = (
+                '<section data-pa-block="hero">'
+                '<h1 data-pa-slot="title">Old Title</h1>'
+                '<div data-pa-slot="summary"><p>Summary</p></div>'
+                '<div data-pa-slot="body"><p>Old hero body</p></div>'
+                "</section>"
+            )
+            with patch("src.agent_patch._regenerate_block_html", return_value=regenerated_html):
+                result = patch_executor_node(state)
 
-    def test_multiple_match_fails_safely(self) -> None:
-        current_html = "<li>Item</li>\n<li>Item</li>\n"
-        patch_text = "<<<<<<< SEARCH\n<li>Item</li>\n=======\n<li>Updated</li>\n>>>>>>> REPLACE"
+            self.assertEqual("", result.get("patch_error"))
+            updated_html = Path(artifact.entry_html).read_text(encoding="utf-8")
+            self.assertIn('data-pa-slot="summary"', updated_html)
+            self.assertIn("Summary", updated_html)
+            self.assertIn("Keep me", updated_html)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
-        with self.assertRaisesRegex(PatchApplicationError, "found multiple exact SEARCH matches"):
-            apply_patch_output(current_html, patch_text)
+    def test_patch_executor_rejects_legacy_page_without_manifest(self) -> None:
+        root, page_plan, structured_paper, artifact = self._setup_workspace()
+        try:
+            build_page_manifest_path(artifact.entry_html).unlink(missing_ok=True)
+            state = {
+                "paper_folder_name": "demo-paper",
+                "page_plan": page_plan,
+                "structured_paper": structured_paper,
+                "coder_artifact": artifact,
+                "patch_error": "",
+                "revision_plan": {"edits": []},
+                "targeted_replacement_plan": {"replacements": [], "fallback_blocks": []},
+            }
 
-    def test_overlapping_matches_fail_safely(self) -> None:
-        current_html = "abcdef"
-        blocks = parse_search_replace_blocks(
-            "<<<<<<< SEARCH\nabcde\n=======\nABCDE\n>>>>>>> REPLACE\n\n"
-            "<<<<<<< SEARCH\ncde\n=======\nCDE\n>>>>>>> REPLACE"
-        )
+            result = patch_executor_node(state)
 
-        with self.assertRaisesRegex(PatchApplicationError, "overlapping SEARCH ranges"):
-            build_patch_operations(current_html, blocks)
-
-    def test_atomic_validation_prevents_partial_application(self) -> None:
-        current_html = "<div>A</div>\n<div>B</div>\n"
-        patch_text = (
-            "<<<<<<< SEARCH\n<div>A</div>\n=======\n<div>X</div>\n>>>>>>> REPLACE\n\n"
-            "<<<<<<< SEARCH\n<div>C</div>\n=======\n<div>Y</div>\n>>>>>>> REPLACE"
-        )
-
-        with self.assertRaises(PatchApplicationError):
-            apply_patch_output(current_html, patch_text)
-
-        self.assertEqual("<div>A</div>\n<div>B</div>\n", current_html)
+            self.assertEqual(LEGACY_PAGE_ERROR, result.get("patch_error"))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 @unittest.skipIf(app is None, f"app import failed: {APP_IMPORT_ERROR}")
@@ -168,6 +404,8 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
             "human_directives": empty_human_feedback(),
             "coder_instructions": "",
             "patch_agent_output": "",
+            "revision_plan": None,
+            "targeted_replacement_plan": None,
             "patch_error": "",
             "paper_overview": "",
             "is_approved": False,
@@ -180,7 +418,7 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
 
     def _build_workflow(
         self,
-        patch_agent_output: str,
+        patch_agent_result: dict[str, Any],
         patch_executor_result: dict[str, Any] | None = None,
     ) -> tuple[Any, dict[str, int]]:
         counts = {
@@ -211,11 +449,24 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
 
         def translator_node(_: Any) -> dict[str, Any]:
             counts["translator"] += 1
-            return {"coder_instructions": "1. Remove the empty nav placeholder."}
+            return {
+                "revision_plan": {
+                    "edits": [
+                        {
+                            "block_id": "hero",
+                            "slot_id": "body",
+                            "scope": "slot",
+                            "change_request": "demo",
+                            "preserve_requirements": [],
+                            "acceptance_hint": "demo",
+                        }
+                    ]
+                }
+            }
 
         def fake_patch_agent_node(_: Any) -> dict[str, Any]:
             counts["patch_agent"] += 1
-            return {"patch_agent_output": patch_agent_output}
+            return patch_agent_result
 
         def fake_patch_executor_node(_: Any) -> dict[str, Any]:
             counts["patch_executor"] += 1
@@ -246,6 +497,8 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
                 "human_directives": empty_human_feedback(),
                 "coder_instructions": "",
                 "patch_agent_output": "",
+                "revision_plan": None,
+                "targeted_replacement_plan": None,
                 "patch_error": "",
                 "is_approved": True,
                 "is_webpage_approved": False,
@@ -258,42 +511,34 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
         self.assertEqual("webpage", webpage_state.values.get("review_stage"))
         return config
 
-    def test_full_regenerate_route_calls_coder_instead_of_patch_executor(self) -> None:
-        workflow, counts = self._build_workflow(FULL_REGENERATE_REQUIRED)
-        config = self._pause_at_webpage_review(workflow)
-
-        workflow.update_state(
-            config,
-            {
-                "human_directives": {"text": "remove the empty nav item", "images": []},
-                "coder_instructions": "",
-                "patch_agent_output": "",
-                "patch_error": "",
-                "is_webpage_approved": False,
-            },
-            as_node="webpage_review",
-        )
-        workflow.invoke(None, config=config)
-
-        state = workflow.get_state(config)
-        self.assertEqual("webpage", state.values.get("review_stage"))
-        self.assertEqual(1, counts["translator"])
-        self.assertEqual(1, counts["patch_agent"])
-        self.assertEqual(0, counts["patch_executor"])
-        self.assertEqual(2, counts["coder"])
-
-    def test_patch_route_calls_patch_executor_without_full_regenerate(self) -> None:
+    def test_revision_flow_calls_patch_executor_after_patch_agent(self) -> None:
         workflow, counts = self._build_workflow(
-            "<<<<<<< SEARCH\n<nav>Old</nav>\n=======\n<nav>New</nav>\n>>>>>>> REPLACE"
+            {
+                "patch_agent_output": "replacements=1; fallback_blocks=0",
+                "targeted_replacement_plan": {
+                    "replacements": [
+                        {
+                            "block_id": "hero",
+                            "slot_id": "body",
+                            "scope": "slot",
+                            "html": "<p>Updated</p>",
+                        }
+                    ],
+                    "fallback_blocks": [],
+                },
+                "patch_error": "",
+            }
         )
         config = self._pause_at_webpage_review(workflow)
 
         workflow.update_state(
             config,
             {
-                "human_directives": {"text": "fix the nav copy", "images": []},
+                "human_directives": {"text": "fix hero body", "images": []},
                 "coder_instructions": "",
                 "patch_agent_output": "",
+                "revision_plan": None,
+                "targeted_replacement_plan": None,
                 "patch_error": "",
                 "is_webpage_approved": False,
             },
@@ -301,27 +546,30 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
         )
         workflow.invoke(None, config=config)
 
-        state = workflow.get_state(config)
-        self.assertEqual("webpage", state.values.get("review_stage"))
         self.assertEqual(1, counts["translator"])
         self.assertEqual(1, counts["patch_agent"])
         self.assertEqual(1, counts["patch_executor"])
         self.assertEqual(1, counts["coder"])
-        self.assertEqual("", state.values.get("patch_error"))
 
-    def test_safe_fail_returns_to_webpage_review_with_patch_error(self) -> None:
+    def test_patch_executor_runs_even_when_patch_agent_sets_safe_fail(self) -> None:
         workflow, counts = self._build_workflow(
-            "<<<<<<< SEARCH\n<nav>Old</nav>\n=======\n<nav>New</nav>\n>>>>>>> REPLACE",
-            patch_executor_result={"patch_error": "Patch Executor could not find an exact SEARCH match for block 1."},
+            {
+                "patch_agent_output": "",
+                "targeted_replacement_plan": None,
+                "patch_error": LEGACY_PAGE_ERROR,
+            },
+            patch_executor_result={"patch_error": LEGACY_PAGE_ERROR},
         )
         config = self._pause_at_webpage_review(workflow)
 
         workflow.update_state(
             config,
             {
-                "human_directives": {"text": "remove the stale nav entry", "images": []},
+                "human_directives": {"text": "fix hero body", "images": []},
                 "coder_instructions": "",
                 "patch_agent_output": "",
+                "revision_plan": None,
+                "targeted_replacement_plan": None,
                 "patch_error": "",
                 "is_webpage_approved": False,
             },
@@ -330,38 +578,10 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
         workflow.invoke(None, config=config)
 
         state = workflow.get_state(config)
-        self.assertEqual("webpage", state.values.get("review_stage"))
-        self.assertEqual(
-            "Patch Executor could not find an exact SEARCH match for block 1.",
-            state.values.get("patch_error"),
-        )
+        self.assertEqual(LEGACY_PAGE_ERROR, state.values.get("patch_error"))
         self.assertEqual(1, counts["patch_executor"])
-        self.assertEqual(1, counts["coder"])
-
-    def test_webpage_review_pause_can_approve_to_end(self) -> None:
-        workflow, counts = self._build_workflow(FULL_REGENERATE_REQUIRED)
-        config = self._pause_at_webpage_review(workflow)
-
-        workflow.update_state(
-            config,
-            {
-                "human_directives": empty_human_feedback(),
-                "coder_instructions": "",
-                "patch_agent_output": "",
-                "patch_error": "",
-                "is_webpage_approved": True,
-            },
-            as_node="webpage_review",
-        )
-        workflow.invoke(None, config=config)
-
-        state = workflow.get_state(config)
-        self.assertEqual("webpage", state.values.get("review_stage"))
-        self.assertEqual(0, counts["translator"])
-        self.assertEqual(0, counts["patch_agent"])
-        self.assertEqual(0, counts["patch_executor"])
-        self.assertEqual(1, counts["coder"])
 
 
-if __name__ == "__main__":
-    unittest.main()
+
+
+

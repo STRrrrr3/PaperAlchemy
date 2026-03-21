@@ -21,8 +21,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from src.agent_patch import (
-    FULL_REGENERATE_REQUIRED,
-    is_full_regenerate_required,
     patch_agent_node,
     patch_executor_node,
 )
@@ -574,7 +572,7 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
         human_directives=state.get("human_directives"),
         coder_instructions=str(state.get("coder_instructions") or ""),
         previous_coder_artifact=previous_coder_artifact,
-        max_retry=1,
+        max_retry=2,
     )
     if not coder_artifact:
         raise RuntimeError("Coder agent failed to build the final webpage.")
@@ -582,7 +580,13 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
     _, _, _, coder_json_path = get_output_paths(paper_folder_name)
     save_coder_artifact(coder_json_path, coder_artifact)
     print(f"[Coder] Generated entry html at {coder_artifact.entry_html}")
-    return {"coder_artifact": coder_artifact, "patch_error": ""}
+    return {
+        "coder_artifact": coder_artifact,
+        "patch_error": "",
+        "revision_plan": None,
+        "targeted_replacement_plan": None,
+        "patch_agent_output": "",
+    }
 
 
 def webpage_review_node(_: WorkflowState) -> dict[str, Any]:
@@ -599,12 +603,6 @@ def webpage_review_router(state: WorkflowState) -> str:
     if bool(state.get("is_webpage_approved")):
         return "end"
     return "translator"
-
-
-def patch_agent_router(state: WorkflowState) -> str:
-    if is_full_regenerate_required(state.get("patch_agent_output")):
-        return "coder"
-    return "patch_executor"
 
 
 def build_hitl_workflow():
@@ -639,14 +637,7 @@ def build_hitl_workflow():
         },
     )
     workflow.add_edge("translator", "patch_agent")
-    workflow.add_conditional_edges(
-        "patch_agent",
-        patch_agent_router,
-        {
-            "coder": "coder",
-            "patch_executor": "patch_executor",
-        },
-    )
+    workflow.add_edge("patch_agent", "patch_executor")
     workflow.add_edge("patch_executor", "webpage_review")
 
     memory = MemorySaver()
@@ -733,7 +724,7 @@ def run_langgraph_batch(
         page_plan=page_plan,
         human_directives=empty_human_feedback(),
         coder_instructions="",
-        max_retry=1,
+        max_retry=2,
     )
     if not coder_artifact:
         raise RuntimeError("Coder agent failed to build the final webpage.")
@@ -959,6 +950,8 @@ def run_extraction(
             "human_directives": empty_human_feedback(),
             "coder_instructions": "",
             "patch_agent_output": "",
+            "revision_plan": None,
+            "targeted_replacement_plan": None,
             "patch_error": "",
             "paper_overview": "",
             "is_approved": False,
@@ -1047,6 +1040,8 @@ def revise_extraction(
                 "human_directives": feedback_payload,
                 "coder_instructions": "",
                 "patch_agent_output": "",
+                "revision_plan": None,
+                "targeted_replacement_plan": None,
                 "patch_error": "",
                 "is_approved": False,
             },
@@ -1101,6 +1096,8 @@ def approve_extraction_and_generate_draft(
                 "human_directives": empty_human_feedback(),
                 "coder_instructions": "",
                 "patch_agent_output": "",
+                "revision_plan": None,
+                "targeted_replacement_plan": None,
                 "patch_error": "",
                 "is_approved": True,
                 "is_webpage_approved": False,
@@ -1182,24 +1179,38 @@ def request_webpage_revision(
                 "human_directives": feedback_payload,
                 "coder_instructions": "",
                 "patch_agent_output": "",
+                "revision_plan": None,
+                "targeted_replacement_plan": None,
                 "patch_error": "",
                 "is_webpage_approved": False,
             },
             as_node="webpage_review",
         )
 
-        log("[Translator] Resuming workflow through Translator -> Patch Agent...")
+        log("[Translator] Resuming workflow through Translator -> Patch Agent -> Patch Executor...")
         HITL_WORKFLOW.invoke(None, config=config)
         paused_state = HITL_WORKFLOW.get_state(config)
         paused_values = dict(paused_state.values or {})
         patch_error = str(paused_values.get("patch_error") or "").strip()
         patch_agent_output = str(paused_values.get("patch_agent_output") or "").strip()
+        targeted_replacement_plan = paused_values.get("targeted_replacement_plan") or {}
+        if hasattr(targeted_replacement_plan, "model_dump"):
+            targeted_replacement_plan = targeted_replacement_plan.model_dump()
+        if isinstance(targeted_replacement_plan, dict):
+            replacements_count = len(targeted_replacement_plan.get("replacements") or [])
+            fallback_count = len(targeted_replacement_plan.get("fallback_blocks") or [])
+        else:
+            replacements_count = 0
+            fallback_count = 0
         if patch_error:
             log(f"[Patch] Safe fail: {patch_error}")
-        elif patch_agent_output == FULL_REGENERATE_REQUIRED:
-            log("[Patch] Full regenerate required. Coder produced a new revised draft.")
+        elif replacements_count or fallback_count:
+            log(
+                "[Patch] Anchored DOM revision applied: "
+                f"{replacements_count} targeted replacement(s), {fallback_count} regenerated block(s)."
+            )
         elif patch_agent_output:
-            log("[Patch] Deterministic Search/Replace patch applied successfully.")
+            log(f"[Patch] Anchored DOM revision applied: {patch_agent_output}")
         preview_image_path, entry_html_path = render_current_workflow_preview(paused_values)
         log(f"[Preview] Rendered revised webpage screenshot from {entry_html_path}")
         log("[Webpage] Revised draft ready. Review it, then approve it or request another revision.")
@@ -1254,6 +1265,8 @@ def approve_webpage(
                 "human_directives": empty_human_feedback(),
                 "coder_instructions": "",
                 "patch_agent_output": "",
+                "revision_plan": None,
+                "targeted_replacement_plan": None,
                 "patch_error": "",
                 "is_webpage_approved": True,
             },

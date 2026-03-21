@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import Any
 
@@ -10,8 +11,9 @@ from src.human_feedback import (
     has_human_feedback,
 )
 from src.llm import get_llm
+from src.page_manifest import build_page_manifest_path, load_page_manifest
 from src.prompts import TRANSLATOR_SYSTEM_PROMPT, TRANSLATOR_USER_PROMPT_TEMPLATE
-from src.schemas import CoderArtifact
+from src.schemas import CoderArtifact, RevisionPlan
 from src.state import WorkflowState
 
 
@@ -46,6 +48,17 @@ def _message_content_to_text(message: Any) -> str:
     return str(content or "").strip()
 
 
+def _normalize_revision_plan(plan: Any) -> RevisionPlan | None:
+    if isinstance(plan, RevisionPlan):
+        return plan
+    if plan is None:
+        return None
+    try:
+        return RevisionPlan.model_validate(plan)
+    except Exception:
+        return None
+
+
 def _read_current_html(artifact: CoderArtifact | None) -> str:
     if not artifact:
         return "(none)"
@@ -62,32 +75,45 @@ def _read_current_html(artifact: CoderArtifact | None) -> str:
         return "(none)"
 
 
+def _read_current_page_manifest(artifact: CoderArtifact | None) -> str:
+    if not artifact:
+        return "{}"
+
+    manifest = load_page_manifest(build_page_manifest_path(artifact.entry_html))
+    if not manifest:
+        return "{}"
+    return json.dumps(manifest.model_dump(), indent=2, ensure_ascii=False)
+
+
 def translator_node(state: WorkflowState) -> dict[str, Any]:
     artifact = _normalize_coder_artifact(state.get("coder_artifact"))
     if not artifact:
         print("[Translator] missing coder artifact, skipping translation.")
-        return {"coder_instructions": ""}
+        return {"revision_plan": RevisionPlan()}
 
     feedback = state.get("human_directives")
     if not has_human_feedback(feedback):
         print("[Translator] no human feedback provided, skipping translation.")
-        return {"coder_instructions": ""}
+        return {"revision_plan": RevisionPlan()}
 
     human_feedback = extract_human_feedback_text(feedback) or "(no text feedback provided)"
     human_feedback_images = extract_human_feedback_images(feedback)
     current_html = _read_current_html(artifact)
+    current_page_manifest_json = _read_current_page_manifest(artifact)
 
     user_prompt = TRANSLATOR_USER_PROMPT_TEMPLATE.format(
         human_feedback=human_feedback,
         current_entry_html_path=artifact.entry_html,
         current_template_id=artifact.selected_template_id,
+        current_page_manifest_json=current_page_manifest_json,
         current_html=current_html,
     )
 
-    print("[Translator] Translating multimodal feedback into coder instructions...")
+    print("[Translator] Translating multimodal feedback into a structured revision plan...")
     try:
         llm = get_llm(temperature=0.1, use_smart_model=True)
-        response = llm.invoke(
+        structured_llm = llm.with_structured_output(RevisionPlan)
+        response = structured_llm.invoke(
             [
                 SystemMessage(content=TRANSLATOR_SYSTEM_PROMPT),
                 HumanMessage(
@@ -98,12 +124,9 @@ def translator_node(state: WorkflowState) -> dict[str, Any]:
                 ),
             ]
         )
-        coder_instructions = _message_content_to_text(response)
     except Exception as exc:
         print(f"[Translator] translation failed: {exc}")
-        return {"coder_instructions": ""}
+        return {"revision_plan": RevisionPlan()}
 
-    if not coder_instructions:
-        coder_instructions = "No changes required."
-
-    return {"coder_instructions": coder_instructions}
+    revision_plan = _normalize_revision_plan(response) or RevisionPlan()
+    return {"revision_plan": revision_plan}

@@ -1,4 +1,5 @@
 import json
+import re
 from collections.abc import Callable
 from typing import Any
 
@@ -11,6 +12,11 @@ from src.schemas import PagePlan, PlannerCriticReport, StructuredPaper, Template
 from src.state import PlannerState
 
 MAX_PLANNER_RETRY_DEFAULT = 2
+_STABLE_BLOCK_ID_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
+_UNSTABLE_BLOCK_ID_PATTERN = re.compile(
+    r"^(?:block|section|item|content|slot|module|component|region)_[0-9]+$"
+)
+_DISALLOWED_BLOCK_ID_TOKENS = {"template", "placeholder", "todo", "tbd", "temp", "dummy"}
 
 
 def _normalize_page_plan(plan: Any) -> PagePlan | None:
@@ -58,6 +64,35 @@ def _catalog_to_lookup(template_catalog: list[dict[str, Any]]) -> dict[str, dict
     return lookup
 
 
+def _selected_template_tokens(template_id: str) -> set[str]:
+    tokens = {
+        token
+        for token in re.split(r"[^a-z0-9]+", str(template_id or "").lower())
+        if token and token not in {"github", "io", "www", "com"}
+    }
+    return tokens
+
+
+def _validate_block_id(block_id: str, template_tokens: set[str]) -> list[str]:
+    critiques: list[str] = []
+    clean = str(block_id or "").strip()
+    lowered = clean.lower()
+
+    if not clean:
+        critiques.append("Encountered an empty block_id in PagePlan.")
+        return critiques
+    if not _STABLE_BLOCK_ID_PATTERN.match(clean):
+        critiques.append(f"block_id '{clean}' must be stable snake_case.")
+    if _UNSTABLE_BLOCK_ID_PATTERN.match(lowered):
+        critiques.append(f"block_id '{clean}' uses unstable positional naming.")
+    if any(token in lowered.split("_") for token in _DISALLOWED_BLOCK_ID_TOKENS):
+        critiques.append(f"block_id '{clean}' contains placeholder or template-derived wording.")
+    if template_tokens and any(token in lowered.split("_") for token in template_tokens):
+        critiques.append(f"block_id '{clean}' should not depend on selected template naming.")
+
+    return critiques
+
+
 def run_planner_code_critic(
     page_plan: PagePlan | None,
     structured_paper: StructuredPaper | None,
@@ -77,6 +112,7 @@ def run_planner_code_critic(
     catalog_lookup = _catalog_to_lookup(template_catalog)
     selected_id = page_plan.template_selection.selected_template_id
     selected_entry = page_plan.template_selection.selected_entry_html
+    template_tokens = _selected_template_tokens(selected_id)
 
     selected_template = catalog_lookup.get(selected_id)
     if not selected_template:
@@ -103,15 +139,24 @@ def run_planner_code_critic(
         if fig.image_path
     }
 
-    outline_block_ids = {item.block_id for item in page_plan.page_outline}
+    outline_block_ids: set[str] = set()
     for item in page_plan.page_outline:
+        if item.block_id in outline_block_ids:
+            critiques.append(f"Duplicate page_outline block_id '{item.block_id}'.")
+        outline_block_ids.add(item.block_id)
+        critiques.extend(_validate_block_id(item.block_id, template_tokens))
         for sec_title in item.source_sections:
             if sec_title not in valid_sections:
                 critiques.append(
                     f"page_outline block '{item.block_id}' references unknown source section '{sec_title}'."
                 )
 
+    block_ids: set[str] = set()
     for block in page_plan.blocks:
+        if block.block_id in block_ids:
+            critiques.append(f"Duplicate blocks item block_id '{block.block_id}'.")
+        block_ids.add(block.block_id)
+        critiques.extend(_validate_block_id(block.block_id, template_tokens))
         if block.block_id not in outline_block_ids:
             critiques.append(
                 f"blocks item '{block.block_id}' does not exist in page_outline."
@@ -121,6 +166,11 @@ def run_planner_code_critic(
                 critiques.append(
                     f"block '{block.block_id}' references unknown figure path '{asset_path}'."
                 )
+
+    if outline_block_ids != block_ids:
+        critiques.append(
+            "page_outline block_ids and blocks block_ids must match exactly for stable revision targeting."
+        )
 
     selected_root = page_plan.template_selection.selected_root_dir.rstrip("/")
     for touch in page_plan.coder_handoff.file_touch_plan:

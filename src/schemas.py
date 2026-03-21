@@ -1,6 +1,8 @@
 ﻿from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from typing import Dict
+
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class FigureInfo(BaseModel):
@@ -244,3 +246,161 @@ class CoderArtifact(BaseModel):
 class CoderCriticReport(BaseModel):
     is_build_valid: bool = Field(description="Whether coder output passes checks.")
     build_feedback: str = Field(description="Actionable feedback when build fails.")
+
+
+GlobalAnchorId = Literal["header_brand", "header_primary_action", "header_nav", "footer_meta"]
+SlotId = Literal["title", "summary", "body", "media", "meta", "actions"]
+StylePropertyName = Literal[
+    "font-size",
+    "line-height",
+    "margin",
+    "margin-top",
+    "margin-bottom",
+    "padding",
+    "gap",
+    "text-align",
+    "max-width",
+    "width",
+]
+
+
+class PageManifestSlot(BaseModel):
+    slot_id: SlotId
+    selector: str
+
+
+class PageManifestBlock(BaseModel):
+    block_id: str
+    source_sections: List[str]
+    selector: str
+    slots: List[PageManifestSlot]
+
+
+class PageManifestGlobal(BaseModel):
+    global_id: GlobalAnchorId
+    selector: str
+
+
+class PageManifest(BaseModel):
+    schema_version: str
+    entry_html: str
+    selected_template_id: str
+    blocks: List[PageManifestBlock]
+    globals: List[PageManifestGlobal] = Field(default_factory=list)
+
+
+class RevisionEdit(BaseModel):
+    block_id: Optional[str] = None
+    slot_id: Optional[SlotId] = None
+    global_id: Optional[GlobalAnchorId] = None
+    scope: Literal["slot", "block", "global"]
+    change_request: str
+    preserve_requirements: List[str] = Field(default_factory=list)
+    acceptance_hint: str = ""
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> "RevisionEdit":
+        if self.scope == "slot":
+            if not self.block_id or not self.slot_id:
+                raise ValueError("slot scope edits must provide block_id and slot_id.")
+            self.global_id = None
+        elif self.scope == "block":
+            if not self.block_id:
+                raise ValueError("block scope edits must provide block_id.")
+            self.slot_id = None
+            self.global_id = None
+        elif self.scope == "global":
+            if not self.global_id:
+                raise ValueError("global scope edits must provide global_id.")
+            self.block_id = None
+            self.slot_id = None
+        else:
+            raise ValueError(f"Unsupported revision scope '{self.scope}'.")
+        return self
+
+
+class RevisionPlan(BaseModel):
+    edits: List[RevisionEdit] = Field(default_factory=list)
+
+
+class StyleChange(BaseModel):
+    block_id: Optional[str] = None
+    slot_id: Optional[SlotId] = None
+    global_id: Optional[GlobalAnchorId] = None
+    scope: Literal["slot", "block", "global"]
+    declarations: Dict[StylePropertyName, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> "StyleChange":
+        if not self.declarations:
+            raise ValueError("style changes must include at least one declaration.")
+        if self.scope == "slot":
+            if not self.block_id or not self.slot_id:
+                raise ValueError("slot scope style changes must provide block_id and slot_id.")
+            self.global_id = None
+        elif self.scope == "block":
+            if not self.block_id:
+                raise ValueError("block scope style changes must provide block_id.")
+            self.slot_id = None
+            self.global_id = None
+        elif self.scope == "global":
+            if not self.global_id:
+                raise ValueError("global scope style changes must provide global_id.")
+            self.block_id = None
+            self.slot_id = None
+        else:
+            raise ValueError(f"Unsupported style change scope '{self.scope}'.")
+        return self
+
+
+class TargetedReplacement(BaseModel):
+    block_id: Optional[str] = None
+    slot_id: Optional[SlotId] = None
+    global_id: Optional[GlobalAnchorId] = None
+    scope: Literal["slot", "block", "global"]
+    html: str
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> "TargetedReplacement":
+        if self.scope == "slot":
+            if not self.block_id or not self.slot_id:
+                raise ValueError("slot scope replacements must provide block_id and slot_id.")
+            self.global_id = None
+        elif self.scope == "block":
+            if not self.block_id:
+                raise ValueError("block scope replacements must provide block_id.")
+            self.slot_id = None
+            self.global_id = None
+        elif self.scope == "global":
+            if not self.global_id:
+                raise ValueError("global scope replacements must provide global_id.")
+            self.block_id = None
+            self.slot_id = None
+        else:
+            raise ValueError(f"Unsupported replacement scope '{self.scope}'.")
+        return self
+
+
+class OverrideCssRule(BaseModel):
+    selector: str
+    declarations: Dict[StylePropertyName, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_rule(self) -> "OverrideCssRule":
+        if not str(self.selector or "").strip():
+            raise ValueError("override css rules must provide selector.")
+        if not self.declarations:
+            raise ValueError("override css rules must include at least one declaration.")
+        return self
+
+
+class FallbackBlock(BaseModel):
+    block_id: str
+    reason: str
+
+
+class TargetedReplacementPlan(BaseModel):
+    replacements: List[TargetedReplacement] = Field(default_factory=list)
+    style_changes: List[StyleChange] = Field(default_factory=list)
+    override_css_rules: List[OverrideCssRule] = Field(default_factory=list)
+    fallback_blocks: List[FallbackBlock] = Field(default_factory=list)
