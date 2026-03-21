@@ -24,7 +24,13 @@ from langgraph.graph import END, StateGraph
 from src.agent_coder import run_coder_agent
 from src.agent_planner import run_planner_agent
 from src.agent_reader import run_reader_agent
+from src.agent_translator import translator_node
 from src.deterministic_template_selector import score_and_select_templates
+from src.human_feedback import (
+    build_human_feedback_payload,
+    empty_human_feedback,
+    extract_human_feedback_text,
+)
 from src.llm import get_llm
 from src.parser import parse_pdf
 from src.prompts import OVERVIEW_SYSTEM_PROMPT, OVERVIEW_USER_PROMPT_TEMPLATE
@@ -92,6 +98,17 @@ def save_coder_artifact(path: Path, artifact: CoderArtifact) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as file:
         json.dump(artifact.model_dump(), file, indent=2, ensure_ascii=False)
+
+
+def normalize_coder_artifact(artifact: Any) -> CoderArtifact | None:
+    if artifact is None:
+        return None
+    if isinstance(artifact, CoderArtifact):
+        return artifact
+    try:
+        return CoderArtifact.model_validate(artifact)
+    except Exception:
+        return None
 
 
 def ensure_parsed_output(pdf_filename: str, output_dir: Path) -> bool:
@@ -636,7 +653,7 @@ def reader_phase_node(state: WorkflowState) -> dict[str, Any]:
     if not paper_folder_name:
         raise ValueError("paper_folder_name is missing for reader phase.")
 
-    human_directives = str(state.get("human_directives") or "").strip()
+    human_directives = extract_human_feedback_text(state.get("human_directives"))
     previous_structured_paper = state.get("structured_paper")
     previous_structured_data: StructuredPaper | None = None
     if previous_structured_paper:
@@ -694,7 +711,7 @@ def overview_node(state: WorkflowState) -> dict[str, Any]:
     if not paper_overview:
         paper_overview = format_paper_to_markdown(structured_data.model_dump())
 
-    return {"paper_overview": paper_overview}
+    return {"paper_overview": paper_overview, "review_stage": "overview"}
 
 
 def planner_phase_node(state: WorkflowState) -> dict[str, Any]:
@@ -712,7 +729,7 @@ def planner_phase_node(state: WorkflowState) -> dict[str, Any]:
         structured_data=structured_data,
         generation_constraints=generation_constraints,
         user_constraints=user_constraints,
-        human_directives=str(state.get("human_directives") or ""),
+        human_directives=state.get("human_directives"),
         max_retry=2,
     )
     if not page_plan:
@@ -731,13 +748,16 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
 
     structured_data = StructuredPaper.model_validate(state.get("structured_paper"))
     page_plan = PagePlan.model_validate(state.get("page_plan"))
+    previous_coder_artifact = normalize_coder_artifact(state.get("coder_artifact"))
 
     print("[Coder] Running coder agent...")
     coder_artifact = run_coder_agent(
         paper_folder_name=paper_folder_name,
         structured_data=structured_data,
         page_plan=page_plan,
-        human_directives=str(state.get("human_directives") or ""),
+        human_directives=state.get("human_directives"),
+        coder_instructions=str(state.get("coder_instructions") or ""),
+        previous_coder_artifact=previous_coder_artifact,
         max_retry=1,
     )
     if not coder_artifact:
@@ -746,7 +766,7 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
     _, _, _, coder_json_path = get_output_paths(paper_folder_name)
     save_coder_artifact(coder_json_path, coder_artifact)
     print(f"[Coder] Generated entry html at {coder_artifact.entry_html}")
-    return {"coder_artifact": coder_artifact}
+    return {"coder_artifact": coder_artifact, "review_stage": "webpage"}
 
 
 def human_review_router(state: WorkflowState) -> str:
@@ -755,11 +775,18 @@ def human_review_router(state: WorkflowState) -> str:
     return "reader"
 
 
+def webpage_review_router(state: WorkflowState) -> str:
+    if bool(state.get("is_webpage_approved")):
+        return "end"
+    return "translator"
+
+
 def build_hitl_workflow():
     workflow = StateGraph(WorkflowState)
     workflow.add_node("reader", reader_phase_node)
     workflow.add_node("overview", overview_node)
     workflow.add_node("planner", planner_phase_node)
+    workflow.add_node("translator", translator_node)
     workflow.add_node("coder", coder_phase_node)
 
     workflow.set_entry_point("reader")
@@ -773,10 +800,19 @@ def build_hitl_workflow():
         },
     )
     workflow.add_edge("planner", "coder")
-    workflow.add_edge("coder", END)
+    # Pause after each coder draft so human review can resume through Translator -> Coder.
+    workflow.add_conditional_edges(
+        "coder",
+        webpage_review_router,
+        {
+            "translator": "translator",
+            "end": END,
+        },
+    )
+    workflow.add_edge("translator", "coder")
 
     memory = MemorySaver()
-    return workflow.compile(checkpointer=memory, interrupt_after=["overview"])
+    return workflow.compile(checkpointer=memory, interrupt_after=["overview", "coder"])
 
 
 HITL_WORKFLOW = build_hitl_workflow()
@@ -857,7 +893,8 @@ def run_langgraph_batch(
         paper_folder_name=paper_folder_name,
         structured_data=structured_data,
         page_plan=page_plan,
-        human_directives="",
+        human_directives=empty_human_feedback(),
+        coder_instructions="",
         max_retry=1,
     )
     if not coder_artifact:
@@ -874,7 +911,7 @@ def find_templates(
     density: str,
     navigation: str,
     layout: str,
-) -> tuple[Any, dict[str, Any], Any, str, str | None, Any, Any, Any, str, str, str, str, Any, str]:
+) -> tuple[Any, ...]:
     log_lines: list[str] = []
     preview_image_path: str | None = None
 
@@ -904,54 +941,45 @@ def find_templates(
 
         log_lines.append(f"[Search] user_constraints={json.dumps(user_constraints, ensure_ascii=False)}")
         for candidate in candidates:
-            log_lines.append(
-                f"[Candidate] {candidate['ui_label']} -> {candidate['template_path']}"
-            )
+            log_lines.append(f"[Candidate] {candidate['ui_label']} -> {candidate['template_path']}")
 
-        radio_update = gr.update(
-            choices=[candidate["ui_label"] for candidate in candidates],
-            value=None,
-            interactive=True,
-        )
-        step1_update = gr.update(interactive=False)
-        revise_update = gr.update(interactive=False)
-        approve_update = gr.update(interactive=False)
         return (
-            radio_update,
+            gr.update(
+                choices=[candidate["ui_label"] for candidate in candidates],
+                value=None,
+                interactive=True,
+            ),
             search_state,
             None,
             "\n".join(log_lines),
             preview_image_path,
-            step1_update,
-            revise_update,
-            approve_update,
+            gr.update(interactive=False),
+            gr.update(interactive=False),
+            gr.update(interactive=False),
             "",
             "",
+            None,
             "",
-            "",
+            gr.update(interactive=False),
             gr.update(interactive=False),
             "",
         )
     except Exception as exc:
         log_lines.append(f"[Error] {exc}")
-        empty_state = {"user_constraints": {}, "tags_json_path": "", "candidates": []}
-        radio_update = gr.update(choices=[], value=None, interactive=False)
-        step1_update = gr.update(interactive=False)
-        revise_update = gr.update(interactive=False)
-        approve_update = gr.update(interactive=False)
         return (
-            radio_update,
-            empty_state,
+            gr.update(choices=[], value=None, interactive=False),
+            {"user_constraints": {}, "tags_json_path": "", "candidates": []},
             None,
             "\n".join(log_lines),
             None,
-            step1_update,
-            revise_update,
-            approve_update,
+            gr.update(interactive=False),
+            gr.update(interactive=False),
+            gr.update(interactive=False),
             "",
             "",
+            None,
             "",
-            "",
+            gr.update(interactive=False),
             gr.update(interactive=False),
             "",
         )
@@ -962,7 +990,7 @@ def preview_selected_template(
     search_state: dict[str, Any] | None,
     current_logs: str,
     current_preview_path: str | None,
-) -> tuple[str | None, dict[str, Any] | None, str, Any, Any, Any, str, str, str, str, Any, str]:
+) -> tuple[Any, ...]:
     candidate = resolve_selected_candidate(selected_label, search_state)
     if not candidate:
         return (
@@ -974,8 +1002,9 @@ def preview_selected_template(
             gr.update(interactive=False),
             "",
             "",
+            None,
             "",
-            "",
+            gr.update(interactive=False),
             gr.update(interactive=False),
             "",
         )
@@ -1004,8 +1033,9 @@ def preview_selected_template(
             gr.update(interactive=False),
             "",
             "",
+            None,
             "",
-            "",
+            gr.update(interactive=False),
             gr.update(interactive=False),
             "",
         )
@@ -1020,8 +1050,9 @@ def preview_selected_template(
             gr.update(interactive=False),
             "",
             "",
+            None,
             "",
-            "",
+            gr.update(interactive=False),
             gr.update(interactive=False),
             "",
         )
@@ -1033,7 +1064,7 @@ def run_extraction(
     search_state: dict[str, Any] | None,
     selected_candidate_state: dict[str, Any] | None,
     current_logs: str,
-) -> tuple[str, str, str, Any, Any, str, str, Any, str]:
+) -> tuple[Any, ...]:
     selected_candidate = selected_candidate_state or resolve_selected_candidate(selected_label, search_state)
     if not selected_candidate:
         raise gr.Error("Select and preview one of the Top 5 candidate templates before running Step 1.")
@@ -1087,15 +1118,18 @@ def run_extraction(
             "paper_folder_name": paper_folder_name,
             "user_constraints": user_constraints,
             "generation_constraints": generation_constraints,
-            "human_directives": "",
+            "human_directives": empty_human_feedback(),
+            "coder_instructions": "",
             "paper_overview": "",
             "is_approved": False,
+            "is_webpage_approved": False,
+            "review_stage": "overview",
             "structured_paper": None,
             "page_plan": None,
             "coder_artifact": None,
         }
 
-        log("[Reader] Running workflow until HITL breakpoint after overview...")
+        log("[Reader] Running workflow until the extraction review checkpoint...")
         HITL_WORKFLOW.invoke(initial_state, config=config)
         paused_state = HITL_WORKFLOW.get_state(config)
         paused_values = dict(paused_state.values or {})
@@ -1103,15 +1137,16 @@ def run_extraction(
         if not paper_overview:
             structured_data = StructuredPaper.model_validate(paused_values.get("structured_paper"))
             paper_overview = format_paper_to_markdown(structured_data.model_dump())
-        log("[Overview] Extraction complete. Review the overview, revise if needed, or approve to continue.")
+        log("[Overview] Extraction complete. Review the overview, revise if needed, or approve to generate the first webpage draft.")
         return (
             "\n".join(run_log_lines),
             paper_overview,
             "",
+            None,
             gr.update(interactive=True),
             gr.update(interactive=True),
             thread_id,
-            "",
+            gr.update(interactive=False),
             gr.update(interactive=False),
             "",
         )
@@ -1121,21 +1156,23 @@ def run_extraction(
             "\n".join(run_log_lines),
             "",
             "",
+            None,
             gr.update(interactive=False),
             gr.update(interactive=False),
             "",
-            "",
+            gr.update(interactive=False),
             gr.update(interactive=False),
             "",
         )
 
 
 def revise_extraction(
-    human_directives_text: str,
+    feedback_text: str,
+    feedback_images: Any,
     workflow_thread_id: str,
     current_logs: str,
     current_overview: str,
-) -> tuple[str, str]:
+) -> tuple[Any, ...]:
     run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
 
     def log(message: str) -> None:
@@ -1150,19 +1187,27 @@ def revise_extraction(
         config = {"configurable": {"thread_id": thread_id}}
         snapshot = HITL_WORKFLOW.get_state(config)
         snapshot_values = dict(snapshot.values or {})
+        if str(snapshot_values.get("review_stage") or "overview") != "overview":
+            raise ValueError("Extraction revisions are only available during the overview review stage.")
+
         paper_folder_name = str(snapshot_values.get("paper_folder_name") or "").strip()
         if not paper_folder_name:
             raise ValueError("The paused workflow state is missing paper metadata. Run Step 1 again.")
 
-        human_directives = str(human_directives_text or "").strip()
+        feedback_payload = build_human_feedback_payload(feedback_text, feedback_images)
+        human_directives = extract_human_feedback_text(feedback_payload)
         if not human_directives:
-            raise ValueError("Enter Human Directives before requesting an extraction revision.")
+            raise ValueError("Enter feedback text before requesting an extraction revision.")
 
-        log(f"[HITL] Human directives captured for Reader revision: {human_directives}")
+        log(f"[HITL] Reader revision feedback captured: {human_directives}")
 
         HITL_WORKFLOW.update_state(
             config,
-            {"human_directives": human_directives, "is_approved": False},
+            {
+                "human_directives": feedback_payload,
+                "coder_instructions": "",
+                "is_approved": False,
+            },
             as_node="overview",
         )
 
@@ -1174,19 +1219,19 @@ def revise_extraction(
         if not paper_overview:
             structured_data = StructuredPaper.model_validate(paused_values.get("structured_paper"))
             paper_overview = format_paper_to_markdown(structured_data.model_dump())
-        log("[Overview] Revised extraction complete. Review the updated overview or approve to continue.")
-        return "\n".join(run_log_lines), paper_overview
+        log("[Overview] Revised extraction complete. Review the updated overview or approve it to generate the first draft.")
+        return "\n".join(run_log_lines), paper_overview, "", None
     except Exception as exc:
         log(f"[Error] {exc}")
-        return "\n".join(run_log_lines), current_overview
+        return "\n".join(run_log_lines), current_overview, feedback_text, feedback_images
 
 
-def approve_and_generate(
+def approve_extraction_and_generate_draft(
     workflow_thread_id: str,
     current_logs: str,
     current_preview: str | None,
     current_html_path: str,
-) -> tuple[str, str | None, str, Any]:
+) -> tuple[Any, ...]:
     run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
 
     def log(message: str) -> None:
@@ -1201,72 +1246,187 @@ def approve_and_generate(
         config = {"configurable": {"thread_id": thread_id}}
         snapshot = HITL_WORKFLOW.get_state(config)
         snapshot_values = dict(snapshot.values or {})
+        if str(snapshot_values.get("review_stage") or "overview") != "overview":
+            raise ValueError("The extraction review stage has already been completed.")
+
         paper_folder_name = str(snapshot_values.get("paper_folder_name") or "").strip()
         if not paper_folder_name:
             raise ValueError("The paused workflow state is missing paper metadata. Run Step 1 again.")
 
         HITL_WORKFLOW.update_state(
             config,
-            {"human_directives": "", "is_approved": True},
+            {
+                "human_directives": empty_human_feedback(),
+                "coder_instructions": "",
+                "is_approved": True,
+                "is_webpage_approved": False,
+            },
             as_node="overview",
         )
 
-        log("[Planner] Approval received. Resuming workflow toward webpage generation...")
+        log("[Planner] Extraction approved. Generating the first webpage draft...")
         HITL_WORKFLOW.invoke(None, config=config)
-        final_state = HITL_WORKFLOW.get_state(config)
-        final_values = dict(final_state.values or {})
-        coder_artifact = CoderArtifact.model_validate(final_values.get("coder_artifact"))
-        entry_html_path = Path(coder_artifact.entry_html).resolve()
-        preview_image_path = take_local_screenshot(
-            str(entry_html_path),
-            str(build_final_preview_path(entry_html_path)),
+        paused_state = HITL_WORKFLOW.get_state(config)
+        paused_values = dict(paused_state.values or {})
+        preview_image_path, entry_html_path = render_current_workflow_preview(paused_values)
+        log(f"[Preview] Rendered webpage draft screenshot from {entry_html_path}")
+        log("[Webpage] First draft ready. Review the preview, then approve it or request a revision with text and screenshots.")
+        return (
+            "\n".join(run_log_lines),
+            preview_image_path,
+            entry_html_path,
+            gr.update(interactive=False),
+            gr.update(interactive=False),
+            "",
+            None,
+            gr.update(interactive=True),
+            gr.update(interactive=True),
         )
-        if not preview_image_path:
-            raise RuntimeError(f"Failed to render final screenshot for {entry_html_path}")
-        log(f"[Preview] Rendered generated webpage screenshot from {entry_html_path}")
-        log("[Done] Generation completed successfully.")
-        return "\n".join(run_log_lines), preview_image_path, str(entry_html_path), gr.update(interactive=True)
     except Exception as exc:
         log(f"[Error] {exc}")
-        return "\n".join(run_log_lines), current_preview, str(current_html_path or ""), gr.update(interactive=False)
+        return (
+            "\n".join(run_log_lines),
+            current_preview,
+            str(current_html_path or ""),
+            gr.update(interactive=True),
+            gr.update(interactive=True),
+            "",
+            None,
+            gr.update(interactive=False),
+            gr.update(interactive=False),
+        )
 
 
-def apply_visual_tweak_from_ui(
-    human_command: str,
-    current_html_path: str,
+def request_webpage_revision(
+    feedback_text: str,
+    feedback_images: Any,
+    workflow_thread_id: str,
     current_logs: str,
     current_preview: str | None,
-) -> tuple[str, str | None, str, str]:
+    current_html_path: str,
+) -> tuple[Any, ...]:
     run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
 
     def log(message: str) -> None:
         print(message)
         run_log_lines.append(message)
 
-    html_path = str(current_html_path or "").strip()
-    tweak_command = str(human_command or "").strip()
-    if not html_path:
-        log("[Error] No generated webpage is available for visual tweaking yet.")
-        return "\n".join(run_log_lines), current_preview, human_command, current_html_path
-    if not tweak_command:
-        log("[Error] Visual tweak command is empty.")
-        return "\n".join(run_log_lines), current_preview, human_command, current_html_path
+    try:
+        thread_id = str(workflow_thread_id or "").strip()
+        if not thread_id:
+            raise ValueError("No paused workflow was found. Generate the first draft before requesting a revision.")
+
+        config = {"configurable": {"thread_id": thread_id}}
+        snapshot = HITL_WORKFLOW.get_state(config)
+        snapshot_values = dict(snapshot.values or {})
+        if str(snapshot_values.get("review_stage") or "") != "webpage":
+            raise ValueError("Webpage revisions are only available after the first draft is generated.")
+
+        feedback_payload = build_human_feedback_payload(feedback_text, feedback_images)
+        if not (extract_human_feedback_text(feedback_payload) or feedback_payload["images"]):
+            raise ValueError("Enter feedback text or upload at least one screenshot before requesting a webpage revision.")
+
+        # Gradio uploads arrive as temporary file paths, so we convert them once into
+        # data URLs here and resume LangGraph with a standard multimodal Gemini payload.
+        log(
+            "[HITL] Webpage revision feedback captured: "
+            f"text_length={len(extract_human_feedback_text(feedback_payload))}, screenshots={len(feedback_payload['images'])}"
+        )
+        HITL_WORKFLOW.update_state(
+            config,
+            {
+                "human_directives": feedback_payload,
+                "coder_instructions": "",
+                "is_webpage_approved": False,
+            },
+            as_node="coder",
+        )
+
+        log("[Translator] Resuming workflow through Translator -> Coder...")
+        HITL_WORKFLOW.invoke(None, config=config)
+        paused_state = HITL_WORKFLOW.get_state(config)
+        paused_values = dict(paused_state.values or {})
+        preview_image_path, entry_html_path = render_current_workflow_preview(paused_values)
+        log(f"[Preview] Rendered revised webpage screenshot from {entry_html_path}")
+        log("[Webpage] Revised draft ready. Review it, then approve it or request another revision.")
+        return (
+            "\n".join(run_log_lines),
+            preview_image_path,
+            "",
+            None,
+            entry_html_path,
+            gr.update(interactive=True),
+            gr.update(interactive=True),
+        )
+    except Exception as exc:
+        log(f"[Error] {exc}")
+        return (
+            "\n".join(run_log_lines),
+            current_preview,
+            feedback_text,
+            feedback_images,
+            str(current_html_path or ""),
+            gr.update(interactive=True),
+            gr.update(interactive=True),
+        )
+
+
+def approve_webpage(
+    workflow_thread_id: str,
+    current_logs: str,
+    current_preview: str | None,
+    current_html_path: str,
+) -> tuple[Any, ...]:
+    run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
+
+    def log(message: str) -> None:
+        print(message)
+        run_log_lines.append(message)
 
     try:
-        updated_html_path = apply_visual_tweak(html_path, tweak_command)
-        preview_image_path = take_local_screenshot(
-            updated_html_path,
-            str(build_final_preview_path(Path(updated_html_path))),
-        )
-        if not preview_image_path:
-            raise RuntimeError(f"Failed to render screenshot after visual tweak for {updated_html_path}")
+        thread_id = str(workflow_thread_id or "").strip()
+        if not thread_id:
+            raise ValueError("No paused workflow was found. Generate the first draft before approving the webpage.")
 
-        log(f"[VisualTweak] Applied tweak: {tweak_command}")
-        log(f"[Preview] Re-rendered tweaked webpage screenshot from {updated_html_path}")
-        return "\n".join(run_log_lines), preview_image_path, "", updated_html_path
+        config = {"configurable": {"thread_id": thread_id}}
+        snapshot = HITL_WORKFLOW.get_state(config)
+        snapshot_values = dict(snapshot.values or {})
+        if str(snapshot_values.get("review_stage") or "") != "webpage":
+            raise ValueError("The webpage approval step is only available while reviewing a generated draft.")
+
+        HITL_WORKFLOW.update_state(
+            config,
+            {
+                "human_directives": empty_human_feedback(),
+                "coder_instructions": "",
+                "is_webpage_approved": True,
+            },
+            as_node="coder",
+        )
+
+        log("[Webpage] Final approval received. Completing the workflow...")
+        HITL_WORKFLOW.invoke(None, config=config)
+        log("[Done] Webpage approved and workflow completed successfully.")
+        return (
+            "\n".join(run_log_lines),
+            current_preview,
+            str(current_html_path or ""),
+            gr.update(interactive=False),
+            gr.update(interactive=False),
+            "",
+            None,
+        )
     except Exception as exc:
-        log(f"[Error] Visual tweak failed: {exc}")
-        return "\n".join(run_log_lines), current_preview, human_command, current_html_path
+        log(f"[Error] {exc}")
+        return (
+            "\n".join(run_log_lines),
+            current_preview,
+            str(current_html_path or ""),
+            gr.update(interactive=True),
+            gr.update(interactive=True),
+            "",
+            None,
+        )
 
 
 def confirm_and_start_generation(
@@ -1313,6 +1473,20 @@ def confirm_and_start_generation(
         preview_image_path = None
 
     return "\n".join(run_log_lines), preview_image_path
+
+
+def render_current_workflow_preview(state_values: dict[str, Any]) -> tuple[str, str]:
+    coder_artifact = normalize_coder_artifact(state_values.get("coder_artifact"))
+    if not coder_artifact:
+        raise RuntimeError("Workflow preview is unavailable because coder_artifact is missing.")
+    entry_html_path = Path(coder_artifact.entry_html).resolve()
+    preview_image_path = take_local_screenshot(
+        str(entry_html_path),
+        str(build_final_preview_path(entry_html_path)),
+    )
+    if not preview_image_path:
+        raise RuntimeError(f"Failed to render workflow preview for {entry_html_path}")
+    return preview_image_path, str(entry_html_path)
 
 
 def build_app() -> gr.Blocks:
@@ -1373,11 +1547,21 @@ def build_app() -> gr.Blocks:
                 paper_markdown = gr.Markdown(
                     value="Run Step 1 to extract the paper into a readable review overview."
                 )
-                human_directives = gr.Textbox(
-                    label="Human Directives (e.g., 'Extract more details about the dataset')",
-                    placeholder="Example: Extract more dataset details, shorten related work, and preserve all author affiliations.",
-                    lines=3,
+                feedback_text = gr.Textbox(
+                    label="Human Feedback",
+                    placeholder=(
+                        "During extraction review: explain what to revise. "
+                        "During webpage review: describe the visual issue and attach screenshots below."
+                    ),
+                    lines=4,
                     value="",
+                )
+                feedback_images = gr.File(
+                    label="Reference Screenshots (Optional)",
+                    file_count="multiple",
+                    file_types=["image"],
+                    type="filepath",
+                    value=None,
                 )
                 revise_button = gr.Button(
                     "Revise Extraction",
@@ -1385,27 +1569,27 @@ def build_app() -> gr.Blocks:
                     interactive=False,
                 )
                 approve_button = gr.Button(
-                    "Approve & Generate Webpage",
+                    "Approve Extraction & Generate First Draft",
                     variant="primary",
                     interactive=False,
                 )
-                visual_tweak_command = gr.Textbox(
-                    label="Visual Tweak Command (e.g., 'Hide the second image')",
-                    placeholder="Example: Make the title red, hide the bottom table, or reduce hero spacing.",
-                    lines=2,
-                    value="",
-                )
-                apply_tweak_button = gr.Button(
-                    "Apply Tweak",
+                request_revision_button = gr.Button(
+                    "Request Webpage Revision",
                     variant="secondary",
+                    interactive=False,
+                )
+                approve_webpage_button = gr.Button(
+                    "Approve Final Webpage",
+                    variant="primary",
                     interactive=False,
                 )
                 system_logs = gr.Textbox(
                     label="System Logs",
                     value=(
                         "Choose constraints, click Find Templates, preview a candidate, then run Step 1 to extract "
-                        "a readable overview. Use Human Directives plus Revise Extraction until satisfied, then "
-                        "approve to generate the webpage. After generation, you can issue natural-language visual tweaks."
+                        "a readable overview. Use Human Feedback plus Revise Extraction until satisfied, then "
+                        "approve the extraction to generate the first webpage draft. After that, attach screenshots "
+                        "and request webpage revisions through the Translator loop until the draft is ready to approve."
                     ),
                     lines=24,
                     interactive=False,
@@ -1434,10 +1618,11 @@ def build_app() -> gr.Blocks:
                 revise_button,
                 approve_button,
                 paper_markdown,
-                human_directives,
+                feedback_text,
+                feedback_images,
                 workflow_thread_state,
-                visual_tweak_command,
-                apply_tweak_button,
+                request_revision_button,
+                approve_webpage_button,
                 current_render_html_state,
             ],
             api_name="find_templates",
@@ -1454,10 +1639,11 @@ def build_app() -> gr.Blocks:
                 revise_button,
                 approve_button,
                 paper_markdown,
-                human_directives,
+                feedback_text,
+                feedback_images,
                 workflow_thread_state,
-                visual_tweak_command,
-                apply_tweak_button,
+                request_revision_button,
+                approve_webpage_button,
                 current_render_html_state,
             ],
             api_name="preview_template",
@@ -1469,12 +1655,13 @@ def build_app() -> gr.Blocks:
             outputs=[
                 system_logs,
                 paper_markdown,
-                human_directives,
+                feedback_text,
+                feedback_images,
                 revise_button,
                 approve_button,
                 workflow_thread_state,
-                visual_tweak_command,
-                apply_tweak_button,
+                request_revision_button,
+                approve_webpage_button,
                 current_render_html_state,
             ],
             api_name="extract_and_review",
@@ -1482,23 +1669,56 @@ def build_app() -> gr.Blocks:
 
         revise_button.click(
             fn=revise_extraction,
-            inputs=[human_directives, workflow_thread_state, system_logs, paper_markdown],
-            outputs=[system_logs, paper_markdown],
+            inputs=[feedback_text, feedback_images, workflow_thread_state, system_logs, paper_markdown],
+            outputs=[system_logs, paper_markdown, feedback_text, feedback_images],
             api_name="revise_extraction",
         )
 
         approve_button.click(
-            fn=approve_and_generate,
+            fn=approve_extraction_and_generate_draft,
             inputs=[workflow_thread_state, system_logs, preview_image, current_render_html_state],
-            outputs=[system_logs, preview_image, current_render_html_state, apply_tweak_button],
-            api_name="approve_and_generate",
+            outputs=[
+                system_logs,
+                preview_image,
+                current_render_html_state,
+                revise_button,
+                approve_button,
+                feedback_text,
+                feedback_images,
+                request_revision_button,
+                approve_webpage_button,
+            ],
+            api_name="approve_extraction_and_generate_draft",
         )
 
-        apply_tweak_button.click(
-            fn=apply_visual_tweak_from_ui,
-            inputs=[visual_tweak_command, current_render_html_state, system_logs, preview_image],
-            outputs=[system_logs, preview_image, visual_tweak_command, current_render_html_state],
-            api_name="apply_visual_tweak",
+        request_revision_button.click(
+            fn=request_webpage_revision,
+            inputs=[feedback_text, feedback_images, workflow_thread_state, system_logs, preview_image, current_render_html_state],
+            outputs=[
+                system_logs,
+                preview_image,
+                feedback_text,
+                feedback_images,
+                current_render_html_state,
+                request_revision_button,
+                approve_webpage_button,
+            ],
+            api_name="request_webpage_revision",
+        )
+
+        approve_webpage_button.click(
+            fn=approve_webpage,
+            inputs=[workflow_thread_state, system_logs, preview_image, current_render_html_state],
+            outputs=[
+                system_logs,
+                preview_image,
+                current_render_html_state,
+                request_revision_button,
+                approve_webpage_button,
+                feedback_text,
+                feedback_images,
+            ],
+            api_name="approve_webpage",
         )
 
     return demo

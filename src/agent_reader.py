@@ -6,6 +6,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from src.agent_reader_critic import build_critic_router, critic_node
+from src.human_feedback import extract_human_feedback_text, normalize_human_feedback
 from src.llm import get_llm
 from src.prompts import READER_SYSTEM_PROMPT, READER_USER_PROMPT_TEMPLATE
 from src.schemas import StructuredPaper
@@ -19,7 +20,7 @@ def reader_node(state: ReaderState):
 
     md_content = state["raw_markdown"]
     assets_context = json.dumps(state["assets_list"], indent=2, ensure_ascii=False)
-    human_directives = str(state.get("human_directives") or "").strip()
+    human_directives = extract_human_feedback_text(state.get("human_directives"))
     previous_structured_paper = state.get("previous_structured_paper")
     if isinstance(previous_structured_paper, StructuredPaper):
         previous_structured_paper_json = json.dumps(
@@ -111,7 +112,7 @@ def _load_reader_inputs(output_dir: Path) -> tuple[str, list[dict]]:
 
 def run_reader_agent(
     paper_folder_name: str,
-    human_directives: str = "",
+    human_directives: str | dict = "",
     previous_structured_paper: StructuredPaper | None = None,
     max_retry: int = 3,
 ):
@@ -133,7 +134,7 @@ def run_reader_agent(
     initial_state: ReaderState = {
         "raw_markdown": raw_md,
         "assets_list": assets,
-        "human_directives": str(human_directives or ""),
+        "human_directives": normalize_human_feedback(human_directives),
         "previous_structured_paper": previous_structured_paper,
         "feedback_history": [],
         "critic_passed": False,

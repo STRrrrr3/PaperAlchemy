@@ -9,6 +9,7 @@ from langgraph.graph import END, StateGraph
 
 from src.agent_planner_critic import build_planner_critic_router, planner_critic_node
 from src.deterministic_template_selector import score_and_select_template
+from src.human_feedback import extract_human_feedback_text, normalize_human_feedback
 from src.json_utils import to_pretty_json
 from src.llm import get_llm
 from src.planner_template_catalog import build_template_catalog, load_module_index, load_template_link_map
@@ -278,7 +279,7 @@ def semantic_planner_node(state: PlannerState) -> dict[str, Any]:
         return {"semantic_plan": None, "page_plan": None}
 
     feedback_history = state.get("planner_feedback_history") or []
-    human_directives = str(state.get("human_directives") or "").strip()
+    human_directives = extract_human_feedback_text(state.get("human_directives"))
 
     user_msg = SEMANTIC_PLANNER_USER_PROMPT_TEMPLATE.format(
         structured_paper_json=to_pretty_json(structured_paper),
@@ -437,7 +438,7 @@ def template_binder_node(state: PlannerState) -> dict[str, Any]:
     template_link_map = state.get("template_link_map") or {}
     module_index = state.get("module_index") or {}
     planner_feedback_history = state.get("planner_feedback_history") or []
-    human_directives = str(state.get("human_directives") or "").strip()
+    human_directives = extract_human_feedback_text(state.get("human_directives"))
 
     user_msg = (
         "### STRUCTURED_PAPER_JSON\n"
@@ -542,7 +543,7 @@ def run_planner_agent(
     structured_data: StructuredPaper,
     generation_constraints: dict[str, Any] | None = None,
     user_constraints: dict[str, Any] | None = None,
-    human_directives: str = "",
+    human_directives: str | dict = "",
     max_retry: int = 2,
 ):
     current_file = Path(__file__).resolve()
@@ -598,7 +599,7 @@ def run_planner_agent(
         "module_index": module_index,
         "generation_constraints": constraints,
         "user_constraints": user_constraints or {},
-        "human_directives": str(human_directives or ""),
+        "human_directives": normalize_human_feedback(human_directives),
         "semantic_plan": None,
         "template_candidates": [],
         "selected_template": None,

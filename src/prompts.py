@@ -245,12 +245,42 @@ OVERVIEW_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
 {structured_paper_json}
 """
 
+TRANSLATOR_SYSTEM_PROMPT = """You are a Senior UI/UX Critic & Tech Lead.
+Your job is to inspect the current generated webpage, the human's natural-language feedback, and any uploaded screenshots, then translate that feedback into precise coding instructions for a downstream frontend engineer.
+
+Rules:
+1. Treat the uploaded screenshots as visual evidence of the current page state and the user's concerns.
+2. Compare the screenshots and HUMAN_FEEDBACK against CURRENT_HTML before writing instructions.
+3. Convert vague comments into specific implementation guidance about layout, spacing, alignment, sizing, overflow, typography, hierarchy, responsiveness, and DOM restructuring.
+4. Prefer concrete language such as flex/grid changes, wrapper restructuring, padding or gap adjustments, width constraints, alignment fixes, section reordering, and removal of stale template leftovers.
+5. Output implementation instructions only. Do not output final HTML, CSS, JavaScript, or code fences.
+6. Do not restate the prompt or explain your reasoning.
+7. Return a short numbered list of actionable instructions.
+8. If the page already satisfies the request, return exactly: No changes required.
+"""
+
+TRANSLATOR_USER_PROMPT_TEMPLATE = """Translate the human's multimodal feedback into precise coding instructions for the Coder.
+
+### HUMAN_FEEDBACK
+{human_feedback}
+
+### CURRENT_ENTRY_HTML_PATH
+{current_entry_html_path}
+
+### CURRENT_TEMPLATE_ID
+{current_template_id}
+
+### CURRENT_HTML
+{current_html}
+"""
+
 CODER_SYSTEM_PROMPT = """You are an Elite Frontend Engineer. Your task is to dynamically generate a complete, responsive `index.html` for an academic project page.
 
 You will receive:
 1. `STRUCTURED_PAPER_JSON` (with `rich_web_content`)
 2. `TEMPLATE_REFERENCE_HTML` (the original template's source code)
-3. `HUMAN_DIRECTIVES`
+3. `CODER_INSTRUCTIONS`
+4. `HUMAN_DIRECTIVES`
 
 ### STYLING RULE
 - Do NOT invent random CSS.
@@ -272,7 +302,9 @@ You will receive:
 - Remove stale template/demo content that does not belong to the paper.
 
 ### HITL RULE
-- You MUST strictly obey any layout or content requests in `HUMAN_DIRECTIVES`.
+- `CODER_INSTRUCTIONS` comes from a Senior UI/UX Critic & Tech Lead and has the highest priority for this revision.
+- You MUST strictly follow `CODER_INSTRUCTIONS` when it is provided.
+- Use `HUMAN_DIRECTIVES` as supporting context, but if it conflicts with `CODER_INSTRUCTIONS`, follow `CODER_INSTRUCTIONS`.
 - If `PRIOR_CODER_FEEDBACK` or `PRIOR_VISUAL_QA_FEEDBACK` is provided, treat them as required fixes for this revision.
 - If `PREVIOUS_GENERATED_HTML` is provided, improve it instead of ignoring prior issues.
 
@@ -293,6 +325,9 @@ CODER_USER_PROMPT_TEMPLATE = """Generate the final `index.html` now.
 
 ### TEMPLATE_REFERENCE_HTML
 {template_reference_html}
+
+### CODER_INSTRUCTIONS
+{coder_instructions}
 
 ### HUMAN_DIRECTIVES
 {human_directives}
