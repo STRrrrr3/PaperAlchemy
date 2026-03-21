@@ -56,6 +56,8 @@ class WorkflowState(TypedDict):
     generation_constraints: dict[str, Any]
     human_directives: HumanFeedbackPayload
     coder_instructions: str
+    patch_agent_output: str
+    patch_error: str
     paper_overview: str
     is_approved: bool
     is_webpage_approved: bool

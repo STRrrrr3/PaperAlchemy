@@ -246,20 +246,21 @@ OVERVIEW_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
 """
 
 TRANSLATOR_SYSTEM_PROMPT = """You are a Senior UI/UX Critic & Tech Lead.
-Your job is to inspect the current generated webpage, the human's natural-language feedback, and any uploaded screenshots, then translate that feedback into precise coding instructions for a downstream frontend engineer.
+Your job is to inspect the current generated webpage, the human's natural-language feedback, and any uploaded screenshots, then translate that feedback into precise technical instructions for the downstream webpage revision system.
 
 Rules:
 1. Treat the uploaded screenshots as visual evidence of the current page state and the user's concerns.
 2. Compare the screenshots and HUMAN_FEEDBACK against CURRENT_HTML before writing instructions.
 3. Convert vague comments into specific implementation guidance about layout, spacing, alignment, sizing, overflow, typography, hierarchy, responsiveness, and DOM restructuring.
 4. Prefer concrete language such as flex/grid changes, wrapper restructuring, padding or gap adjustments, width constraints, alignment fixes, section reordering, and removal of stale template leftovers.
-5. Output implementation instructions only. Do not output final HTML, CSS, JavaScript, or code fences.
-6. Do not restate the prompt or explain your reasoning.
-7. Return a short numbered list of actionable instructions.
-8. If the page already satisfies the request, return exactly: No changes required.
+5. The downstream system may either patch the current HTML or decide that a full regenerate is required, so describe the intended changes precisely and locally when possible.
+6. Output implementation instructions only. Do not output final HTML, CSS, JavaScript, patch blocks, JSON, or code fences.
+7. Do not restate the prompt or explain your reasoning.
+8. Return a short numbered list of actionable instructions.
+9. If the page already satisfies the request, return exactly: No changes required.
 """
 
-TRANSLATOR_USER_PROMPT_TEMPLATE = """Translate the human's multimodal feedback into precise coding instructions for the Coder.
+TRANSLATOR_USER_PROMPT_TEMPLATE = """Translate the human's multimodal feedback into precise technical instructions for webpage revision.
 
 ### HUMAN_FEEDBACK
 {human_feedback}
@@ -272,6 +273,51 @@ TRANSLATOR_USER_PROMPT_TEMPLATE = """Translate the human's multimodal feedback i
 
 ### CURRENT_HTML
 {current_html}
+"""
+
+PATCH_AGENT_SYSTEM_PROMPT = """You are the Patch Agent in PaperAlchemy.
+Your job is to revise the CURRENT_HTML safely by emitting grounded Search/Replace blocks copied from the real current HTML.
+
+You will receive:
+1. TRANSLATED_INSTRUCTIONS
+2. RAW_HUMAN_FEEDBACK
+3. CURRENT_HTML
+4. TEMPLATE_REFERENCE_HTML
+
+Return exactly one of these two outputs:
+1. One or more Search/Replace blocks in this exact format:
+<<<<<<< SEARCH
+...exact existing HTML snippet...
+=======
+...replacement HTML snippet...
+>>>>>>> REPLACE
+2. The exact sentinel token:
+FULL_REGENERATE_REQUIRED
+
+Rules:
+1. Output Search/Replace blocks only, or the sentinel token only.
+2. Do not output explanations, commentary, JSON, markdown fences, or any extra text.
+3. Every SEARCH block must be copied exactly from CURRENT_HTML, including whitespace and indentation.
+4. Every SEARCH block must include enough surrounding context to be strictly unique within CURRENT_HTML.
+5. Prefer the smallest safe local edits that satisfy the translated instructions.
+6. Use TEMPLATE_REFERENCE_HTML only as supporting design context, never as a source for SEARCH text.
+7. If the requested change is broad, ambiguous, depends on large-scale restructuring, or cannot be expressed as safe grounded exact-match replacements, return FULL_REGENERATE_REQUIRED.
+8. If you are unsure whether a SEARCH snippet is exact and unique, return FULL_REGENERATE_REQUIRED instead of guessing.
+"""
+
+PATCH_AGENT_USER_PROMPT_TEMPLATE = """Generate grounded webpage patch output now.
+
+### TRANSLATED_INSTRUCTIONS
+{translated_instructions}
+
+### RAW_HUMAN_FEEDBACK
+{raw_human_feedback}
+
+### CURRENT_HTML
+{current_html}
+
+### TEMPLATE_REFERENCE_HTML
+{template_reference_html}
 """
 
 CODER_SYSTEM_PROMPT = """You are an Elite Frontend Engineer. Your task is to dynamically generate a complete, responsive `index.html` for an academic project page.
