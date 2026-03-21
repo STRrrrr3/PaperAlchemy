@@ -15,6 +15,7 @@ from src.agent_coder_critic import (
     take_screenshot_action,
     vision_critic_node,
 )
+from src.human_feedback import extract_human_feedback_text, normalize_human_feedback
 from src.json_utils import to_pretty_json
 from src.llm import get_llm
 from src.prompts import CODER_SYSTEM_PROMPT, CODER_USER_PROMPT_TEMPLATE
@@ -291,7 +292,8 @@ def coder_node(state: CoderState) -> dict[str, Any]:
     page_plan = _normalize_page_plan(state.get("page_plan"))
     structured_paper = _normalize_structured_paper(state.get("structured_paper"))
     paper_folder_name = str(state.get("paper_folder_name") or "").strip()
-    human_directives = str(state.get("human_directives") or "").strip()
+    human_directives = extract_human_feedback_text(state.get("human_directives"))
+    coder_instructions = str(state.get("coder_instructions") or "").strip()
     if not page_plan or not structured_paper or not paper_folder_name:
         print("[PaperAlchemy-Coder] missing page_plan/structured_paper/paper_folder_name.")
         return {}
@@ -345,6 +347,7 @@ def coder_node(state: CoderState) -> dict[str, Any]:
                     content=CODER_USER_PROMPT_TEMPLATE.format(
                         structured_paper_json=to_pretty_json(structured_paper),
                         template_reference_html=template_reference_html,
+                        coder_instructions=coder_instructions or "(none)",
                         human_directives=human_directives or "(none)",
                         available_paper_assets_json=to_pretty_json(asset_manifest),
                         prior_coder_feedback=_format_feedback_block(state.get("coder_feedback_history")),
@@ -388,7 +391,7 @@ def coder_node(state: CoderState) -> dict[str, Any]:
         edited_files=edited_files,
         notes=(
             "v3-llm-native-render: generated a complete HTML document from StructuredPaper rich_web_content, "
-            "template reference HTML, human directives, coder critic feedback, and visual QA feedback."
+            "template reference HTML, coder instructions, human directives, coder critic feedback, and visual QA feedback."
         ),
     )
     return {"coder_artifact": artifact}
@@ -423,7 +426,9 @@ def run_coder_agent(
     paper_folder_name: str,
     structured_data: StructuredPaper,
     page_plan: PagePlan,
-    human_directives: str = "",
+    human_directives: str | dict = "",
+    coder_instructions: str = "",
+    previous_coder_artifact: CoderArtifact | None = None,
     max_retry: int = 1,
 ) -> CoderArtifact | None:
     app = build_coder_graph(max_retry=max_retry)
@@ -431,7 +436,8 @@ def run_coder_agent(
 
     initial_state: CoderState = {
         "paper_folder_name": paper_folder_name,
-        "human_directives": str(human_directives or ""),
+        "human_directives": normalize_human_feedback(human_directives),
+        "coder_instructions": str(coder_instructions or "").strip(),
         "structured_paper": structured_data,
         "page_plan": page_plan,
         "coder_feedback_history": [],
@@ -439,7 +445,7 @@ def run_coder_agent(
         "visual_screenshot_path": "",
         "visual_iterations": 0,
         "is_visually_approved": False,
-        "coder_artifact": None,
+        "coder_artifact": previous_coder_artifact,
         "coder_critic_passed": False,
         "coder_retry_count": 0,
     }

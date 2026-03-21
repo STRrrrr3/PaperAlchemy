@@ -1,13 +1,14 @@
-﻿from typing import Annotated, Any, List, Optional, TypedDict
 import operator
+from typing import Annotated, Any, List, Optional, TypedDict
 
+from src.human_feedback import HumanFeedbackPayload
 from src.schemas import CoderArtifact, PagePlan, SemanticPlan, StructuredPaper, TemplateCandidate
 
 
 class ReaderState(TypedDict):
     raw_markdown: str
     assets_list: List[dict]
-    human_directives: str
+    human_directives: HumanFeedbackPayload
     previous_structured_paper: Optional[StructuredPaper]
     feedback_history: Annotated[List[str], operator.add]
     structured_paper: Optional[StructuredPaper]
@@ -22,7 +23,7 @@ class PlannerState(TypedDict):
     module_index: dict[str, Any]
     generation_constraints: dict[str, Any]
     user_constraints: dict[str, Any]
-    human_directives: str
+    human_directives: HumanFeedbackPayload
     semantic_plan: Optional[SemanticPlan]
     template_candidates: List[TemplateCandidate]
     selected_template: Optional[TemplateCandidate]
@@ -35,7 +36,8 @@ class PlannerState(TypedDict):
 
 class CoderState(TypedDict):
     paper_folder_name: str
-    human_directives: str
+    human_directives: HumanFeedbackPayload
+    coder_instructions: str
     structured_paper: StructuredPaper
     page_plan: PagePlan
     coder_feedback_history: Annotated[List[str], operator.add]
@@ -52,9 +54,12 @@ class WorkflowState(TypedDict):
     paper_folder_name: str
     user_constraints: dict[str, str]
     generation_constraints: dict[str, Any]
-    human_directives: str
+    human_directives: HumanFeedbackPayload
+    coder_instructions: str
     paper_overview: str
     is_approved: bool
+    is_webpage_approved: bool
+    review_stage: str
     structured_paper: Optional[StructuredPaper]
     page_plan: Optional[PagePlan]
     coder_artifact: Optional[CoderArtifact]

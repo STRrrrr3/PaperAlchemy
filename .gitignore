@@ -19,17 +19,17 @@ data/input/
 data/output/
 
 # 忽略采集与提取生成物（可通过脚本重建）
-data/collectors/raw/
-data/collectors/output/
-data/collectors/modules/
+data/collectors(useless)/raw/
+data/collectors(useless)/output/
+data/collectors(useless)/modules/
 
 # 保留采集脚本与文档（用于开源复现）
-!data/collectors/
-!data/collectors/*.py
-!data/collectors/README.md
+!data/collectors(useless)/
+!data/collectors(useless)/*.py
+!data/collectors(useless)/README.md
 
 # 保留可复现锁文件
-!data/collectors/locks/
-!data/collectors/locks/*.json
-!data/collectors/locks/.gitkeep
+!data/collectors(useless)/locks/
+!data/collectors(useless)/locks/*.json
+!data/collectors(useless)/locks/.gitkeep
 

@@ -5,6 +5,7 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from src.human_feedback import extract_human_feedback_text
 from src.json_utils import to_pretty_json
 from src.llm import get_llm
 from src.prompts import CRITIC_SYSTEM_PROMPT
@@ -333,7 +334,7 @@ def critic_node(state: ReaderState) -> dict[str, Any]:
     """LangGraph node: audit Reader output and return pass/fail with feedback."""
     print("[PaperAlchemy-Critic] Running audit...")
     raw_markdown = str(state.get("raw_markdown") or "")
-    human_directives = str(state.get("human_directives") or "")
+    human_directives = extract_human_feedback_text(state.get("human_directives"))
     assets_list = state.get("assets_list")
     if not isinstance(assets_list, list):
         assets_list = []
