@@ -33,31 +33,33 @@ Rules:
 3. source_sections and figure_paths must be grounded in STRUCTURED_PAPER_JSON.
 4. planning_mode must be 'hybrid_template_bind'.
 5. Do not redesign or rebuild the template structure. Reuse the existing DOM.
-6. Populate dom_mapping with CSS selectors that already exist in TEMPLATE_DOM_OUTLINE.
-7. Prefer stable selectors such as #id, .class, or short anchored descendant selectors.
-8. Avoid overly broad selectors like "div", "section", or "p" unless the outline proves they are uniquely correct.
-9. dom_mapping values must be HTML/text strings intended for inner-content injection into the matched element.
-10. Rich HTML is allowed in dom_mapping values, including inline formatting and image tags.
-11. When referencing paper figures, only use grounded figure_paths from STRUCTURED_PAPER_JSON for src/href values. Do not invent asset paths.
-12. Be selective: the webpage should present the most important content, not every paper section. Omit or merge lower-value material when appropriate.
-13. If author names and affiliations are visible in STRUCTURED_PAPER_JSON, consider surfacing them in a hero/about/meta area rather than dropping them entirely.
-14. Write decision_summary.design_goal, decision_summary.novelty_points, decision_summary.tradeoffs, and open_questions in plain human-readable language so a reviewer can understand your editorial intent quickly.
-15. Use open_questions to surface human-review decisions such as:
+6. Every page block must keep a stable semantic snake_case block_id. Reuse Stage A block ids whenever possible.
+7. Never invent template-coupled, positional, or placeholder block ids such as section_1, block_2, content_box, template_hero, or todo.
+8. Populate dom_mapping with CSS selectors that already exist in TEMPLATE_DOM_OUTLINE.
+9. Prefer stable selectors such as #id, .class, or short anchored descendant selectors.
+10. Avoid overly broad selectors like "div", "section", or "p" unless the outline proves they are uniquely correct.
+11. dom_mapping values must be HTML/text strings intended for inner-content injection into the matched element.
+12. Rich HTML is allowed in dom_mapping values, including inline formatting and image tags.
+13. When referencing paper figures, only use grounded figure_paths from STRUCTURED_PAPER_JSON for src/href values. Do not invent asset paths.
+14. Be selective: the webpage should present the most important content, not every paper section. Omit or merge lower-value material when appropriate.
+15. If author names and affiliations are visible in STRUCTURED_PAPER_JSON, consider surfacing them in a hero/about/meta area rather than dropping them entirely.
+16. Write decision_summary.design_goal, decision_summary.novelty_points, decision_summary.tradeoffs, and open_questions in plain human-readable language so a reviewer can understand your editorial intent quickly.
+17. Use open_questions to surface human-review decisions such as:
    - which sections should be cut or merged,
    - which figures are worth keeping,
    - whether author/affiliation metadata should be shown prominently,
    - whether evaluation detail is too dense or too sparse.
-16. You must STRICTLY follow any instructions provided in HUMAN_DIRECTIVES.
+18. You must STRICTLY follow any instructions provided in HUMAN_DIRECTIVES.
    - If the human says to omit a section, do not bind it into the final PagePlan.
    - If the human says to emphasize something, map it to a prominent region.
    - If the human says to simplify or shorten, reduce block density accordingly.
-17. Populate selectors_to_remove with CSS selectors for residual template garbage: dummy text, legacy paper content, placeholder images, irrelevant widgets, stale leaderboards, or unrelated footers.
-18. selectors_to_remove must target the wrapper element that should be deleted cleanly with DOM decompose(), not a child text node.
-19. Do not include selectors_to_remove entries that overlap any dom_mapping target, any wrapper that contains a dom_mapping target, or any child that will be part of injected paper content.
-20. Do not include selectors_to_remove entries that would delete newly injected paper content or essential layout scaffolding.
-21. Target content containers instead of root layout wrappers whenever possible so the original layout and CSS remain intact.
-22. Keep the rest of PagePlan coherent for downstream audit and asset-copy steps.
-23. Return strict JSON matching PagePlan schema only.
+19. Populate selectors_to_remove with CSS selectors for residual template garbage: dummy text, legacy paper content, placeholder images, irrelevant widgets, stale leaderboards, or unrelated footers.
+20. selectors_to_remove must target the wrapper element that should be deleted cleanly with DOM decompose(), not a child text node.
+21. Do not include selectors_to_remove entries that overlap any dom_mapping target, any wrapper that contains a dom_mapping target, or any child that will be part of injected paper content.
+22. Do not include selectors_to_remove entries that would delete newly injected paper content or essential layout scaffolding.
+23. Target content containers instead of root layout wrappers whenever possible so the original layout and CSS remain intact.
+24. Keep the rest of PagePlan coherent for downstream audit and asset-copy steps.
+25. Return strict JSON matching PagePlan schema only.
 """
 
 

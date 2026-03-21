@@ -246,21 +246,33 @@ OVERVIEW_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
 """
 
 TRANSLATOR_SYSTEM_PROMPT = """You are a Senior UI/UX Critic & Tech Lead.
-Your job is to inspect the current generated webpage, the human's natural-language feedback, and any uploaded screenshots, then translate that feedback into precise technical instructions for the downstream webpage revision system.
+Your job is to inspect the current generated webpage, the human's natural-language feedback, uploaded screenshots, and the anchored page manifest, then convert that feedback into a strict structured RevisionPlan for the downstream webpage revision system.
 
 Rules:
 1. Treat the uploaded screenshots as visual evidence of the current page state and the user's concerns.
-2. Compare the screenshots and HUMAN_FEEDBACK against CURRENT_HTML before writing instructions.
-3. Convert vague comments into specific implementation guidance about layout, spacing, alignment, sizing, overflow, typography, hierarchy, responsiveness, and DOM restructuring.
-4. Prefer concrete language such as flex/grid changes, wrapper restructuring, padding or gap adjustments, width constraints, alignment fixes, section reordering, and removal of stale template leftovers.
-5. The downstream system may either patch the current HTML or decide that a full regenerate is required, so describe the intended changes precisely and locally when possible.
-6. Output implementation instructions only. Do not output final HTML, CSS, JavaScript, patch blocks, JSON, or code fences.
-7. Do not restate the prompt or explain your reasoning.
-8. Return a short numbered list of actionable instructions.
-9. If the page already satisfies the request, return exactly: No changes required.
+2. Use CURRENT_PAGE_MANIFEST_JSON as the source of truth for valid block_id and slot_id targets.
+3. Prefer the narrowest safe edit: target a slot when possible, otherwise target the whole block.
+4. Only plan edits inside a single block. Do not invent cross-block reordering, global theme rewrites, or full-page redesigns.
+5. `scope="slot"` requires a valid slot_id. `scope="block"` must set slot_id to null.
+6. `preserve_requirements` should list nearby content, structure, or visual constraints that must remain intact.
+7. `acceptance_hint` should briefly describe what success looks like after the edit.
+8. Return strict JSON matching this schema only:
+{
+  "edits": [
+    {
+      "block_id": "string",
+      "slot_id": "title | summary | body | media | meta | actions | null",
+      "scope": "slot | block",
+      "change_request": "string",
+      "preserve_requirements": ["string"],
+      "acceptance_hint": "string"
+    }
+  ]
+}
+9. If the request is unsupported or already satisfied, return {"edits": []}.
 """
 
-TRANSLATOR_USER_PROMPT_TEMPLATE = """Translate the human's multimodal feedback into precise technical instructions for webpage revision.
+TRANSLATOR_USER_PROMPT_TEMPLATE = """Translate the human's multimodal feedback into a strict anchored RevisionPlan for webpage revision.
 
 ### HUMAN_FEEDBACK
 {human_feedback}
@@ -271,50 +283,62 @@ TRANSLATOR_USER_PROMPT_TEMPLATE = """Translate the human's multimodal feedback i
 ### CURRENT_TEMPLATE_ID
 {current_template_id}
 
+### CURRENT_PAGE_MANIFEST_JSON
+{current_page_manifest_json}
+
 ### CURRENT_HTML
 {current_html}
 """
 
 PATCH_AGENT_SYSTEM_PROMPT = """You are the Patch Agent in PaperAlchemy.
-Your job is to revise the CURRENT_HTML safely by emitting grounded Search/Replace blocks copied from the real current HTML.
+Your job is to prepare a strict TargetedReplacementPlan for anchored DOM-based webpage revision.
 
 You will receive:
-1. TRANSLATED_INSTRUCTIONS
-2. RAW_HUMAN_FEEDBACK
-3. CURRENT_HTML
-4. TEMPLATE_REFERENCE_HTML
-
-Return exactly one of these two outputs:
-1. One or more Search/Replace blocks in this exact format:
-<<<<<<< SEARCH
-...exact existing HTML snippet...
-=======
-...replacement HTML snippet...
->>>>>>> REPLACE
-2. The exact sentinel token:
-FULL_REGENERATE_REQUIRED
+1. REVISION_PLAN_JSON
+2. CURRENT_PAGE_MANIFEST_JSON
+3. TARGET_BLOCK_CONTEXT_JSON
+4. STRUCTURED_PAPER_JSON
+5. TEMPLATE_REFERENCE_HTML
 
 Rules:
-1. Output Search/Replace blocks only, or the sentinel token only.
-2. Do not output explanations, commentary, JSON, markdown fences, or any extra text.
-3. Every SEARCH block must be copied exactly from CURRENT_HTML, including whitespace and indentation.
-4. Every SEARCH block must include enough surrounding context to be strictly unique within CURRENT_HTML.
-5. Prefer the smallest safe local edits that satisfy the translated instructions.
-6. Use TEMPLATE_REFERENCE_HTML only as supporting design context, never as a source for SEARCH text.
-7. If the requested change is broad, ambiguous, depends on large-scale restructuring, or cannot be expressed as safe grounded exact-match replacements, return FULL_REGENERATE_REQUIRED.
-8. If you are unsure whether a SEARCH snippet is exact and unique, return FULL_REGENERATE_REQUIRED instead of guessing.
+1. Return strict JSON only with this schema:
+{
+  "replacements": [
+    {
+      "block_id": "string",
+      "slot_id": "title | summary | body | media | meta | actions | null",
+      "scope": "slot | block",
+      "html": "string"
+    }
+  ],
+  "fallback_blocks": [
+    {
+      "block_id": "string",
+      "reason": "string"
+    }
+  ]
+}
+2. For `scope="slot"`, `html` must be the inner HTML for that slot, not a full page or full block.
+3. For `scope="block"`, `html` must be one single root element with `data-pa-block="<block_id>"`.
+4. If a requested change needs larger restructuring, a missing slot, or uncertain local surgery, put that block into `fallback_blocks` instead of guessing.
+5. Every referenced block_id must already exist in CURRENT_PAGE_MANIFEST_JSON.
+6. Prefer the fewest safe replacements necessary to satisfy the revision plan.
+7. Do not output explanations, commentary, markdown fences, or extra text.
 """
 
 PATCH_AGENT_USER_PROMPT_TEMPLATE = """Generate grounded webpage patch output now.
 
-### TRANSLATED_INSTRUCTIONS
-{translated_instructions}
+### REVISION_PLAN_JSON
+{revision_plan_json}
 
-### RAW_HUMAN_FEEDBACK
-{raw_human_feedback}
+### CURRENT_PAGE_MANIFEST_JSON
+{current_page_manifest_json}
 
-### CURRENT_HTML
-{current_html}
+### TARGET_BLOCK_CONTEXT_JSON
+{target_block_context_json}
+
+### STRUCTURED_PAPER_JSON
+{structured_paper_json}
 
 ### TEMPLATE_REFERENCE_HTML
 {template_reference_html}
@@ -324,9 +348,10 @@ CODER_SYSTEM_PROMPT = """You are an Elite Frontend Engineer. Your task is to dyn
 
 You will receive:
 1. `STRUCTURED_PAPER_JSON` (with `rich_web_content`)
-2. `TEMPLATE_REFERENCE_HTML` (the original template's source code)
-3. `CODER_INSTRUCTIONS`
-4. `HUMAN_DIRECTIVES`
+2. `PAGE_PLAN_JSON`
+3. `TEMPLATE_REFERENCE_HTML` (the original template's source code)
+4. `CODER_INSTRUCTIONS`
+5. `HUMAN_DIRECTIVES`
 
 ### STYLING RULE
 - Do NOT invent random CSS.
@@ -337,7 +362,7 @@ You will receive:
 - Only add inline `<style>` rules when explicit `PRIOR_VISUAL_QA_FEEDBACK` provides `css_rules_to_inject`. Otherwise rely on the template's existing class system.
 
 ### CONTENT RULE
-- You are no longer constrained by existing DOM slots.
+- You are no longer constrained by the template's existing DOM slots.
 - Construct a beautiful, flowing page that fully accommodates the massive `rich_web_content`.
 - Create responsive grids, image containers, metric panels, comparison sections, and typography structures as needed.
 - Convert the paper's Markdown-rich narrative into polished HTML with strong hierarchy and readable sectioning.
@@ -346,6 +371,23 @@ You will receive:
 - If `AVAILABLE_PAPER_ASSETS_JSON` is provided, use only the listed copied web paths. Do not invent asset paths.
 - If `AVAILABLE_PAPER_ASSETS_JSON` is provided, make sure every listed asset that was copied for this build is actually referenced somewhere in the final HTML.
 - Remove stale template/demo content that does not belong to the paper.
+
+### ANCHORING RULE
+- This first draft must be revision-friendly.
+- For every block in `PAGE_PLAN_JSON.blocks`, render exactly one root element with `data-pa-block="<block_id>"`.
+- Never omit a planned block and never duplicate a block_id.
+- Inside each block, include one or more child elements with `data-pa-slot` using only this fixed vocabulary:
+  - `title`
+  - `summary`
+  - `body`
+  - `media`
+  - `meta`
+  - `actions`
+- Do not invent any other slot ids.
+- Keep slots semantically meaningful so later revisions can target them safely.
+- If a block contains images, charts, or tables, wrap them inside a `data-pa-slot="media"` region.
+- If a block contains the primary heading, keep it inside `data-pa-slot="title"`.
+- If a block contains the main prose, keep it inside `data-pa-slot="body"` or `data-pa-slot="summary"` as appropriate.
 
 ### HITL RULE
 - `CODER_INSTRUCTIONS` comes from a Senior UI/UX Critic & Tech Lead and has the highest priority for this revision.
@@ -368,6 +410,9 @@ CODER_USER_PROMPT_TEMPLATE = """Generate the final `index.html` now.
 
 ### STRUCTURED_PAPER_JSON
 {structured_paper_json}
+
+### PAGE_PLAN_JSON
+{page_plan_json}
 
 ### TEMPLATE_REFERENCE_HTML
 {template_reference_html}
@@ -624,8 +669,10 @@ Rules:
    - If the human says to skip or omit a section, exclude it from the semantic plan.
    - If the human says to emphasize something, allocate a strong, visible block for it.
    - If the human says to simplify, merge, or shorten content, reflect that editorial choice in the block structure.
-8. planning_mode must be exactly "hybrid_two_stage".
-9. Return strict JSON matching SemanticPlan schema only.
+8. Every `block_blueprint[].block_id` must be a stable semantic snake_case id, such as `hero_overview`, `method`, or `results_summary`.
+9. Never use placeholder ids, positional ids, template-derived ids, or unstable ids such as `section_1`, `block_2`, `content_box`, `template_hero`, or `todo`.
+10. planning_mode must be exactly "hybrid_two_stage".
+11. Return strict JSON matching SemanticPlan schema only.
 
 Output shape reminder:
 {
@@ -709,6 +756,7 @@ You must audit the candidate plan with a strict pass/fail decision.
 4. Execution feasibility:
    - file_touch_plan paths must be coherent with selected_root_dir and page generation flow.
    - no contradictory constraints between blocks.
+   - every block_id must be stable snake_case, unique, non-empty, and free of template-coupled or positional naming.
 5. Clarity:
    - coder_handoff is concrete enough for direct implementation.
 
@@ -722,4 +770,55 @@ Return strict JSON with exactly these fields:
 Rules:
 - If valid, set plan_feedback to "".
 - If invalid, provide specific and actionable fixes.
+"""
+
+BLOCK_REGEN_SYSTEM_PROMPT = """You are the Block Regenerator in PaperAlchemy.
+Your job is to regenerate exactly one anchored webpage block for DOM replacement.
+
+Rules:
+1. Return exactly one HTML fragment with one root element only.
+2. The root element must keep the exact `data-pa-block` value from TARGET_BLOCK_ID.
+3. Preserve the current block's design language and stay compatible with TEMPLATE_REFERENCE_HTML.
+4. Use only the fixed slot vocabulary inside the block:
+   - `title`
+   - `summary`
+   - `body`
+   - `media`
+   - `meta`
+   - `actions`
+5. Do not emit a full HTML document.
+6. Respect the revision request and preserve requirements.
+7. Prefer keeping the existing slot structure when possible.
+8. Use only grounded paper content and provided copied asset paths.
+9. Output HTML only, with no markdown fence or explanation.
+"""
+
+BLOCK_REGEN_USER_PROMPT_TEMPLATE = """Regenerate the target block now.
+
+### TARGET_BLOCK_ID
+{block_id}
+
+### TARGET_BLOCK_SOURCE_SECTIONS
+{source_sections_json}
+
+### TARGET_BLOCK_PLAN_JSON
+{target_block_plan_json}
+
+### TARGET_BLOCK_EDITS_JSON
+{target_block_edits_json}
+
+### PRESERVE_REQUIREMENTS_JSON
+{preserve_requirements_json}
+
+### AVAILABLE_PAPER_ASSETS_JSON
+{available_paper_assets_json}
+
+### STRUCTURED_PAPER_JSON
+{structured_paper_json}
+
+### CURRENT_BLOCK_HTML
+{current_block_html}
+
+### TEMPLATE_REFERENCE_HTML
+{template_reference_html}
 """

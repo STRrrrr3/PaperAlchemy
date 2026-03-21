@@ -9,8 +9,9 @@ from bs4 import BeautifulSoup
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.llm import get_llm
+from src.page_manifest import build_page_manifest_path, extract_page_manifest, load_page_manifest
 from src.preview_utils import build_visual_critic_screenshot_path, take_local_screenshot
-from src.schemas import CoderArtifact, CoderCriticReport
+from src.schemas import CoderArtifact, PagePlan
 from src.state import CoderState
 
 MAX_CODER_RETRY_DEFAULT = 1
@@ -25,6 +26,17 @@ def _normalize_coder_artifact(artifact: Any) -> CoderArtifact | None:
         return artifact
     try:
         return CoderArtifact.model_validate(artifact)
+    except Exception:
+        return None
+
+
+def _normalize_page_plan(plan: Any) -> PagePlan | None:
+    if plan is None:
+        return None
+    if isinstance(plan, PagePlan):
+        return plan
+    try:
+        return PagePlan.model_validate(plan)
     except Exception:
         return None
 
@@ -116,10 +128,13 @@ def _normalize_visual_feedback_payload(payload: dict[str, Any]) -> dict[str, Any
     }
 
 
-def run_coder_code_critic(artifact: CoderArtifact | None) -> list[str]:
+def run_coder_code_critic(artifact: CoderArtifact | None, page_plan: PagePlan | None) -> list[str]:
     critiques: list[str] = []
     if not artifact:
         critiques.append("Coder output is empty or failed schema validation.")
+        return critiques
+    if not page_plan:
+        critiques.append("Page plan is missing, so anchored revision structure cannot be verified.")
         return critiques
 
     site_dir = Path(artifact.site_dir)
@@ -149,22 +164,32 @@ def run_coder_code_critic(artifact: CoderArtifact | None) -> list[str]:
     if body_tag is None:
         critiques.append("Entry html does not contain a <body> element.")
 
-    is_dom_injection_build = "v2-dom-injection" in (artifact.notes or "")
-    if not is_dom_injection_build:
-        if "PaperAlchemy Generated Body Start" not in html_text or "PaperAlchemy Generated Body End" not in html_text:
-            critiques.append("Generated body markers are missing in entry html.")
+    if "PaperAlchemy Generated Body Start" not in html_text or "PaperAlchemy Generated Body End" not in html_text:
+        critiques.append("Generated body markers are missing in entry html.")
 
-        body_start_pattern = re.compile(
-            r"<body[^>]*>\s*<!--\s*PaperAlchemy Generated Body Start\s*-->",
-            flags=re.IGNORECASE | re.DOTALL,
-        )
-        if not body_start_pattern.search(html_text):
-            critiques.append("Generated body marker is not at body start; template content leakage is likely.")
-    elif body_tag is not None:
-        visible_text = " ".join(body_tag.get_text(" ", strip=True).split())
-        has_media = body_tag.find(["img", "video", "iframe", "svg", "canvas"]) is not None
-        if not visible_text and not has_media:
-            critiques.append("DOM-injection build produced an empty body.")
+    body_start_pattern = re.compile(
+        r"<body[^>]*>\s*<!--\s*PaperAlchemy Generated Body Start\s*-->",
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if not body_start_pattern.search(html_text):
+        critiques.append("Generated body marker is not at body start; template content leakage is likely.")
+
+    manifest_path = build_page_manifest_path(entry_html)
+    manifest = load_page_manifest(manifest_path)
+    if manifest is None:
+        critiques.append(f"Anchored revision manifest is missing or invalid: {manifest_path}")
+    else:
+        try:
+            rebuilt_manifest = extract_page_manifest(
+                html_text=html_text,
+                entry_html=entry_html,
+                selected_template_id=artifact.selected_template_id,
+                page_plan=page_plan,
+            )
+            if manifest.model_dump() != rebuilt_manifest.model_dump():
+                critiques.append("page_manifest.json is out of sync with current entry html anchors.")
+        except Exception as exc:
+            critiques.append(f"Anchored revision validation failed: {exc}")
 
     title_count = len(re.findall(r"<title\b", html_text, flags=re.IGNORECASE))
     if title_count != 1:
@@ -191,7 +216,8 @@ def run_coder_code_critic(artifact: CoderArtifact | None) -> list[str]:
 def coder_critic_node(state: CoderState) -> dict[str, Any]:
     print("[PaperAlchemy-CoderCritic] running build checks...")
     artifact = _normalize_coder_artifact(state.get("coder_artifact"))
-    critiques = run_coder_code_critic(artifact)
+    page_plan = _normalize_page_plan(state.get("page_plan"))
+    critiques = run_coder_code_critic(artifact, page_plan)
 
     if critiques:
         feedback = "\n".join(critiques)
