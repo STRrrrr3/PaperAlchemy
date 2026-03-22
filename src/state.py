@@ -26,6 +26,7 @@ class ReaderState(TypedDict):
 
 class PlannerState(TypedDict):
     structured_paper: StructuredPaper
+    previous_page_plan: Optional[PagePlan]
     template_catalog: List[dict[str, Any]]
     template_link_map: dict[str, str]
     module_index: dict[str, Any]
@@ -69,9 +70,12 @@ class WorkflowState(TypedDict):
     targeted_replacement_plan: TargetedReplacementPlan | None
     patch_error: str
     paper_overview: str
+    outline_overview: str
     is_approved: bool
+    is_outline_approved: bool
     is_webpage_approved: bool
     review_stage: str
     structured_paper: Optional[StructuredPaper]
     page_plan: Optional[PagePlan]
+    approved_page_plan: Optional[PagePlan]
     coder_artifact: Optional[CoderArtifact]

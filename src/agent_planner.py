@@ -16,51 +16,12 @@ from src.planner_template_catalog import build_template_catalog, load_module_ind
 from src.prompts import (
     SEMANTIC_PLANNER_SYSTEM_PROMPT,
     SEMANTIC_PLANNER_USER_PROMPT_TEMPLATE,
+    TEMPLATE_BINDER_SYSTEM_PROMPT,
+    TEMPLATE_BINDER_USER_PROMPT_TEMPLATE,
 )
 from src.schemas import PagePlan, SemanticPlan, StructuredPaper, TemplateCandidate
 from src.state import PlannerState
 from src.template_resources import ensure_autopage_template_assets
-
-TEMPLATE_BINDER_DOM_SYSTEM_PROMPT = """You are Template Binder Planner (Stage B) in PaperAlchemy.
-You are a frontend integration expert who preserves the original template DOM.
-Your job is to bind a semantic paper plan onto the selected template candidate and output final PagePlan.
-
-The final PagePlan will be reviewed by a human before rendering, so it must communicate clearly what content you want to put on the webpage and what content you intentionally leave out.
-
-Rules:
-1. selected template must come from TEMPLATE_CANDIDATES_JSON.
-2. selected_entry_html must equal chosen_entry_html of selected candidate.
-3. source_sections and figure_paths must be grounded in STRUCTURED_PAPER_JSON.
-4. planning_mode must be 'hybrid_template_bind'.
-5. Do not redesign or rebuild the template structure. Reuse the existing DOM.
-6. Every page block must keep a stable semantic snake_case block_id. Reuse Stage A block ids whenever possible.
-7. Never invent template-coupled, positional, or placeholder block ids such as section_1, block_2, content_box, template_hero, or todo.
-8. Populate dom_mapping with CSS selectors that already exist in TEMPLATE_DOM_OUTLINE.
-9. Prefer stable selectors such as #id, .class, or short anchored descendant selectors.
-10. Avoid overly broad selectors like "div", "section", or "p" unless the outline proves they are uniquely correct.
-11. dom_mapping values must be HTML/text strings intended for inner-content injection into the matched element.
-12. Rich HTML is allowed in dom_mapping values, including inline formatting and image tags.
-13. When referencing paper figures, only use grounded figure_paths from STRUCTURED_PAPER_JSON for src/href values. Do not invent asset paths.
-14. Be selective: the webpage should present the most important content, not every paper section. Omit or merge lower-value material when appropriate.
-15. If author names and affiliations are visible in STRUCTURED_PAPER_JSON, consider surfacing them in a hero/about/meta area rather than dropping them entirely.
-16. Write decision_summary.design_goal, decision_summary.novelty_points, decision_summary.tradeoffs, and open_questions in plain human-readable language so a reviewer can understand your editorial intent quickly.
-17. Use open_questions to surface human-review decisions such as:
-   - which sections should be cut or merged,
-   - which figures are worth keeping,
-   - whether author/affiliation metadata should be shown prominently,
-   - whether evaluation detail is too dense or too sparse.
-18. You must STRICTLY follow any instructions provided in HUMAN_DIRECTIVES.
-   - If the human says to omit a section, do not bind it into the final PagePlan.
-   - If the human says to emphasize something, map it to a prominent region.
-   - If the human says to simplify or shorten, reduce block density accordingly.
-19. Populate selectors_to_remove with CSS selectors for residual template garbage: dummy text, legacy paper content, placeholder images, irrelevant widgets, stale leaderboards, or unrelated footers.
-20. selectors_to_remove must target the wrapper element that should be deleted cleanly with DOM decompose(), not a child text node.
-21. Do not include selectors_to_remove entries that overlap any dom_mapping target, any wrapper that contains a dom_mapping target, or any child that will be part of injected paper content.
-22. Do not include selectors_to_remove entries that would delete newly injected paper content or essential layout scaffolding.
-23. Target content containers instead of root layout wrappers whenever possible so the original layout and CSS remain intact.
-24. Keep the rest of PagePlan coherent for downstream audit and asset-copy steps.
-25. Return strict JSON matching PagePlan schema only.
-"""
 
 
 def _normalize_structured_paper(paper: Any) -> StructuredPaper | None:
@@ -78,6 +39,17 @@ def _normalize_semantic_plan(plan: Any) -> SemanticPlan | None:
     if isinstance(plan, SemanticPlan):
         return plan
     if plan is None:
+        return None
+
+
+def _normalize_page_plan(plan: Any) -> PagePlan | None:
+    if isinstance(plan, PagePlan):
+        return plan
+    if plan is None:
+        return None
+    try:
+        return PagePlan.model_validate(plan)
+    except Exception:
         return None
     try:
         return SemanticPlan.model_validate(plan)
@@ -280,11 +252,13 @@ def semantic_planner_node(state: PlannerState) -> dict[str, Any]:
         print("[PaperAlchemy-SemanticPlanner] missing structured_paper, cannot proceed.")
         return {"semantic_plan": None, "page_plan": None}
 
+    previous_page_plan = _normalize_page_plan(state.get("previous_page_plan"))
     feedback_history = state.get("planner_feedback_history") or []
     human_directives = extract_human_feedback_text(state.get("human_directives"))
 
     user_msg = SEMANTIC_PLANNER_USER_PROMPT_TEMPLATE.format(
         structured_paper_json=to_pretty_json(structured_paper),
+        previous_page_plan_json=to_pretty_json(previous_page_plan) if previous_page_plan else "null",
         generation_constraints_json=json.dumps(constraints, indent=2, ensure_ascii=False),
         human_directives=human_directives,
         prior_feedback=json.dumps(feedback_history, indent=2, ensure_ascii=False),
@@ -441,42 +415,31 @@ def template_binder_node(state: PlannerState) -> dict[str, Any]:
     module_index = state.get("module_index") or {}
     planner_feedback_history = state.get("planner_feedback_history") or []
     human_directives = extract_human_feedback_text(state.get("human_directives"))
+    previous_page_plan = _normalize_page_plan(state.get("previous_page_plan"))
 
-    user_msg = (
-        "### STRUCTURED_PAPER_JSON\n"
-        f"{to_pretty_json(structured_paper)}\n\n"
-        "### SEMANTIC_PLAN_JSON\n"
-        f"{to_pretty_json(semantic_plan)}\n\n"
-        "### TEMPLATE_CANDIDATES_JSON\n"
-        f"{json.dumps([candidate.model_dump() for candidate in candidates], indent=2, ensure_ascii=False)}\n\n"
-        "### SELECTED_TEMPLATE_CANDIDATE_JSON\n"
-        f"{json.dumps(selected.model_dump(), indent=2, ensure_ascii=False)}\n\n"
-        "### TEMPLATE_ENTRY_HTML_PATH\n"
-        f"{_to_project_relative_path(template_entry_path, project_root)}\n\n"
-        "### TEMPLATE_DOM_OUTLINE\n"
-        f"{template_dom_outline}\n\n"
-        "### CLEANUP_OBJECTIVE\n"
-        "Identify selectors_to_remove for residual template garbage such as lorem ipsum text, old paper abstracts, "
-        "placeholder images, irrelevant widgets, stale leaderboards, or unrelated footers. Target wrapper elements "
-        "that should be fully deleted with DOM decompose(), but never any selector that overlaps with dom_mapping "
-        "targets or their descendants/ancestors.\n\n"
-        "### TEMPLATE_LINK_MAP_JSON\n"
-        f"{json.dumps(template_link_map, indent=2, ensure_ascii=False)}\n\n"
-        "### MODULE_INDEX_JSON\n"
-        f"{json.dumps(module_index, indent=2, ensure_ascii=False)}\n\n"
-        "### GENERATION_CONSTRAINTS_JSON\n"
-        f"{json.dumps(constraints, indent=2, ensure_ascii=False)}\n\n"
-        "### HUMAN_DIRECTIVES\n"
-        f"{human_directives}\n\n"
-        "### PRIOR_FEEDBACK\n"
-        f"{json.dumps(planner_feedback_history, indent=2, ensure_ascii=False)}\n\n"
-        "Generate final PagePlan JSON only."
+    user_msg = TEMPLATE_BINDER_USER_PROMPT_TEMPLATE.format(
+        structured_paper_json=to_pretty_json(structured_paper),
+        previous_page_plan_json=to_pretty_json(previous_page_plan) if previous_page_plan else "null",
+        semantic_plan_json=to_pretty_json(semantic_plan),
+        template_candidates_json=json.dumps(
+            [candidate.model_dump() for candidate in candidates],
+            indent=2,
+            ensure_ascii=False,
+        ),
+        selected_template_json=json.dumps(selected.model_dump(), indent=2, ensure_ascii=False),
+        template_entry_html_path=_to_project_relative_path(template_entry_path, project_root),
+        template_dom_outline=template_dom_outline,
+        template_link_map_json=json.dumps(template_link_map, indent=2, ensure_ascii=False),
+        module_index_json=json.dumps(module_index, indent=2, ensure_ascii=False),
+        generation_constraints_json=json.dumps(constraints, indent=2, ensure_ascii=False),
+        human_directives=human_directives,
+        prior_feedback=json.dumps(planner_feedback_history, indent=2, ensure_ascii=False),
     )
 
     try:
         result = structured_llm.invoke(
             [
-                SystemMessage(content=TEMPLATE_BINDER_DOM_SYSTEM_PROMPT),
+                SystemMessage(content=TEMPLATE_BINDER_SYSTEM_PROMPT),
                 HumanMessage(content=user_msg),
             ]
         )
@@ -546,6 +509,7 @@ def run_planner_agent(
     generation_constraints: dict[str, Any] | None = None,
     user_constraints: dict[str, Any] | None = None,
     human_directives: str | dict = "",
+    previous_page_plan: PagePlan | None = None,
     max_retry: int = 2,
 ):
     current_file = Path(__file__).resolve()
@@ -596,6 +560,7 @@ def run_planner_agent(
 
     initial_state: PlannerState = {
         "structured_paper": structured_data,
+        "previous_page_plan": previous_page_plan,
         "template_catalog": template_catalog,
         "template_link_map": template_link_map,
         "module_index": module_index,

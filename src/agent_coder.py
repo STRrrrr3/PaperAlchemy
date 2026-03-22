@@ -1,6 +1,7 @@
 import os
 import re
 import shutil
+import json
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,16 @@ from src.agent_coder_critic import (
 from src.human_feedback import extract_human_feedback_text, normalize_human_feedback
 from src.json_utils import to_pretty_json
 from src.llm import get_llm
-from src.page_manifest import build_page_manifest_path, extract_page_manifest, save_page_manifest
+from src.page_manifest import (
+    annotate_global_anchors,
+    build_expected_global_anchors,
+    build_page_manifest_path,
+    enrich_page_plan_shell_contracts,
+    extract_page_manifest,
+    missing_shell_contract_block_ids,
+    save_page_manifest,
+)
+from src.page_validation import collect_allowed_asset_web_paths, validate_local_image_references
 from src.prompts import CODER_SYSTEM_PROMPT, CODER_USER_PROMPT_TEMPLATE
 from src.schemas import CoderArtifact, PagePlan, StructuredPaper
 from src.state import CoderState
@@ -284,6 +294,25 @@ def _read_previous_generated_html(state: CoderState) -> str:
     return previous_html or "(none)"
 
 
+def _sanitized_page_plan_for_prompt(page_plan: PagePlan) -> dict[str, Any]:
+    payload = page_plan.model_dump()
+    payload["dom_mapping"] = {
+        selector: "[reserved_template_region_omitted]"
+        for selector in page_plan.dom_mapping
+    }
+    return payload
+
+
+def _with_shell_enriched_page_plan(page_plan: PagePlan, template_reference_html: str) -> PagePlan:
+    enriched_plan = enrich_page_plan_shell_contracts(page_plan, template_reference_html)
+    missing_blocks = missing_shell_contract_block_ids(enriched_plan)
+    if missing_blocks:
+        raise ValueError(
+            "Template shell extraction failed for block(s): " + ", ".join(missing_blocks)
+        )
+    return enriched_plan
+
+
 def coder_node(state: CoderState) -> dict[str, Any]:
     print(
         f"[PaperAlchemy-Coder] building site "
@@ -327,6 +356,12 @@ def coder_node(state: CoderState) -> dict[str, Any]:
         print(f"[PaperAlchemy-Coder] failed reading template reference html: {exc}")
         return {}
 
+    try:
+        page_plan = _with_shell_enriched_page_plan(page_plan, template_reference_html)
+    except ValueError as exc:
+        print(f"[PaperAlchemy-Coder] {exc}")
+        return {}
+
     shutil.copytree(template_root, site_dir)
 
     figure_paths = _collect_figure_paths(page_plan, structured_paper)
@@ -347,11 +382,23 @@ def coder_node(state: CoderState) -> dict[str, Any]:
                 HumanMessage(
                     content=CODER_USER_PROMPT_TEMPLATE.format(
                         structured_paper_json=to_pretty_json(structured_paper),
-                        page_plan_json=to_pretty_json(page_plan),
+                        page_plan_json=json.dumps(
+                            _sanitized_page_plan_for_prompt(page_plan),
+                            indent=2,
+                            ensure_ascii=False,
+                        ),
                         template_reference_html=template_reference_html,
                         coder_instructions=coder_instructions or "(none)",
                         human_directives=human_directives or "(none)",
                         available_paper_assets_json=to_pretty_json(asset_manifest),
+                        global_anchor_requirements_json=json.dumps(
+                            build_expected_global_anchors(
+                                page_plan,
+                                reference_html_text=template_reference_html,
+                            ),
+                            indent=2,
+                            ensure_ascii=False,
+                        ),
                         prior_coder_feedback=_format_feedback_block(state.get("coder_feedback_history")),
                         prior_visual_feedback=_format_feedback_block(state.get("visual_feedback")),
                         previous_generated_html=previous_generated_html,
@@ -370,6 +417,22 @@ def coder_node(state: CoderState) -> dict[str, Any]:
 
     generated_html = _ensure_body_markers(generated_html)
     generated_html = _normalize_html_whitespace(generated_html)
+    generated_html = annotate_global_anchors(generated_html, page_plan)
+
+    asset_critiques = validate_local_image_references(
+        html_text=generated_html,
+        entry_html_path=generated_entry_html_path,
+        site_dir=site_dir,
+        allowed_asset_web_paths=collect_allowed_asset_web_paths(asset_manifest),
+        enforce_paper_asset_whitelist=True,
+    )
+    if asset_critiques:
+        print(
+            "[PaperAlchemy-Coder] generated HTML failed local image validation: "
+            + " | ".join(asset_critiques)
+        )
+        return {}
+
     try:
         page_manifest = extract_page_manifest(
             html_text=generated_html,
@@ -403,11 +466,11 @@ def coder_node(state: CoderState) -> dict[str, Any]:
         copied_assets=copied_assets,
         edited_files=edited_files,
         notes=(
-            "v5-anchored-llm-render: generated a complete HTML document with stable data-pa-block and "
-            "data-pa-slot anchors, plus page_manifest.json for targeted revisions."
+            "v7-shell-aware-anchored-render: generated shell-constrained HTML with stable data-pa-block, "
+            "data-pa-slot, and data-pa-global anchors, validated shell contracts, and checked copied paper asset paths."
         ),
     )
-    return {"coder_artifact": artifact}
+    return {"coder_artifact": artifact, "page_plan": page_plan}
 
 
 def build_coder_graph(max_retry: int = 1):

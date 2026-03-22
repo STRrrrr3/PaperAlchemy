@@ -10,7 +10,9 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.llm import get_llm
 from src.page_manifest import build_page_manifest_path, extract_page_manifest, load_page_manifest
+from src.page_validation import collect_allowed_asset_web_paths, validate_local_image_references
 from src.preview_utils import build_visual_critic_screenshot_path, take_local_screenshot
+from src.prompts import VISION_CRITIC_SYSTEM_PROMPT, VISION_CRITIC_USER_PROMPT_TEMPLATE
 from src.schemas import CoderArtifact, PagePlan
 from src.state import CoderState
 
@@ -128,6 +130,26 @@ def _normalize_visual_feedback_payload(payload: dict[str, Any]) -> dict[str, Any
     }
 
 
+def _available_asset_manifest_from_artifact(artifact: CoderArtifact) -> list[dict[str, str]]:
+    site_dir = Path(artifact.site_dir)
+    entry_html_parent = Path(artifact.entry_html).parent
+    manifest: list[dict[str, str]] = []
+    for rel_path in artifact.copied_assets:
+        asset_path = site_dir / rel_path
+        if not asset_path.exists():
+            continue
+        try:
+            web_path = asset_path.relative_to(entry_html_parent).as_posix()
+        except ValueError:
+            web_path = Path(
+                Path(*asset_path.parts[len(entry_html_parent.parts) :]).as_posix()
+            ).as_posix()
+        if not web_path.startswith((".", "/")):
+            web_path = f"./{web_path}"
+        manifest.append({"web_path": web_path})
+    return manifest
+
+
 def run_coder_code_critic(artifact: CoderArtifact | None, page_plan: PagePlan | None) -> list[str]:
     critiques: list[str] = []
     if not artifact:
@@ -185,11 +207,32 @@ def run_coder_code_critic(artifact: CoderArtifact | None, page_plan: PagePlan | 
                 entry_html=entry_html,
                 selected_template_id=artifact.selected_template_id,
                 page_plan=page_plan,
+                require_expected_globals=str(manifest.schema_version or "").strip() != "1.0",
             )
             if manifest.model_dump() != rebuilt_manifest.model_dump():
                 critiques.append("page_manifest.json is out of sync with current entry html anchors.")
         except Exception as exc:
             critiques.append(f"Anchored revision validation failed: {exc}")
+
+        expected_block_order = [item.block_id for item in sorted(page_plan.page_outline, key=lambda item: item.order)]
+        actual_block_order = [item.block_id for item in manifest.blocks]
+        if actual_block_order != expected_block_order:
+            critiques.append(
+                "Generated data-pa-block order does not match approved page_outline order. "
+                f"expected={expected_block_order}, actual={actual_block_order}"
+            )
+
+    critiques.extend(
+        validate_local_image_references(
+            html_text=html_text,
+            entry_html_path=entry_html,
+            site_dir=site_dir,
+            allowed_asset_web_paths=collect_allowed_asset_web_paths(
+                _available_asset_manifest_from_artifact(artifact)
+            ),
+            enforce_paper_asset_whitelist=True,
+        )
+    )
 
     title_count = len(re.findall(r"<title\b", html_text, flags=re.IGNORECASE))
     if title_count != 1:
@@ -268,44 +311,18 @@ def vision_critic_node(state: CoderState) -> dict[str, Any]:
     if not image_data_url:
         return {"visual_iterations": iteration, "is_visually_approved": True}
 
-    system_prompt = """
-You are an expert Frontend QA Engineer.
-Analyze this screenshot of an academic project page and return strict JSON only.
-
-Look for critical visual bugs:
-1. Dummy text such as Lorem Ipsum or placeholder copy.
-2. Irrelevant template leftovers such as unrelated university names, stale copyright footers, template leaderboards, or foreign-brand sections that do not belong to the paper.
-3. Severe overlap, clipping, unreadable stacking, broken hero areas, or obviously broken images.
-
-Return exactly:
-{
-  "passed": true | false,
-  "issues": ["string"],
-  "selectors_to_remove": ["string"],
-  "css_rules_to_inject": ["string"]
-}
-
-Rules:
-- If the page looks visually clean, set passed=true and leave the lists empty.
-- If exact selectors are uncertain, keep selectors_to_remove empty rather than inventing unsafe selectors.
-- Prefer small, concrete CSS fixes in css_rules_to_inject.
-- Do not return markdown.
-""".strip()
-
     entry_html_path = str(Path(artifact.entry_html).resolve()) if artifact else "(unknown)"
     selected_template_id = str(artifact.selected_template_id) if artifact else "(unknown)"
-    user_prompt = (
-        "Review this rendered page screenshot.\n"
-        f"Current entry html: {entry_html_path}\n"
-        f"Template id: {selected_template_id}\n"
-        "Return strict JSON with actionable selectors_to_remove and css_rules_to_inject.\n"
+    user_prompt = VISION_CRITIC_USER_PROMPT_TEMPLATE.format(
+        entry_html_path=entry_html_path,
+        selected_template_id=selected_template_id,
     )
 
     try:
         llm = get_llm(temperature=0, use_smart_model=False)
         response = llm.invoke(
             [
-                SystemMessage(content=system_prompt),
+                SystemMessage(content=VISION_CRITIC_SYSTEM_PROMPT),
                 HumanMessage(
                     content=[
                         {"type": "text", "text": user_prompt},

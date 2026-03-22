@@ -1,4 +1,4 @@
-﻿import shutil
+import shutil
 import unittest
 from pathlib import Path
 from typing import Any
@@ -7,7 +7,13 @@ from uuid import uuid4
 
 from src.agent_patch import LEGACY_PAGE_ERROR, patch_executor_node
 from src.human_feedback import empty_human_feedback
-from src.page_manifest import build_page_manifest_path, extract_page_manifest, save_page_manifest
+from src.page_manifest import (
+    annotate_global_anchors,
+    build_page_manifest_path,
+    extract_page_manifest,
+    save_page_manifest,
+)
+from src.page_validation import REVISION_OVERRIDE_STYLE_TAG_ID
 from src.schemas import CoderArtifact, PagePlan, StructuredPaper
 
 try:
@@ -40,7 +46,18 @@ def _sample_structured_paper() -> StructuredPaper:
     )
 
 
-def _sample_page_plan(selected_root_dir: str) -> PagePlan:
+def _sample_page_plan(selected_root_dir: str, include_globals: bool = False) -> PagePlan:
+    dom_mapping = {"#hero": "Hero", "#results": "Results"}
+    if include_globals:
+        dom_mapping.update(
+            {
+                "header h1": "Brand",
+                "header nav": "Nav",
+                "header .button-group": "Primary action",
+                "footer": "Footer",
+            }
+        )
+
     return PagePlan.model_validate(
         {
             "plan_meta": {
@@ -132,6 +149,13 @@ def _sample_page_plan(selected_root_dir: str) -> PagePlan:
                         "mobile_order": 1,
                         "desktop_layout": "stack",
                     },
+                    "shell_contract": {
+                        "root_tag": "section",
+                        "required_classes": [],
+                        "preserve_ids": ["hero"],
+                        "wrapper_chain": [],
+                        "actionable_root_selector": "#hero",
+                    },
                     "a11y_notes": [],
                     "acceptance_checks": [],
                 },
@@ -169,11 +193,18 @@ def _sample_page_plan(selected_root_dir: str) -> PagePlan:
                         "mobile_order": 2,
                         "desktop_layout": "stack",
                     },
+                    "shell_contract": {
+                        "root_tag": "section",
+                        "required_classes": [],
+                        "preserve_ids": ["results"],
+                        "wrapper_chain": [],
+                        "actionable_root_selector": "#results",
+                    },
                     "a11y_notes": [],
                     "acceptance_checks": [],
                 },
             ],
-            "dom_mapping": {"#hero": "Hero", "#results": "Results"},
+            "dom_mapping": dom_mapping,
             "selectors_to_remove": [],
             "coder_handoff": {
                 "implementation_order": ["edit index.html"],
@@ -194,24 +225,40 @@ def _sample_page_plan(selected_root_dir: str) -> PagePlan:
     )
 
 
-def _sample_html() -> str:
+def _sample_html(include_globals: bool = False) -> str:
+    header_html = ""
+    footer_html = ""
+    if include_globals:
+        header_html = """
+    <header>
+      <h1><a href="/" data-pa-global="header_brand">Demo Brand</a></h1>
+      <nav data-pa-global="header_nav"><a href="#hero">Hero</a><a href="#results">Results</a></nav>
+      <div class="button-group"><a href="#paper" data-pa-global="header_primary_action">Paper</a></div>
+    </header>
+"""
+        footer_html = """
+    <footer data-pa-global="footer_meta"><p>Footer copy</p></footer>
+"""
+
     return """<!DOCTYPE html>
 <html>
   <head><title>Demo</title></head>
   <body>
     <!-- PaperAlchemy Generated Body Start -->
-    <section data-pa-block="hero">
+{header_html}
+    <section id="hero" data-pa-block="hero">
       <h1 data-pa-slot="title">Old Title</h1>
       <div data-pa-slot="body"><p>Old hero body</p></div>
     </section>
-    <section data-pa-block="results">
+    <section id="results" data-pa-block="results">
       <h2 data-pa-slot="title">Results</h2>
       <div data-pa-slot="body"><p>Keep me</p></div>
     </section>
+{footer_html}
     <!-- PaperAlchemy Generated Body End -->
   </body>
 </html>
-"""
+""".format(header_html=header_html, footer_html=footer_html)
 
 
 class ManifestTests(unittest.TestCase):
@@ -240,9 +287,51 @@ class ManifestTests(unittest.TestCase):
                 page_plan=page_plan,
             )
 
+    def test_extract_page_manifest_records_globals(self) -> None:
+        page_plan = _sample_page_plan("data/templates/demo-template", include_globals=True)
+        manifest = extract_page_manifest(
+            html_text=_sample_html(include_globals=True),
+            entry_html=Path("demo/site/index.html"),
+            selected_template_id="demo-template",
+            page_plan=page_plan,
+        )
+
+        self.assertEqual(
+            ["header_brand", "header_nav", "header_primary_action", "footer_meta"],
+            [item.global_id for item in manifest.globals],
+        )
+
+    def test_annotate_global_anchors_promotes_clickable_target(self) -> None:
+        page_plan = _sample_page_plan("data/templates/demo-template", include_globals=True)
+        raw_html = """<!DOCTYPE html>
+<html>
+  <body>
+    <header>
+      <div class="button-group"><a href="#paper"><span>Paper</span></a></div>
+    </header>
+  </body>
+</html>
+"""
+
+        annotated_html = annotate_global_anchors(raw_html, page_plan)
+
+        self.assertIn('data-pa-global="header_primary_action"', annotated_html)
+        self.assertIn('<a data-pa-global="header_primary_action" href="#paper">', annotated_html)
+        self.assertNotIn('<span data-pa-global="header_primary_action">', annotated_html)
+
+    def test_extract_page_manifest_rejects_missing_required_global(self) -> None:
+        page_plan = _sample_page_plan("data/templates/demo-template", include_globals=True)
+
+        with self.assertRaisesRegex(ValueError, "Missing required data-pa-global ids"):
+            extract_page_manifest(
+                html_text=_sample_html(include_globals=False),
+                entry_html=Path("demo/site/index.html"),
+                selected_template_id="demo-template",
+                page_plan=page_plan,
+            )
 
 class PatchExecutorTests(unittest.TestCase):
-    def _setup_workspace(self) -> tuple[Path, PagePlan, StructuredPaper, CoderArtifact]:
+    def _setup_workspace(self, include_globals: bool = False) -> tuple[Path, PagePlan, StructuredPaper, CoderArtifact]:
         temp_root = Path.cwd() / "data" / "output" / "_tmp_test_workspace"
         temp_root.mkdir(parents=True, exist_ok=True)
         root = temp_root / uuid4().hex
@@ -250,7 +339,7 @@ class PatchExecutorTests(unittest.TestCase):
         site_dir = root / "output" / "site"
         site_dir.mkdir(parents=True, exist_ok=True)
         entry_html = site_dir / "index.html"
-        entry_html.write_text(_sample_html(), encoding="utf-8")
+        entry_html.write_text(_sample_html(include_globals=include_globals), encoding="utf-8")
 
         template_dir = root / "templates" / "demo-template"
         template_dir.mkdir(parents=True, exist_ok=True)
@@ -258,7 +347,7 @@ class PatchExecutorTests(unittest.TestCase):
 
         project_root = Path.cwd().resolve()
         selected_root_dir = str(template_dir.resolve().relative_to(project_root)).replace("\\", "/")
-        page_plan = _sample_page_plan(selected_root_dir)
+        page_plan = _sample_page_plan(selected_root_dir, include_globals=include_globals)
         structured_paper = _sample_structured_paper()
         manifest = extract_page_manifest(
             html_text=entry_html.read_text(encoding="utf-8"),
@@ -274,7 +363,7 @@ class PatchExecutorTests(unittest.TestCase):
             selected_template_id="demo-template",
             copied_assets=[],
             edited_files=["index.html"],
-            notes="v5-anchored-llm-render",
+            notes="v6-layered-anchored-render",
         )
         return root, page_plan, structured_paper, artifact
 
@@ -356,7 +445,7 @@ class PatchExecutorTests(unittest.TestCase):
             }
 
             regenerated_html = (
-                '<section data-pa-block="hero">'
+                '<section id="hero" data-pa-block="hero">'
                 '<h1 data-pa-slot="title">Old Title</h1>'
                 '<div data-pa-slot="summary"><p>Summary</p></div>'
                 '<div data-pa-slot="body"><p>Old hero body</p></div>'
@@ -370,6 +459,267 @@ class PatchExecutorTests(unittest.TestCase):
             self.assertIn('data-pa-slot="summary"', updated_html)
             self.assertIn("Summary", updated_html)
             self.assertIn("Keep me", updated_html)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_patch_executor_applies_global_replacement(self) -> None:
+        root, page_plan, structured_paper, artifact = self._setup_workspace(include_globals=True)
+        try:
+            state = {
+                "paper_folder_name": "demo-paper",
+                "page_plan": page_plan,
+                "structured_paper": structured_paper,
+                "coder_artifact": artifact,
+                "patch_error": "",
+                "revision_plan": {
+                    "edits": [
+                        {
+                            "global_id": "header_primary_action",
+                            "scope": "global",
+                            "change_request": "rename the top button",
+                            "preserve_requirements": ["keep header layout"],
+                            "acceptance_hint": "button text updates",
+                        }
+                    ]
+                },
+                "targeted_replacement_plan": {
+                    "replacements": [
+                        {
+                            "global_id": "header_primary_action",
+                            "scope": "global",
+                            "html": 'Read Paper',
+                        }
+                    ],
+                    "style_changes": [],
+                    "attribute_changes": [
+                        {
+                            "global_id": "header_primary_action",
+                            "scope": "global",
+                            "attributes": {
+                                "href": "https://example.com/paper",
+                                "target": "_blank",
+                            },
+                        }
+                    ],
+                    "override_css_rules": [],
+                    "fallback_blocks": [],
+                },
+            }
+
+            result = patch_executor_node(state)
+
+            self.assertEqual("", result.get("patch_error"))
+            updated_html = Path(artifact.entry_html).read_text(encoding="utf-8")
+            self.assertIn("Read Paper", updated_html)
+            self.assertIn('data-pa-global="header_primary_action"', updated_html)
+            self.assertIn('href="https://example.com/paper"', updated_html)
+            self.assertIn('target="_blank"', updated_html)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_patch_executor_applies_block_id_attribute_change(self) -> None:
+        root, page_plan, structured_paper, artifact = self._setup_workspace()
+        try:
+            page_plan = page_plan.model_copy(
+                deep=True,
+                update={
+                    "blocks": [
+                        block.model_copy(
+                            deep=True,
+                            update={
+                                "shell_contract": block.shell_contract.model_copy(
+                                    deep=True,
+                                    update={"preserve_ids": []},
+                                )
+                                if block.block_id == "results" and block.shell_contract is not None
+                                else block.shell_contract
+                            },
+                        )
+                        for block in page_plan.blocks
+                    ]
+                },
+            )
+            state = {
+                "paper_folder_name": "demo-paper",
+                "page_plan": page_plan,
+                "structured_paper": structured_paper,
+                "coder_artifact": artifact,
+                "patch_error": "",
+                "revision_plan": {
+                    "edits": [
+                        {
+                            "block_id": "results",
+                            "scope": "block",
+                            "change_request": "make this section linkable from the header",
+                            "preserve_requirements": ["keep the current shell"],
+                            "acceptance_hint": "the results block has a stable in-page anchor",
+                        }
+                    ]
+                },
+                "targeted_replacement_plan": {
+                    "replacements": [],
+                    "style_changes": [],
+                    "attribute_changes": [
+                        {
+                            "block_id": "results",
+                            "scope": "block",
+                            "attributes": {
+                                "id": "experimental_evaluation",
+                            },
+                        }
+                    ],
+                    "override_css_rules": [],
+                    "fallback_blocks": [],
+                },
+            }
+
+            result = patch_executor_node(state)
+
+            self.assertEqual("", result.get("patch_error"))
+            updated_html = Path(artifact.entry_html).read_text(encoding="utf-8")
+            self.assertIn('id="experimental_evaluation"', updated_html)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_patch_executor_applies_style_change_and_override_rule(self) -> None:
+        root, page_plan, structured_paper, artifact = self._setup_workspace(include_globals=True)
+        try:
+            state = {
+                "paper_folder_name": "demo-paper",
+                "page_plan": page_plan,
+                "structured_paper": structured_paper,
+                "coder_artifact": artifact,
+                "patch_error": "",
+                "revision_plan": {
+                    "edits": [
+                        {
+                            "block_id": "hero",
+                            "slot_id": "body",
+                            "scope": "slot",
+                            "change_request": "increase body font size and spacing",
+                            "preserve_requirements": ["keep copy"],
+                            "acceptance_hint": "hero body is more readable",
+                        }
+                    ]
+                },
+                "targeted_replacement_plan": {
+                    "replacements": [],
+                    "style_changes": [
+                        {
+                            "block_id": "hero",
+                            "slot_id": "body",
+                            "scope": "slot",
+                            "declarations": {
+                                "font-size": "1.2rem",
+                                "margin-bottom": "2rem",
+                            },
+                        }
+                    ],
+                    "override_css_rules": [
+                        {
+                            "selector": '[data-pa-block="hero"] p',
+                            "declarations": {
+                                "line-height": "1.8",
+                            },
+                        }
+                    ],
+                    "fallback_blocks": [],
+                },
+            }
+
+            result = patch_executor_node(state)
+
+            self.assertEqual("", result.get("patch_error"))
+            updated_html = Path(artifact.entry_html).read_text(encoding="utf-8")
+            self.assertIn("font-size: 1.2rem;", updated_html)
+            self.assertIn("margin-bottom: 2rem;", updated_html)
+            self.assertIn(REVISION_OVERRIDE_STYLE_TAG_ID, updated_html)
+            self.assertIn('[data-pa-block="hero"] p', updated_html)
+            self.assertIn("line-height: 1.8;", updated_html)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_patch_executor_rejects_invalid_local_paper_image_path(self) -> None:
+        root, page_plan, structured_paper, artifact = self._setup_workspace(include_globals=True)
+        try:
+            state = {
+                "paper_folder_name": "demo-paper",
+                "page_plan": page_plan,
+                "structured_paper": structured_paper,
+                "coder_artifact": artifact,
+                "patch_error": "",
+                "revision_plan": {
+                    "edits": [
+                        {
+                            "block_id": "hero",
+                            "slot_id": "body",
+                            "scope": "slot",
+                            "change_request": "add image",
+                            "preserve_requirements": [],
+                            "acceptance_hint": "image appears",
+                        }
+                    ]
+                },
+                "targeted_replacement_plan": {
+                    "replacements": [
+                        {
+                            "block_id": "hero",
+                            "slot_id": "body",
+                            "scope": "slot",
+                            "html": '<p><img src="./assets/paper/missing.png" alt="missing"></p>',
+                        }
+                    ],
+                    "style_changes": [],
+                    "override_css_rules": [],
+                    "fallback_blocks": [],
+                },
+            }
+
+            result = patch_executor_node(state)
+
+            self.assertIn("Post-revision asset validation failed", str(result.get("patch_error") or ""))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_patch_executor_rejects_regenerated_block_that_breaks_shell_contract(self) -> None:
+        root, page_plan, structured_paper, artifact = self._setup_workspace()
+        try:
+            state = {
+                "paper_folder_name": "demo-paper",
+                "page_plan": page_plan,
+                "structured_paper": structured_paper,
+                "coder_artifact": artifact,
+                "patch_error": "",
+                "revision_plan": {
+                    "edits": [
+                        {
+                            "block_id": "hero",
+                            "scope": "block",
+                            "change_request": "rebuild hero",
+                            "preserve_requirements": ["keep hero shell"],
+                            "acceptance_hint": "hero is updated",
+                        }
+                    ]
+                },
+                "targeted_replacement_plan": {
+                    "replacements": [],
+                    "style_changes": [],
+                    "attribute_changes": [],
+                    "override_css_rules": [],
+                    "fallback_blocks": [{"block_id": "hero", "reason": "force regen"}],
+                },
+            }
+
+            bad_regenerated_html = (
+                '<div data-pa-block="hero">'
+                '<h1 data-pa-slot="title">Old Title</h1>'
+                '<div data-pa-slot="body"><p>Broken shell</p></div>'
+                '</div>'
+            )
+            with patch("src.agent_patch._regenerate_block_html", return_value=bad_regenerated_html):
+                result = patch_executor_node(state)
+
+            self.assertIn("shell_contract", str(result.get("patch_error") or ""))
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
@@ -395,6 +745,35 @@ class PatchExecutorTests(unittest.TestCase):
 
 
 @unittest.skipIf(app is None, f"app import failed: {APP_IMPORT_ERROR}")
+class ReviewFormatterTests(unittest.TestCase):
+    def test_review_accordion_updates_follow_stage_defaults(self) -> None:
+        overview_reader, overview_outline = app._review_accordion_updates("overview")
+        outline_reader, outline_outline = app._review_accordion_updates("outline")
+        webpage_reader, webpage_outline = app._review_accordion_updates("webpage")
+
+        self.assertEqual(True, overview_reader.get("open"))
+        self.assertEqual(False, overview_outline.get("open"))
+        self.assertEqual(False, outline_reader.get("open"))
+        self.assertEqual(True, outline_outline.get("open"))
+        self.assertEqual(False, webpage_reader.get("open"))
+        self.assertEqual(False, webpage_outline.get("open"))
+
+    def test_page_plan_markdown_uses_outline_and_diagnostics(self) -> None:
+        page_plan = _sample_page_plan("data/templates/demo")
+        structured_paper = _sample_structured_paper()
+
+        rendered = app.format_page_plan_to_markdown(
+            page_plan.model_dump(),
+            structured_paper.model_dump(),
+        )
+
+        self.assertIn("# Planned Webpage Outline", rendered)
+        self.assertIn("### 1. Hero", rendered)
+        self.assertIn("`block_id`: `hero`", rendered)
+        self.assertIn("Unused source sections: None", rendered)
+
+
+@unittest.skipIf(app is None, f"app import failed: {APP_IMPORT_ERROR}")
 class WorkflowPatchRoutingTests(unittest.TestCase):
     def _initial_state(self) -> dict[str, Any]:
         return {
@@ -408,11 +787,14 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
             "targeted_replacement_plan": None,
             "patch_error": "",
             "paper_overview": "",
+            "outline_overview": "",
             "is_approved": False,
+            "is_outline_approved": False,
             "is_webpage_approved": False,
             "review_stage": "overview",
             "structured_paper": None,
             "page_plan": None,
+            "approved_page_plan": None,
             "coder_artifact": None,
         }
 
@@ -425,6 +807,7 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
             "reader": 0,
             "overview": 0,
             "planner": 0,
+            "outline": 0,
             "coder": 0,
             "translator": 0,
             "patch_agent": 0,
@@ -442,6 +825,10 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
         def planner_node(_: Any) -> dict[str, Any]:
             counts["planner"] += 1
             return {"page_plan": {"template": "x"}}
+
+        def outline_node(_: Any) -> dict[str, Any]:
+            counts["outline"] += 1
+            return {"outline_overview": "outline", "review_stage": "outline"}
 
         def coder_node(_: Any) -> dict[str, Any]:
             counts["coder"] += 1
@@ -476,6 +863,7 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
             patch.object(app, "reader_phase_node", reader_node),
             patch.object(app, "overview_node", overview_node),
             patch.object(app, "planner_phase_node", planner_node),
+            patch.object(app, "outline_review_node", outline_node),
             patch.object(app, "coder_phase_node", coder_node),
             patch.object(app, "translator_node", translator_node),
             patch.object(app, "patch_agent_node", fake_patch_agent_node),
@@ -485,7 +873,7 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
 
         return workflow, counts
 
-    def _pause_at_webpage_review(self, workflow: Any) -> dict[str, Any]:
+    def _pause_at_outline_review(self, workflow: Any) -> dict[str, Any]:
         config = {"configurable": {"thread_id": f"test::{uuid4().hex}"}}
         workflow.invoke(self._initial_state(), config=config)
         overview_state = workflow.get_state(config)
@@ -501,15 +889,59 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
                 "targeted_replacement_plan": None,
                 "patch_error": "",
                 "is_approved": True,
+                "is_outline_approved": False,
                 "is_webpage_approved": False,
             },
             as_node="overview",
         )
         workflow.invoke(None, config=config)
 
+        outline_state = workflow.get_state(config)
+        self.assertEqual("outline", outline_state.values.get("review_stage"))
+        return config
+
+    def _pause_at_webpage_review(self, workflow: Any) -> dict[str, Any]:
+        config = self._pause_at_outline_review(workflow)
+
+        workflow.update_state(
+            config,
+            {
+                "human_directives": empty_human_feedback(),
+                "coder_instructions": "",
+                "patch_agent_output": "",
+                "revision_plan": None,
+                "targeted_replacement_plan": None,
+                "patch_error": "",
+                "approved_page_plan": {"template": "x"},
+                "is_outline_approved": True,
+                "is_webpage_approved": False,
+            },
+            as_node="outline_review",
+        )
+        workflow.invoke(None, config=config)
+
         webpage_state = workflow.get_state(config)
         self.assertEqual("webpage", webpage_state.values.get("review_stage"))
         return config
+
+    def test_workflow_pauses_at_outline_review_before_coder(self) -> None:
+        workflow, counts = self._build_workflow(
+            {
+                "patch_agent_output": "",
+                "targeted_replacement_plan": None,
+                "patch_error": "",
+            }
+        )
+
+        config = self._pause_at_outline_review(workflow)
+        outline_state = workflow.get_state(config)
+
+        self.assertEqual("outline", outline_state.values.get("review_stage"))
+        self.assertEqual(1, counts["reader"])
+        self.assertEqual(1, counts["overview"])
+        self.assertEqual(1, counts["planner"])
+        self.assertEqual(1, counts["outline"])
+        self.assertEqual(0, counts["coder"])
 
     def test_revision_flow_calls_patch_executor_after_patch_agent(self) -> None:
         workflow, counts = self._build_workflow(
@@ -580,6 +1012,10 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
         state = workflow.get_state(config)
         self.assertEqual(LEGACY_PAGE_ERROR, state.values.get("patch_error"))
         self.assertEqual(1, counts["patch_executor"])
+
+
+
+
 
 
 
