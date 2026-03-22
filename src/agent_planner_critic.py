@@ -7,7 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.json_utils import to_pretty_json
 from src.llm import get_llm
-from src.prompts import PLANNER_CRITIC_SYSTEM_PROMPT
+from src.prompts import PLANNER_CRITIC_SYSTEM_PROMPT, PLANNER_CRITIC_USER_PROMPT_TEMPLATE
 from src.schemas import PagePlan, PlannerCriticReport, StructuredPaper, TemplateCandidate
 from src.state import PlannerState
 
@@ -140,11 +140,19 @@ def run_planner_code_critic(
     }
 
     outline_block_ids: set[str] = set()
+    outline_orders: set[int] = set()
     for item in page_plan.page_outline:
         if item.block_id in outline_block_ids:
             critiques.append(f"Duplicate page_outline block_id '{item.block_id}'.")
         outline_block_ids.add(item.block_id)
+        if item.order in outline_orders:
+            critiques.append(f"Duplicate page_outline order '{item.order}' detected.")
+        outline_orders.add(item.order)
         critiques.extend(_validate_block_id(item.block_id, template_tokens))
+        if not item.source_sections:
+            critiques.append(
+                f"page_outline block '{item.block_id}' must reference at least one source section."
+            )
         for sec_title in item.source_sections:
             if sec_title not in valid_sections:
                 critiques.append(
@@ -193,13 +201,10 @@ def run_planner_semantic_critic(
     llm = get_llm(temperature=0, use_smart_model=False)
     structured_llm = llm.with_structured_output(PlannerCriticReport)
 
-    user_msg = (
-        "### STRUCTURED_PAPER_JSON\n"
-        f"{to_pretty_json(structured_paper)}\n\n"
-        "### TEMPLATE_CATALOG_JSON\n"
-        f"{json.dumps(template_catalog, indent=2, ensure_ascii=False)}\n\n"
-        "### CANDIDATE_PAGE_PLAN_JSON\n"
-        f"{to_pretty_json(page_plan)}\n"
+    user_msg = PLANNER_CRITIC_USER_PROMPT_TEMPLATE.format(
+        structured_paper_json=to_pretty_json(structured_paper),
+        template_catalog_json=json.dumps(template_catalog, indent=2, ensure_ascii=False),
+        candidate_page_plan_json=to_pretty_json(page_plan),
     )
 
     try:

@@ -13,11 +13,24 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from src.json_utils import to_pretty_json
 from src.llm import get_llm
 from src.page_manifest import (
+    GLOBAL_ATTR,
     SLOT_ATTR,
     build_block_selector,
+    build_global_selector,
     build_page_manifest_path,
+    build_slot_selector,
     extract_page_manifest,
     load_page_manifest,
+    missing_shell_contract_block_ids,
+    validate_block_tag_against_shell_contract,
+)
+from src.page_validation import (
+    REVISION_OVERRIDE_STYLE_TAG_ID,
+    collect_allowed_asset_web_paths,
+    collect_local_image_sources,
+    is_safe_anchored_selector,
+    validate_fragment_local_image_sources,
+    validate_local_image_references,
 )
 from src.prompts import (
     BLOCK_REGEN_SYSTEM_PROMPT,
@@ -26,11 +39,14 @@ from src.prompts import (
     PATCH_AGENT_USER_PROMPT_TEMPLATE,
 )
 from src.schemas import (
+    AttributeChange,
     CoderArtifact,
     FallbackBlock,
+    PageManifest,
     PagePlan,
     RevisionPlan,
     StructuredPaper,
+    StyleChange,
     TargetedReplacementPlan,
 )
 from src.state import WorkflowState
@@ -199,17 +215,33 @@ def _merge_unique_strings(*groups: list[str]) -> list[str]:
     return merged
 
 
-def _update_patch_notes(existing_notes: str, replacements_count: int, regenerated_count: int) -> str:
+def _update_patch_notes(
+    existing_notes: str,
+    replacements_count: int,
+    regenerated_count: int,
+    style_change_count: int,
+    attribute_change_count: int,
+    override_rule_count: int,
+) -> str:
     base = str(existing_notes or "").strip()
     patch_summary = (
-        "v5-targeted-revision: "
-        f"applied {replacements_count} targeted replacement(s) and regenerated {regenerated_count} block(s)."
+        "v7-shell-aware-targeted-revision: "
+        f"applied {replacements_count} replacement(s), "
+        f"{style_change_count} style change(s), "
+        f"{attribute_change_count} attribute change(s), "
+        f"{override_rule_count} override css rule(s), "
+        f"and regenerated {regenerated_count} block(s)."
     )
     if not base:
         return patch_summary
 
     parts = [part.strip() for part in base.split("|") if part.strip()]
-    filtered_parts = [part for part in parts if not part.startswith("v5-targeted-revision:")]
+    filtered_parts = [
+        part
+        for part in parts
+        if not part.startswith("v6-targeted-revision:")
+        and not part.startswith("v7-shell-aware-targeted-revision:")
+    ]
     filtered_parts.append(patch_summary)
     return " | ".join(filtered_parts)
 
@@ -275,6 +307,9 @@ def _summarize_targeted_plan(plan: TargetedReplacementPlan | None) -> str:
         return ""
     return (
         f"replacements={len(plan.replacements)}; "
+        f"style_changes={len(plan.style_changes)}; "
+        f"attribute_changes={len(plan.attribute_changes)}; "
+        f"override_css_rules={len(plan.override_css_rules)}; "
         f"fallback_blocks={len(plan.fallback_blocks)}"
     )
 
@@ -285,18 +320,18 @@ def _extract_fragment_nodes(fragment: BeautifulSoup) -> list[Any]:
     return list(fragment.contents)
 
 
+def _is_ignorable_node(node: Any) -> bool:
+    if isinstance(node, str):
+        return not node.strip()
+    return False
+
+
 def _extract_single_root_tag(html_fragment: str) -> Tag:
     fragment = BeautifulSoup(str(html_fragment or ""), "html.parser")
     nodes = [node for node in _extract_fragment_nodes(fragment) if not _is_ignorable_node(node)]
     if len(nodes) != 1 or not isinstance(nodes[0], Tag):
         raise PatchApplicationError("Expected exactly one root element in block replacement HTML.")
     return nodes[0]
-
-
-def _is_ignorable_node(node: Any) -> bool:
-    if isinstance(node, str):
-        return not node.strip()
-    return False
 
 
 def _normalize_slot_fragment(html_fragment: str, slot_id: str) -> BeautifulSoup:
@@ -312,6 +347,19 @@ def _normalize_slot_fragment(html_fragment: str, slot_id: str) -> BeautifulSoup:
     return fragment
 
 
+def _normalize_global_fragment(html_fragment: str, global_id: str) -> BeautifulSoup:
+    fragment = BeautifulSoup(str(html_fragment or ""), "html.parser")
+    nodes = [node for node in _extract_fragment_nodes(fragment) if not _is_ignorable_node(node)]
+    if len(nodes) == 1 and isinstance(nodes[0], Tag):
+        root = nodes[0]
+        if str(root.get(GLOBAL_ATTR) or "").strip() == global_id:
+            normalized = BeautifulSoup("", "html.parser")
+            for child in list(root.contents):
+                normalized.append(child.extract())
+            return normalized
+    return fragment
+
+
 def _replace_tag_contents(target: Tag, fragment: BeautifulSoup) -> None:
     target.clear()
     for node in _extract_fragment_nodes(fragment):
@@ -320,26 +368,43 @@ def _replace_tag_contents(target: Tag, fragment: BeautifulSoup) -> None:
         target.append(node)
 
 
-def _apply_slot_replacement(soup: BeautifulSoup, block_id: str, slot_id: str, html_fragment: str) -> None:
+def _select_block_target(soup: BeautifulSoup, block_id: str) -> Tag:
     block_targets = soup.select(build_block_selector(block_id))
     if len(block_targets) != 1:
         raise PatchApplicationError(f"Expected exactly one block '{block_id}' in current HTML.")
+    return block_targets[0]
 
-    slot_targets = block_targets[0].select(f'[{SLOT_ATTR}="{slot_id}"]')
+
+def _select_slot_target(soup: BeautifulSoup, block_id: str, slot_id: str) -> Tag:
+    block_target = _select_block_target(soup, block_id)
+    slot_targets = block_target.select(f'[{SLOT_ATTR}="{slot_id}"]')
     if len(slot_targets) != 1:
         raise PatchApplicationError(
             f"Expected exactly one slot '{slot_id}' inside block '{block_id}', found {len(slot_targets)}."
         )
+    return slot_targets[0]
 
+
+def _select_global_target(soup: BeautifulSoup, global_id: str) -> Tag:
+    global_targets = soup.select(build_global_selector(global_id))
+    if len(global_targets) != 1:
+        raise PatchApplicationError(f"Expected exactly one global anchor '{global_id}' in current HTML.")
+    return global_targets[0]
+
+
+def _apply_slot_replacement(soup: BeautifulSoup, block_id: str, slot_id: str, html_fragment: str) -> None:
+    slot_target = _select_slot_target(soup, block_id, slot_id)
     slot_fragment = _normalize_slot_fragment(html_fragment, slot_id)
-    _replace_tag_contents(slot_targets[0], slot_fragment)
+    _replace_tag_contents(slot_target, slot_fragment)
 
 
-def _apply_block_replacement(soup: BeautifulSoup, block_id: str, html_fragment: str) -> None:
-    block_targets = soup.select(build_block_selector(block_id))
-    if len(block_targets) != 1:
-        raise PatchApplicationError(f"Expected exactly one block '{block_id}' in current HTML.")
-
+def _apply_block_replacement(
+    soup: BeautifulSoup,
+    block_id: str,
+    html_fragment: str,
+    page_plan: PagePlan | None = None,
+) -> None:
+    block_target = _select_block_target(soup, block_id)
     root = _extract_single_root_tag(html_fragment)
     root_block_id = str(root.get("data-pa-block") or "").strip()
     if not root_block_id:
@@ -349,7 +414,143 @@ def _apply_block_replacement(soup: BeautifulSoup, block_id: str, html_fragment: 
             f"Replacement block root data-pa-block '{root_block_id}' does not match target '{block_id}'."
         )
 
-    block_targets[0].replace_with(root)
+    original_html = str(block_target)
+    block_target.replace_with(root)
+
+    if page_plan is not None:
+        block_lookup = _block_model_lookup(page_plan)
+        block_plan = block_lookup.get(block_id)
+        shell_errors = validate_block_tag_against_shell_contract(
+            block_tag=root,
+            shell_contract=getattr(block_plan, "shell_contract", None),
+            block_id=block_id,
+        )
+        if shell_errors:
+            restored_root = _extract_single_root_tag(original_html)
+            root.replace_with(restored_root)
+            raise PatchApplicationError("; ".join(shell_errors))
+
+
+def _apply_global_replacement(soup: BeautifulSoup, global_id: str, html_fragment: str) -> None:
+    global_target = _select_global_target(soup, global_id)
+    global_fragment = _normalize_global_fragment(html_fragment, global_id)
+    _replace_tag_contents(global_target, global_fragment)
+
+
+def _parse_inline_style(style_text: str) -> dict[str, str]:
+    declarations: dict[str, str] = {}
+    for part in str(style_text or "").split(";"):
+        if ":" not in part:
+            continue
+        prop, value = part.split(":", 1)
+        clean_prop = str(prop or "").strip()
+        clean_value = str(value or "").strip()
+        if clean_prop and clean_value:
+            declarations[clean_prop] = clean_value
+    return declarations
+
+
+def _serialize_inline_style(declarations: dict[str, str]) -> str:
+    if not declarations:
+        return ""
+    return "; ".join(f"{prop}: {value}" for prop, value in declarations.items()) + ";"
+
+
+def _apply_style_change_to_tag(target: Tag, declarations: dict[str, str]) -> None:
+    merged = _parse_inline_style(str(target.get("style") or ""))
+    for prop, value in declarations.items():
+        clean_prop = str(prop or "").strip()
+        clean_value = str(value or "").strip()
+        if clean_prop and clean_value:
+            merged[clean_prop] = clean_value
+    serialized = _serialize_inline_style(merged)
+    if serialized:
+        target["style"] = serialized
+    else:
+        target.attrs.pop("style", None)
+
+
+def _apply_style_change(soup: BeautifulSoup, style_change: StyleChange) -> None:
+    if style_change.scope == "slot":
+        target = _select_slot_target(soup, str(style_change.block_id or ""), str(style_change.slot_id or ""))
+    elif style_change.scope == "block":
+        target = _select_block_target(soup, str(style_change.block_id or ""))
+    else:
+        target = _select_global_target(soup, str(style_change.global_id or ""))
+    _apply_style_change_to_tag(target, {str(k): v for k, v in style_change.declarations.items()})
+
+
+def _apply_attribute_change_to_tag(target: Tag, attributes: dict[str, str]) -> None:
+    for name, value in attributes.items():
+        clean_name = str(name or "").strip()
+        clean_value = str(value or "").strip()
+        if not clean_name:
+            continue
+        if not clean_value:
+            target.attrs.pop(clean_name, None)
+            continue
+        if clean_name == "class":
+            target[clean_name] = [item for item in clean_value.split() if item.strip()]
+        else:
+            target[clean_name] = clean_value
+
+
+def _apply_attribute_change(soup: BeautifulSoup, attribute_change: AttributeChange) -> None:
+    if attribute_change.scope == "slot":
+        target = _select_slot_target(
+            soup,
+            str(attribute_change.block_id or ""),
+            str(attribute_change.slot_id or ""),
+        )
+    elif attribute_change.scope == "block":
+        target = _select_block_target(soup, str(attribute_change.block_id or ""))
+    else:
+        target = _select_global_target(soup, str(attribute_change.global_id or ""))
+    _apply_attribute_change_to_tag(
+        target,
+        {str(name): value for name, value in attribute_change.attributes.items()},
+    )
+
+
+def _ensure_override_style_tag(soup: BeautifulSoup) -> Tag:
+    existing = soup.select_one(f'style[id="{REVISION_OVERRIDE_STYLE_TAG_ID}"]')
+    if isinstance(existing, Tag):
+        return existing
+
+    if soup.head is None:
+        head = soup.new_tag("head")
+        if soup.html is not None:
+            soup.html.insert(0, head)
+        else:
+            soup.insert(0, head)
+    style_tag = soup.new_tag("style")
+    style_tag["id"] = REVISION_OVERRIDE_STYLE_TAG_ID
+    soup.head.append(style_tag)
+    return style_tag
+
+
+def _render_override_rule(selector: str, declarations: dict[str, str]) -> str:
+    lines = [f"{selector} {{"]
+    for prop, value in declarations.items():
+        lines.append(f"  {prop}: {value};")
+    lines.append("}")
+    return "\n".join(lines)
+
+
+def _apply_override_css_rules(soup: BeautifulSoup, rules: list[Any]) -> None:
+    if not rules:
+        return
+    style_tag = _ensure_override_style_tag(soup)
+    existing_text = style_tag.string or style_tag.get_text() or ""
+    rendered_rules = [
+        _render_override_rule(
+            selector=str(rule.selector),
+            declarations={str(prop): value for prop, value in rule.declarations.items()},
+        )
+        for rule in rules
+    ]
+    combined = "\n\n".join([part for part in [existing_text.strip(), *rendered_rules] if part])
+    style_tag.string = combined
 
 
 def _current_slot_html_map(block_tag: Tag) -> dict[str, str]:
@@ -364,43 +565,116 @@ def _current_slot_html_map(block_tag: Tag) -> dict[str, str]:
     return slot_html_map
 
 
-def _target_block_html_map(soup: BeautifulSoup, block_ids: list[str]) -> dict[str, str]:
-    block_html_map: dict[str, str] = {}
+def _target_key(scope: str, block_id: str | None = None, slot_id: str | None = None, global_id: str | None = None) -> str:
+    if scope == "slot":
+        return f"slot:{block_id}:{slot_id}"
+    if scope == "block":
+        return f"block:{block_id}"
+    if scope == "global":
+        return f"global:{global_id}"
+    return scope
+
+
+def _target_key_label(key: str) -> str:
+    scope, _, remainder = key.partition(":")
+    if scope == "slot":
+        block_id, _, slot_id = remainder.partition(":")
+        return f"{block_id}.{slot_id}"
+    return remainder
+
+
+def _requested_target_keys(revision_plan: RevisionPlan) -> list[str]:
+    keys: list[str] = []
     seen: set[str] = set()
-    for block_id in block_ids:
-        clean = str(block_id or "").strip()
-        if not clean or clean in seen:
-            continue
-        seen.add(clean)
-        block_tag = soup.select_one(build_block_selector(clean))
-        if isinstance(block_tag, Tag):
-            block_html_map[clean] = str(block_tag)
-    return block_html_map
+    for edit in revision_plan.edits:
+        key = _target_key(
+            edit.scope,
+            block_id=edit.block_id,
+            slot_id=edit.slot_id,
+            global_id=edit.global_id,
+        )
+        if key not in seen:
+            seen.add(key)
+            keys.append(key)
+    return keys
 
 
-def _build_target_block_context_json(
+def _snapshot_for_target_key(soup: BeautifulSoup, key: str) -> str:
+    parts = key.split(":")
+    scope = parts[0]
+    if scope == "slot" and len(parts) == 3:
+        tag = soup.select_one(build_slot_selector(parts[1], parts[2]))
+    elif scope == "block" and len(parts) == 2:
+        tag = soup.select_one(build_block_selector(parts[1]))
+    elif scope == "global" and len(parts) == 2:
+        tag = soup.select_one(build_global_selector(parts[1]))
+    else:
+        tag = None
+    return str(tag) if isinstance(tag, Tag) else ""
+
+
+def _target_snapshot_map(soup: BeautifulSoup, keys: list[str]) -> dict[str, str]:
+    return {key: _snapshot_for_target_key(soup, key) for key in keys}
+
+
+def _collect_allowed_anchor_selectors(manifest: PageManifest) -> set[str]:
+    selectors: set[str] = set()
+    for block in manifest.blocks:
+        selectors.add(block.selector)
+        for slot in block.slots:
+            selectors.add(slot.selector)
+    for global_anchor in manifest.globals:
+        selectors.add(global_anchor.selector)
+    return selectors
+
+
+def _override_rule_target_keys(selector: str, manifest: PageManifest) -> set[str]:
+    matched: set[str] = set()
+    for block in manifest.blocks:
+        if selector == block.selector or selector.startswith(block.selector):
+            matched.add(_target_key("block", block_id=block.block_id))
+        for slot in block.slots:
+            if selector == slot.selector or selector.startswith(slot.selector):
+                matched.add(_target_key("slot", block_id=block.block_id, slot_id=slot.slot_id))
+    for global_anchor in manifest.globals:
+        if selector == global_anchor.selector or selector.startswith(global_anchor.selector):
+            matched.add(_target_key("global", global_id=global_anchor.global_id))
+    return matched
+
+
+def _build_target_anchor_context_json(
     current_html: str,
     revision_plan: RevisionPlan,
 ) -> str:
     soup = BeautifulSoup(current_html, "html.parser")
-    target_block_ids: list[str] = []
-    for edit in revision_plan.edits:
-        if edit.block_id not in target_block_ids:
-            target_block_ids.append(edit.block_id)
-
     payload: list[dict[str, Any]] = []
-    for block_id in target_block_ids:
-        block_tag = soup.select_one(build_block_selector(block_id))
-        if not isinstance(block_tag, Tag):
-            continue
+    seen_blocks: set[str] = set()
+    seen_globals: set[str] = set()
 
-        payload.append(
-            {
-                "block_id": block_id,
-                "current_block_html": str(block_tag),
-                "current_slot_html": _current_slot_html_map(block_tag),
-            }
-        )
+    for edit in revision_plan.edits:
+        if edit.scope in {"slot", "block"} and edit.block_id and edit.block_id not in seen_blocks:
+            block_tag = soup.select_one(build_block_selector(edit.block_id))
+            if isinstance(block_tag, Tag):
+                payload.append(
+                    {
+                        "scope": "block",
+                        "block_id": edit.block_id,
+                        "current_block_html": str(block_tag),
+                        "current_slot_html": _current_slot_html_map(block_tag),
+                    }
+                )
+                seen_blocks.add(edit.block_id)
+        if edit.scope == "global" and edit.global_id and edit.global_id not in seen_globals:
+            global_tag = soup.select_one(build_global_selector(edit.global_id))
+            if isinstance(global_tag, Tag):
+                payload.append(
+                    {
+                        "scope": "global",
+                        "global_id": edit.global_id,
+                        "current_global_html": str(global_tag),
+                    }
+                )
+                seen_globals.add(edit.global_id)
 
     return json.dumps(payload, indent=2, ensure_ascii=False)
 
@@ -409,133 +683,6 @@ def _load_current_manifest(artifact: CoderArtifact | None):
     if not artifact:
         return None
     return load_page_manifest(build_page_manifest_path(artifact.entry_html))
-
-
-def patch_agent_node(state: WorkflowState) -> dict[str, Any]:
-    artifact = _normalize_coder_artifact(state.get("coder_artifact"))
-    page_plan = _normalize_page_plan(state.get("page_plan"))
-    structured_paper = _normalize_structured_paper(state.get("structured_paper"))
-    revision_plan = _normalize_revision_plan(state.get("revision_plan"))
-    current_html = _read_current_html(artifact)
-    template_reference_html = _read_template_reference_html(page_plan)
-    manifest = _load_current_manifest(artifact)
-
-    if not artifact or not page_plan or not structured_paper or not current_html or not template_reference_html:
-        message = "Patch Agent could not run because artifact, page plan, structured paper, or current HTML is missing."
-        print(f"[PatchAgent] {message}")
-        return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
-    if manifest is None:
-        print(f"[PatchAgent] {LEGACY_PAGE_ERROR}")
-        return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": LEGACY_PAGE_ERROR}
-    if not revision_plan or not revision_plan.edits:
-        message = "Translator did not produce any actionable anchored edits from the feedback."
-        print(f"[PatchAgent] {message}")
-        return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
-
-    manifest_lookup = {block.block_id: block for block in manifest.blocks}
-    missing_targets: list[str] = []
-    for edit in revision_plan.edits:
-        block = manifest_lookup.get(edit.block_id)
-        if block is None:
-            missing_targets.append(f"unknown block_id '{edit.block_id}'")
-            continue
-        if edit.scope == "slot" and edit.slot_id not in {slot.slot_id for slot in block.slots}:
-            missing_targets.append(
-                f"block '{edit.block_id}' does not expose requested slot '{edit.slot_id}'"
-            )
-
-    if missing_targets:
-        message = "Revision targets are not available in the current anchored page: " + "; ".join(missing_targets)
-        print(f"[PatchAgent] {message}")
-        return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
-
-    print("[PatchAgent] Building targeted DOM replacement plan...")
-    try:
-        llm = get_llm(temperature=0.1, use_smart_model=True)
-        structured_llm = llm.with_structured_output(TargetedReplacementPlan)
-        response = structured_llm.invoke(
-            [
-                SystemMessage(content=PATCH_AGENT_SYSTEM_PROMPT),
-                HumanMessage(
-                    content=PATCH_AGENT_USER_PROMPT_TEMPLATE.format(
-                        revision_plan_json=to_pretty_json(revision_plan),
-                        current_page_manifest_json=to_pretty_json(manifest),
-                        target_block_context_json=_build_target_block_context_json(
-                            current_html=current_html,
-                            revision_plan=revision_plan,
-                        ),
-                        structured_paper_json=to_pretty_json(structured_paper),
-                        template_reference_html=template_reference_html,
-                    )
-                ),
-            ]
-        )
-    except Exception as exc:
-        message = f"Patch Agent failed generating a targeted replacement plan: {exc}"
-        print(f"[PatchAgent] {message}")
-        return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
-
-    targeted_plan = _normalize_targeted_replacement_plan(response)
-    if not targeted_plan or (not targeted_plan.replacements and not targeted_plan.fallback_blocks):
-        message = "Patch Agent returned an empty targeted replacement plan."
-        print(f"[PatchAgent] {message}")
-        return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
-
-    valid_block_ids = {block.block_id for block in manifest.blocks}
-    valid_slots_by_block = {
-        block.block_id: {slot.slot_id for slot in block.slots}
-        for block in manifest.blocks
-    }
-    for replacement in targeted_plan.replacements:
-        if replacement.block_id not in valid_block_ids:
-            message = f"Patch Agent referenced unknown block_id '{replacement.block_id}'."
-            print(f"[PatchAgent] {message}")
-            return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
-    for fallback in targeted_plan.fallback_blocks:
-        if fallback.block_id not in valid_block_ids:
-            message = f"Patch Agent referenced unknown fallback block_id '{fallback.block_id}'."
-            print(f"[PatchAgent] {message}")
-            return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
-
-    normalized_replacements = []
-    normalized_fallbacks: list[FallbackBlock] = []
-    seen_fallback_blocks: set[str] = set()
-    for fallback in targeted_plan.fallback_blocks:
-        if fallback.block_id not in seen_fallback_blocks:
-            normalized_fallbacks.append(fallback)
-            seen_fallback_blocks.add(fallback.block_id)
-    for replacement in targeted_plan.replacements:
-        if replacement.scope == "slot":
-            available_slots = valid_slots_by_block.get(replacement.block_id, set())
-            if str(replacement.slot_id or "").strip() not in available_slots:
-                if replacement.block_id not in seen_fallback_blocks:
-                    normalized_fallbacks.append(
-                        FallbackBlock(
-                            block_id=replacement.block_id,
-                            reason=(
-                                f"requested slot '{replacement.slot_id}' is not exposed in the current "
-                                f"manifest for block '{replacement.block_id}'"
-                            ),
-                        )
-                    )
-                    seen_fallback_blocks.add(replacement.block_id)
-                continue
-        normalized_replacements.append(replacement)
-
-    targeted_plan = TargetedReplacementPlan(
-        replacements=normalized_replacements,
-        fallback_blocks=normalized_fallbacks,
-    )
-    if not targeted_plan.replacements and not targeted_plan.fallback_blocks:
-        message = "Patch Agent returned no valid anchored replacements after manifest validation."
-        print(f"[PatchAgent] {message}")
-        return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
-
-    return {
-        "targeted_replacement_plan": targeted_plan,
-        "patch_agent_output": _summarize_targeted_plan(targeted_plan),
-        "patch_error": "",
-    }
 
 
 def _extract_html_fragment(text: str) -> str:
@@ -569,6 +716,10 @@ def _available_asset_manifest_from_artifact(artifact: CoderArtifact) -> list[dic
             }
         )
     return manifest
+
+
+def _block_model_lookup(page_plan: PagePlan) -> dict[str, Any]:
+    return {block.block_id: block for block in page_plan.blocks}
 
 
 def _block_plan_lookup(page_plan: PagePlan) -> dict[str, Any]:
@@ -663,6 +814,270 @@ def _regenerate_block_html(
     return regenerated_html
 
 
+def _strict_revision_validation_enabled(manifest: PageManifest) -> bool:
+    return str(manifest.schema_version or "").strip() != "1.0"
+
+
+def patch_agent_node(state: WorkflowState) -> dict[str, Any]:
+    artifact = _normalize_coder_artifact(state.get("coder_artifact"))
+    page_plan = _normalize_page_plan(state.get("page_plan"))
+    structured_paper = _normalize_structured_paper(state.get("structured_paper"))
+    revision_plan = _normalize_revision_plan(state.get("revision_plan"))
+    current_html = _read_current_html(artifact)
+    template_reference_html = _read_template_reference_html(page_plan)
+    manifest = _load_current_manifest(artifact)
+
+    if not artifact or not page_plan or not structured_paper or not current_html or not template_reference_html:
+        message = "Patch Agent could not run because artifact, page plan, structured paper, or current HTML is missing."
+        print(f"[PatchAgent] {message}")
+        return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+    if manifest is None:
+        print(f"[PatchAgent] {LEGACY_PAGE_ERROR}")
+        return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": LEGACY_PAGE_ERROR}
+    missing_shell_blocks = missing_shell_contract_block_ids(page_plan)
+    if missing_shell_blocks:
+        message = LEGACY_PAGE_ERROR + " Missing shell contracts for: " + ", ".join(missing_shell_blocks)
+        print(f"[PatchAgent] {message}")
+        return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+    if not revision_plan or not revision_plan.edits:
+        message = "Translator did not produce any actionable anchored edits from the feedback."
+        print(f"[PatchAgent] {message}")
+        return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+
+    manifest_blocks = {block.block_id: block for block in manifest.blocks}
+    manifest_globals = {item.global_id: item for item in manifest.globals}
+    missing_targets: list[str] = []
+    for edit in revision_plan.edits:
+        if edit.scope == "global":
+            if edit.global_id not in manifest_globals:
+                missing_targets.append(f"unknown global_id '{edit.global_id}'")
+            continue
+
+        block = manifest_blocks.get(str(edit.block_id or ""))
+        if block is None:
+            missing_targets.append(f"unknown block_id '{edit.block_id}'")
+            continue
+        if edit.scope == "slot" and edit.slot_id not in {slot.slot_id for slot in block.slots}:
+            missing_targets.append(
+                f"block '{edit.block_id}' does not expose requested slot '{edit.slot_id}'"
+            )
+
+    if missing_targets:
+        message = "Revision targets are not available in the current anchored page: " + "; ".join(missing_targets)
+        print(f"[PatchAgent] {message}")
+        return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+
+    asset_manifest = _available_asset_manifest_from_artifact(artifact)
+    allowed_asset_web_paths = collect_allowed_asset_web_paths(asset_manifest)
+    allowed_existing_local_sources = set(collect_local_image_sources(current_html))
+
+    print("[PatchAgent] Building targeted DOM replacement plan...")
+    try:
+        llm = get_llm(temperature=0.1, use_smart_model=True)
+        structured_llm = llm.with_structured_output(TargetedReplacementPlan)
+        response = structured_llm.invoke(
+            [
+                SystemMessage(content=PATCH_AGENT_SYSTEM_PROMPT),
+                HumanMessage(
+                    content=PATCH_AGENT_USER_PROMPT_TEMPLATE.format(
+                        revision_plan_json=to_pretty_json(revision_plan),
+                        current_page_manifest_json=to_pretty_json(manifest),
+                        target_anchor_context_json=_build_target_anchor_context_json(
+                            current_html=current_html,
+                            revision_plan=revision_plan,
+                        ),
+                        structured_paper_json=to_pretty_json(structured_paper),
+                        template_reference_html=template_reference_html,
+                        available_paper_assets_json=json.dumps(
+                            asset_manifest,
+                            indent=2,
+                            ensure_ascii=False,
+                        ),
+                    )
+                ),
+            ]
+        )
+    except Exception as exc:
+        message = f"Patch Agent failed generating a targeted replacement plan: {exc}"
+        print(f"[PatchAgent] {message}")
+        return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+
+    targeted_plan = _normalize_targeted_replacement_plan(response)
+    if not targeted_plan or (
+        not targeted_plan.replacements
+        and not targeted_plan.style_changes
+        and not targeted_plan.attribute_changes
+        and not targeted_plan.override_css_rules
+        and not targeted_plan.fallback_blocks
+    ):
+        message = "Patch Agent returned an empty targeted replacement plan."
+        print(f"[PatchAgent] {message}")
+        return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+
+    valid_block_ids = {block.block_id for block in manifest.blocks}
+    valid_global_ids = {item.global_id for item in manifest.globals}
+    valid_slots_by_block = {
+        block.block_id: {slot.slot_id for slot in block.slots}
+        for block in manifest.blocks
+    }
+    allowed_anchor_selectors = _collect_allowed_anchor_selectors(manifest)
+
+    normalized_replacements = []
+    normalized_style_changes: list[StyleChange] = []
+    normalized_attribute_changes: list[AttributeChange] = []
+    normalized_override_rules = []
+    normalized_fallbacks: list[FallbackBlock] = []
+    seen_fallback_blocks: set[str] = set()
+
+    for fallback in targeted_plan.fallback_blocks:
+        if fallback.block_id not in valid_block_ids:
+            message = f"Patch Agent referenced unknown fallback block_id '{fallback.block_id}'."
+            print(f"[PatchAgent] {message}")
+            return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+        if fallback.block_id not in seen_fallback_blocks:
+            normalized_fallbacks.append(fallback)
+            seen_fallback_blocks.add(fallback.block_id)
+
+    for replacement in targeted_plan.replacements:
+        if replacement.scope == "global":
+            if replacement.global_id not in valid_global_ids:
+                message = f"Patch Agent referenced unknown global_id '{replacement.global_id}'."
+                print(f"[PatchAgent] {message}")
+                return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+        else:
+            if replacement.block_id not in valid_block_ids:
+                message = f"Patch Agent referenced unknown block_id '{replacement.block_id}'."
+                print(f"[PatchAgent] {message}")
+                return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+            if replacement.scope == "slot":
+                available_slots = valid_slots_by_block.get(str(replacement.block_id or ""), set())
+                if str(replacement.slot_id or "").strip() not in available_slots:
+                    if replacement.block_id not in seen_fallback_blocks:
+                        normalized_fallbacks.append(
+                            FallbackBlock(
+                                block_id=str(replacement.block_id),
+                                reason=(
+                                    f"requested slot '{replacement.slot_id}' is not exposed in the current "
+                                    f"manifest for block '{replacement.block_id}'"
+                                ),
+                            )
+                        )
+                        seen_fallback_blocks.add(str(replacement.block_id))
+                    continue
+
+        fragment_critiques = validate_fragment_local_image_sources(
+            html_text=replacement.html,
+            allowed_asset_web_paths=allowed_asset_web_paths,
+            allowed_existing_local_sources=allowed_existing_local_sources,
+        )
+        if fragment_critiques:
+            message = "Patch Agent generated invalid local image references: " + "; ".join(fragment_critiques)
+            print(f"[PatchAgent] {message}")
+            return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+
+        normalized_replacements.append(replacement)
+
+    for style_change in targeted_plan.style_changes:
+        if style_change.scope == "global":
+            if style_change.global_id not in valid_global_ids:
+                message = f"Patch Agent referenced unknown global_id '{style_change.global_id}' in style_changes."
+                print(f"[PatchAgent] {message}")
+                return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+            normalized_style_changes.append(style_change)
+            continue
+
+        if style_change.block_id not in valid_block_ids:
+            message = f"Patch Agent referenced unknown block_id '{style_change.block_id}' in style_changes."
+            print(f"[PatchAgent] {message}")
+            return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+
+        if style_change.scope == "slot":
+            available_slots = valid_slots_by_block.get(str(style_change.block_id or ""), set())
+            if str(style_change.slot_id or "").strip() not in available_slots:
+                if style_change.block_id not in seen_fallback_blocks:
+                    normalized_fallbacks.append(
+                        FallbackBlock(
+                            block_id=str(style_change.block_id),
+                            reason=(
+                                f"requested style target slot '{style_change.slot_id}' is not exposed in the current "
+                                f"manifest for block '{style_change.block_id}'"
+                            ),
+                        )
+                    )
+                    seen_fallback_blocks.add(str(style_change.block_id))
+                continue
+
+        normalized_style_changes.append(style_change)
+
+    for attribute_change in targeted_plan.attribute_changes:
+        if attribute_change.scope == "global":
+            if attribute_change.global_id not in valid_global_ids:
+                message = f"Patch Agent referenced unknown global_id '{attribute_change.global_id}' in attribute_changes."
+                print(f"[PatchAgent] {message}")
+                return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+            normalized_attribute_changes.append(attribute_change)
+            continue
+
+        if attribute_change.block_id not in valid_block_ids:
+            message = f"Patch Agent referenced unknown block_id '{attribute_change.block_id}' in attribute_changes."
+            print(f"[PatchAgent] {message}")
+            return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+
+        if attribute_change.scope == "slot":
+            available_slots = valid_slots_by_block.get(str(attribute_change.block_id or ""), set())
+            if str(attribute_change.slot_id or "").strip() not in available_slots:
+                if attribute_change.block_id not in seen_fallback_blocks:
+                    normalized_fallbacks.append(
+                        FallbackBlock(
+                            block_id=str(attribute_change.block_id),
+                            reason=(
+                                f"requested attribute target slot '{attribute_change.slot_id}' is not exposed in the current "
+                                f"manifest for block '{attribute_change.block_id}'"
+                            ),
+                        )
+                    )
+                    seen_fallback_blocks.add(str(attribute_change.block_id))
+                continue
+
+        normalized_attribute_changes.append(attribute_change)
+
+    for rule in targeted_plan.override_css_rules:
+        selector = str(rule.selector or "").strip()
+        if not is_safe_anchored_selector(selector, allowed_anchor_selectors):
+            message = f"Patch Agent produced an unsafe override selector '{selector}'."
+            print(f"[PatchAgent] {message}")
+            return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+        if not _override_rule_target_keys(selector, manifest):
+            message = f"Patch Agent produced an override selector that does not match any anchored target: '{selector}'."
+            print(f"[PatchAgent] {message}")
+            return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+        normalized_override_rules.append(rule)
+
+    targeted_plan = TargetedReplacementPlan(
+        replacements=normalized_replacements,
+        style_changes=normalized_style_changes,
+        attribute_changes=normalized_attribute_changes,
+        override_css_rules=normalized_override_rules,
+        fallback_blocks=normalized_fallbacks,
+    )
+    if (
+        not targeted_plan.replacements
+        and not targeted_plan.style_changes
+        and not targeted_plan.attribute_changes
+        and not targeted_plan.override_css_rules
+        and not targeted_plan.fallback_blocks
+    ):
+        message = "Patch Agent returned no valid anchored changes after manifest validation."
+        print(f"[PatchAgent] {message}")
+        return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+
+    return {
+        "targeted_replacement_plan": targeted_plan,
+        "patch_agent_output": _summarize_targeted_plan(targeted_plan),
+        "patch_error": "",
+    }
+
+
 def patch_executor_node(state: WorkflowState) -> dict[str, Any]:
     existing_error = str(state.get("patch_error") or "").strip()
     if existing_error:
@@ -695,6 +1110,11 @@ def patch_executor_node(state: WorkflowState) -> dict[str, Any]:
         message = "Patch Executor could not run because targeted_replacement_plan is missing."
         print(f"[PatchExecutor] {message}")
         return {"patch_error": message}
+    missing_shell_blocks = missing_shell_contract_block_ids(page_plan)
+    if missing_shell_blocks:
+        message = LEGACY_PAGE_ERROR + " Missing shell contracts for: " + ", ".join(missing_shell_blocks)
+        print(f"[PatchExecutor] {message}")
+        return {"patch_error": message}
 
     entry_html_path = Path(artifact.entry_html)
     if not entry_html_path.exists():
@@ -721,38 +1141,114 @@ def patch_executor_node(state: WorkflowState) -> dict[str, Any]:
         print(f"[PatchExecutor] {message}")
         return {"patch_error": message}
 
+    strict_validation = _strict_revision_validation_enabled(manifest)
+    asset_manifest = _available_asset_manifest_from_artifact(artifact)
+    allowed_asset_web_paths = collect_allowed_asset_web_paths(asset_manifest)
+    allowed_existing_local_sources = set(collect_local_image_sources(current_html))
+
     soup = BeautifulSoup(current_html, "html.parser")
-    targeted_block_ids = [edit.block_id for edit in revision_plan.edits]
-    before_block_html = _target_block_html_map(soup, targeted_block_ids)
+    requested_target_keys = _requested_target_keys(revision_plan)
+    before_snapshots = _target_snapshot_map(soup, requested_target_keys)
+    changed_target_keys: set[str] = set()
+
     fallback_reasons = {item.block_id: item.reason for item in targeted_plan.fallback_blocks}
     fallback_block_ids: list[str] = []
     applied_replacements = 0
+    applied_style_changes = 0
+    applied_attribute_changes = 0
+    applied_override_rules = 0
 
     for replacement in targeted_plan.replacements:
         try:
             if replacement.scope == "slot":
                 _apply_slot_replacement(
                     soup=soup,
-                    block_id=replacement.block_id,
+                    block_id=str(replacement.block_id or ""),
                     slot_id=str(replacement.slot_id or ""),
                     html_fragment=replacement.html,
                 )
+                changed_target_keys.add(
+                    _target_key("slot", block_id=str(replacement.block_id), slot_id=str(replacement.slot_id))
+                )
+            elif replacement.scope == "global":
+                _apply_global_replacement(
+                    soup=soup,
+                    global_id=str(replacement.global_id or ""),
+                    html_fragment=replacement.html,
+                )
+                changed_target_keys.add(_target_key("global", global_id=str(replacement.global_id)))
             else:
                 _apply_block_replacement(
                     soup=soup,
-                    block_id=replacement.block_id,
+                    block_id=str(replacement.block_id or ""),
                     html_fragment=replacement.html,
+                    page_plan=page_plan,
                 )
+                changed_target_keys.add(_target_key("block", block_id=str(replacement.block_id)))
             applied_replacements += 1
         except PatchApplicationError as exc:
+            if replacement.scope == "global":
+                message = f"Targeted global replacement failed for '{replacement.global_id}': {exc}"
+                print(f"[PatchExecutor] {message}")
+                return {"patch_error": message}
             print(
                 "[PatchExecutor] targeted replacement fell back to block regeneration: "
                 f"{replacement.block_id} ({exc})"
             )
-            if replacement.block_id not in fallback_reasons:
-                fallback_reasons[replacement.block_id] = str(exc)
-            if replacement.block_id not in fallback_block_ids:
-                fallback_block_ids.append(replacement.block_id)
+            if replacement.block_id and replacement.block_id not in fallback_reasons:
+                fallback_reasons[str(replacement.block_id)] = str(exc)
+            if replacement.block_id and replacement.block_id not in fallback_block_ids:
+                fallback_block_ids.append(str(replacement.block_id))
+
+    for style_change in targeted_plan.style_changes:
+        try:
+            _apply_style_change(soup, style_change)
+            changed_target_keys.add(
+                _target_key(
+                    style_change.scope,
+                    block_id=style_change.block_id,
+                    slot_id=style_change.slot_id,
+                    global_id=style_change.global_id,
+                )
+            )
+            applied_style_changes += 1
+        except PatchApplicationError as exc:
+            if style_change.scope == "global":
+                message = f"Style change failed for global '{style_change.global_id}': {exc}"
+                print(f"[PatchExecutor] {message}")
+                return {"patch_error": message}
+            if style_change.block_id and style_change.block_id not in fallback_reasons:
+                fallback_reasons[str(style_change.block_id)] = str(exc)
+            if style_change.block_id and style_change.block_id not in fallback_block_ids:
+                fallback_block_ids.append(str(style_change.block_id))
+
+    for attribute_change in targeted_plan.attribute_changes:
+        try:
+            _apply_attribute_change(soup, attribute_change)
+            changed_target_keys.add(
+                _target_key(
+                    attribute_change.scope,
+                    block_id=attribute_change.block_id,
+                    slot_id=attribute_change.slot_id,
+                    global_id=attribute_change.global_id,
+                )
+            )
+            applied_attribute_changes += 1
+        except PatchApplicationError as exc:
+            if attribute_change.scope == "global":
+                message = f"Attribute change failed for global '{attribute_change.global_id}': {exc}"
+                print(f"[PatchExecutor] {message}")
+                return {"patch_error": message}
+            if attribute_change.block_id and attribute_change.block_id not in fallback_reasons:
+                fallback_reasons[str(attribute_change.block_id)] = str(exc)
+            if attribute_change.block_id and attribute_change.block_id not in fallback_block_ids:
+                fallback_block_ids.append(str(attribute_change.block_id))
+
+    if targeted_plan.override_css_rules:
+        _apply_override_css_rules(soup, targeted_plan.override_css_rules)
+        applied_override_rules = len(targeted_plan.override_css_rules)
+        for rule in targeted_plan.override_css_rules:
+            changed_target_keys.update(_override_rule_target_keys(str(rule.selector), manifest))
 
     for fallback in targeted_plan.fallback_blocks:
         if fallback.block_id not in fallback_block_ids:
@@ -760,13 +1256,8 @@ def patch_executor_node(state: WorkflowState) -> dict[str, Any]:
 
     regenerated_count = 0
     for block_id in fallback_block_ids:
-        target_block = soup.select_one(build_block_selector(block_id))
-        if not isinstance(target_block, Tag):
-            message = f"Fallback regeneration could not find block '{block_id}' in current HTML."
-            print(f"[PatchExecutor] {message}")
-            return {"patch_error": message}
-
         try:
+            target_block = _select_block_target(soup, block_id)
             regenerated_html = _regenerate_block_html(
                 block_id=block_id,
                 current_block_html=str(target_block),
@@ -776,44 +1267,74 @@ def patch_executor_node(state: WorkflowState) -> dict[str, Any]:
                 template_reference_html=template_reference_html,
                 artifact=artifact,
             )
+            fragment_critiques = validate_fragment_local_image_sources(
+                html_text=regenerated_html,
+                allowed_asset_web_paths=allowed_asset_web_paths,
+                allowed_existing_local_sources=allowed_existing_local_sources,
+            )
+            if fragment_critiques:
+                raise PatchApplicationError("; ".join(fragment_critiques))
             _apply_block_replacement(
                 soup=soup,
                 block_id=block_id,
                 html_fragment=regenerated_html,
+                page_plan=page_plan,
             )
+            changed_target_keys.add(_target_key("block", block_id=block_id))
             regenerated_count += 1
         except PatchApplicationError as exc:
-            reason = fallback_reasons.get(block_id) or str(exc)
+            reason = str(exc) or fallback_reasons.get(block_id) or "unknown regeneration error"
             message = f"Target block fallback regeneration failed for '{block_id}': {reason}"
             print(f"[PatchExecutor] {message}")
             return {"patch_error": message}
 
-    if applied_replacements == 0 and regenerated_count == 0:
-        message = "Patch Executor did not receive any actionable targeted replacements."
+    if (
+        applied_replacements == 0
+        and applied_style_changes == 0
+        and applied_attribute_changes == 0
+        and applied_override_rules == 0
+        and regenerated_count == 0
+    ):
+        message = "Patch Executor did not receive any actionable targeted revisions."
         print(f"[PatchExecutor] {message}")
         return {"patch_error": message}
 
-    after_block_html = _target_block_html_map(soup, targeted_block_ids)
-    unchanged_target_blocks = [
-        block_id
-        for block_id, before_html in before_block_html.items()
-        if before_html.strip() == after_block_html.get(block_id, "").strip()
+    after_snapshots = _target_snapshot_map(soup, requested_target_keys)
+    unchanged_target_keys = [
+        key
+        for key, before_html in before_snapshots.items()
+        if before_html.strip() == after_snapshots.get(key, "").strip() and key not in changed_target_keys
     ]
-    if unchanged_target_blocks:
+    if unchanged_target_keys:
         message = (
-            "Anchored revision completed but did not change the requested target block(s): "
-            + ", ".join(unchanged_target_blocks)
+            "Anchored revision completed but did not change the requested target(s): "
+            + ", ".join(_target_key_label(key) for key in unchanged_target_keys)
         )
         print(f"[PatchExecutor] {message}")
         return {"patch_error": message}
 
     updated_html = str(soup)
+
+    if strict_validation:
+        asset_critiques = validate_local_image_references(
+            html_text=updated_html,
+            entry_html_path=entry_html_path,
+            site_dir=Path(artifact.site_dir),
+            allowed_asset_web_paths=allowed_asset_web_paths,
+            enforce_paper_asset_whitelist=True,
+        )
+        if asset_critiques:
+            message = "Post-revision asset validation failed: " + "; ".join(asset_critiques)
+            print(f"[PatchExecutor] {message}")
+            return {"patch_error": message}
+
     try:
         updated_manifest = extract_page_manifest(
             html_text=updated_html,
             entry_html=entry_html_path,
             selected_template_id=artifact.selected_template_id,
             page_plan=page_plan,
+            require_expected_globals=strict_validation,
         )
     except Exception as exc:
         message = f"Anchored revision validation failed after applying DOM patch: {exc}"
@@ -829,6 +1350,9 @@ def patch_executor_node(state: WorkflowState) -> dict[str, Any]:
         updated_artifact.notes,
         replacements_count=applied_replacements,
         regenerated_count=regenerated_count,
+        style_change_count=applied_style_changes,
+        attribute_change_count=applied_attribute_changes,
+        override_rule_count=applied_override_rules,
     )
 
     artifact_json_path = entry_html_path.resolve().parent.parent / "coder_artifact.json"
@@ -853,7 +1377,11 @@ def patch_executor_node(state: WorkflowState) -> dict[str, Any]:
 
     print(
         "[PatchExecutor] applied targeted revision: "
-        f"{applied_replacements} replacement(s), {regenerated_count} regenerated block(s)."
+        f"{applied_replacements} replacement(s), "
+        f"{applied_style_changes} style change(s), "
+        f"{applied_attribute_changes} attribute change(s), "
+        f"{applied_override_rules} override rule(s), "
+        f"{regenerated_count} regenerated block(s)."
     )
     return {
         "coder_artifact": updated_artifact,

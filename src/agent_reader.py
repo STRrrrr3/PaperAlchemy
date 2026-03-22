@@ -8,7 +8,11 @@ from langgraph.graph import END, StateGraph
 from src.agent_reader_critic import build_critic_router, critic_node
 from src.human_feedback import extract_human_feedback_text, normalize_human_feedback
 from src.llm import get_llm
-from src.prompts import READER_SYSTEM_PROMPT, READER_USER_PROMPT_TEMPLATE
+from src.prompts import (
+    READER_RETRY_FEEDBACK_APPEND_TEMPLATE,
+    READER_SYSTEM_PROMPT,
+    READER_USER_PROMPT_TEMPLATE,
+)
 from src.schemas import StructuredPaper
 from src.state import ReaderState
 
@@ -43,10 +47,8 @@ def reader_node(state: ReaderState):
     feedback_section = ""
     if state.get("feedback_history"):
         history_str = "\n".join([f"- {item}" for item in state["feedback_history"]])
-        feedback_section = (
-            "\n\n# !!! CRITICAL FEEDBACK FROM PREVIOUS RUN !!!\n"
-            "The previous extraction failed self-verification. "
-            f"Fix these specific errors:\n{history_str}\n"
+        feedback_section = READER_RETRY_FEEDBACK_APPEND_TEMPLATE.format(
+            feedback_history=history_str
         )
 
     system_msg = READER_SYSTEM_PROMPT + feedback_section

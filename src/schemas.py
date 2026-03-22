@@ -1,6 +1,4 @@
-﻿from typing import List, Literal, Optional
-
-from typing import Dict
+﻿from typing import Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -171,6 +169,20 @@ class ResponsiveRules(BaseModel):
     desktop_layout: str
 
 
+class ShellWrapperSignature(BaseModel):
+    tag: str
+    required_classes: List[str] = Field(default_factory=list)
+    preserve_ids: List[str] = Field(default_factory=list)
+
+
+class BlockShellContract(BaseModel):
+    root_tag: str
+    required_classes: List[str] = Field(default_factory=list)
+    preserve_ids: List[str] = Field(default_factory=list)
+    wrapper_chain: List[ShellWrapperSignature] = Field(default_factory=list)
+    actionable_root_selector: str
+
+
 class BlockPlan(BaseModel):
     block_id: str
     target_template_region: TargetTemplateRegion
@@ -179,6 +191,7 @@ class BlockPlan(BaseModel):
     asset_binding: AssetBinding
     interaction: InteractionPlan
     responsive_rules: ResponsiveRules
+    shell_contract: Optional[BlockShellContract] = None
     a11y_notes: List[str]
     acceptance_checks: List[str]
 
@@ -262,6 +275,7 @@ StylePropertyName = Literal[
     "max-width",
     "width",
 ]
+AttributeName = Literal["class", "href", "target", "aria-label", "style", "id"]
 
 
 class PageManifestSlot(BaseModel):
@@ -274,11 +288,19 @@ class PageManifestBlock(BaseModel):
     source_sections: List[str]
     selector: str
     slots: List[PageManifestSlot]
+    root_tag: str
+    root_classes: List[str] = Field(default_factory=list)
+    preserve_ids: List[str] = Field(default_factory=list)
+    wrapper_chain: List[ShellWrapperSignature] = Field(default_factory=list)
+    actionable_root_selector: str
 
 
 class PageManifestGlobal(BaseModel):
     global_id: GlobalAnchorId
     selector: str
+    target_tag: str
+    required_classes: List[str] = Field(default_factory=list)
+    actionable_selector: str
 
 
 class PageManifest(BaseModel):
@@ -353,6 +375,36 @@ class StyleChange(BaseModel):
         return self
 
 
+class AttributeChange(BaseModel):
+    block_id: Optional[str] = None
+    slot_id: Optional[SlotId] = None
+    global_id: Optional[GlobalAnchorId] = None
+    scope: Literal["slot", "block", "global"]
+    attributes: Dict[AttributeName, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> "AttributeChange":
+        if not self.attributes:
+            raise ValueError("attribute changes must include at least one attribute.")
+        if self.scope == "slot":
+            if not self.block_id or not self.slot_id:
+                raise ValueError("slot scope attribute changes must provide block_id and slot_id.")
+            self.global_id = None
+        elif self.scope == "block":
+            if not self.block_id:
+                raise ValueError("block scope attribute changes must provide block_id.")
+            self.slot_id = None
+            self.global_id = None
+        elif self.scope == "global":
+            if not self.global_id:
+                raise ValueError("global scope attribute changes must provide global_id.")
+            self.block_id = None
+            self.slot_id = None
+        else:
+            raise ValueError(f"Unsupported attribute change scope '{self.scope}'.")
+        return self
+
+
 class TargetedReplacement(BaseModel):
     block_id: Optional[str] = None
     slot_id: Optional[SlotId] = None
@@ -402,5 +454,6 @@ class FallbackBlock(BaseModel):
 class TargetedReplacementPlan(BaseModel):
     replacements: List[TargetedReplacement] = Field(default_factory=list)
     style_changes: List[StyleChange] = Field(default_factory=list)
+    attribute_changes: List[AttributeChange] = Field(default_factory=list)
     override_css_rules: List[OverrideCssRule] = Field(default_factory=list)
     fallback_blocks: List[FallbackBlock] = Field(default_factory=list)

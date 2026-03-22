@@ -1,5 +1,6 @@
 import json
 import re
+from collections import defaultdict
 from pathlib import Path
 from typing import Any, Callable
 from uuid import uuid4
@@ -16,7 +17,6 @@ except ImportError:
     PlaywrightTimeoutError = RuntimeError
     sync_playwright = None
 
-from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
@@ -34,9 +34,11 @@ from src.human_feedback import (
     empty_human_feedback,
     extract_human_feedback_text,
 )
-from src.llm import get_llm
+from src.page_manifest import (
+    enrich_page_plan_shell_contracts,
+    missing_shell_contract_block_ids,
+)
 from src.parser import parse_pdf
-from src.prompts import OVERVIEW_SYSTEM_PROMPT, OVERVIEW_USER_PROMPT_TEMPLATE
 from src.schemas import CoderArtifact, PagePlan, StructuredPaper
 from src.state import WorkflowState
 from src.template_resources import SyncedTemplateAssets, ensure_autopage_template_assets
@@ -101,6 +103,43 @@ def save_coder_artifact(path: Path, artifact: CoderArtifact) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as file:
         json.dump(artifact.model_dump(), file, indent=2, ensure_ascii=False)
+
+
+def _read_text_with_fallback(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return path.read_text(encoding="latin-1")
+
+
+def _review_accordion_updates(stage: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    normalized_stage = str(stage or "").strip().lower()
+    if normalized_stage == "overview":
+        return gr.update(open=True), gr.update(open=False)
+    if normalized_stage == "outline":
+        return gr.update(open=False), gr.update(open=True)
+    return gr.update(open=False), gr.update(open=False)
+
+
+def _enrich_page_plan_shell_contracts(page_plan: PagePlan) -> PagePlan:
+    template_entry_path = (
+        PROJECT_ROOT
+        / page_plan.template_selection.selected_root_dir
+        / str(page_plan.template_selection.selected_entry_html or "").strip()
+    )
+    if not template_entry_path.exists():
+        raise FileNotFoundError(f"Template entry html not found for shell extraction: {template_entry_path}")
+
+    enriched_plan = enrich_page_plan_shell_contracts(
+        page_plan,
+        _read_text_with_fallback(template_entry_path),
+    )
+    missing_blocks = missing_shell_contract_block_ids(enriched_plan)
+    if missing_blocks:
+        raise ValueError(
+            "Template shell extraction failed for block(s): " + ", ".join(missing_blocks)
+        )
+    return enriched_plan
 
 
 def normalize_coder_artifact(artifact: Any) -> CoderArtifact | None:
@@ -372,6 +411,13 @@ def _extract_front_matter_candidates(structured_paper_dict: dict[str, Any]) -> t
     return authors[:3], affiliations[:4]
 
 
+def _trim_review_text(text: Any, max_chars: int = 700) -> str:
+    normalized = " ".join(str(text or "").split()).strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max_chars - 3].rstrip() + "..."
+
+
 def format_paper_to_markdown(structured_paper_dict: dict[str, Any]) -> str:
     paper_title = str(structured_paper_dict.get("paper_title") or "Untitled Paper").strip()
     overall_summary = str(structured_paper_dict.get("overall_summary") or "").strip()
@@ -381,8 +427,9 @@ def format_paper_to_markdown(structured_paper_dict: dict[str, Any]) -> str:
     lines = [
         f"# {paper_title}",
         "",
-        "This is the reader-stage extraction that the Planner will use as source material.",
-        "Use the Human Directives box to tell the Planner what to skip, compress, or emphasize on the webpage.",
+        "This is the Reader extraction source pack that the Planner will use as input.",
+        "It is not the final webpage outline.",
+        "Use Revise Extraction to add missing source material, remove incorrect content, or fix metadata and asset grounding before webpage planning.",
         "",
         "## Authors",
     ]
@@ -401,7 +448,7 @@ def format_paper_to_markdown(structured_paper_dict: dict[str, Any]) -> str:
     lines.extend(["", "## Overall Summary"])
     lines.append(overall_summary or "No overall summary was extracted.")
 
-    lines.extend(["", "## Candidate Web Content"])
+    lines.extend(["", "## Source Sections"])
     if not sections:
         lines.append("- No sections were extracted.")
         return "\n".join(lines)
@@ -412,7 +459,7 @@ def format_paper_to_markdown(structured_paper_dict: dict[str, Any]) -> str:
         related_figures = list(section.get("related_figures") or [])
 
         lines.extend(["", f"### {index}. {section_title}"])
-        lines.append(rich_web_content or "No rich web content was extracted.")
+        lines.append(_trim_review_text(rich_web_content) or "No rich web content was extracted.")
 
         if related_figures:
             lines.extend(["", "Linked assets:"])
@@ -424,6 +471,94 @@ def format_paper_to_markdown(structured_paper_dict: dict[str, Any]) -> str:
                     lines.append(f"- {figure_label}: {caption}")
                 else:
                     lines.append(f"- {figure_label}")
+
+    return "\n".join(lines)
+
+
+def format_page_plan_to_markdown(
+    page_plan_dict: dict[str, Any],
+    structured_paper_dict: dict[str, Any] | None = None,
+) -> str:
+    page_plan = PagePlan.model_validate(page_plan_dict)
+    outline_items = sorted(page_plan.page_outline, key=lambda item: item.order)
+    structured_sections = list((structured_paper_dict or {}).get("sections") or [])
+    source_section_titles = [
+        str(section.get("section_title") or "").strip()
+        for section in structured_sections
+        if str(section.get("section_title") or "").strip()
+    ]
+
+    usage_by_section: dict[str, list[str]] = defaultdict(list)
+    merged_blocks: list[tuple[str, list[str]]] = []
+    for item in outline_items:
+        for source_section in item.source_sections:
+            usage_by_section[source_section].append(item.block_id)
+        if len(item.source_sections) > 1:
+            merged_blocks.append((item.block_id, list(item.source_sections)))
+
+    unused_sections = [
+        section_title
+        for section_title in source_section_titles
+        if section_title not in usage_by_section
+    ]
+    split_sections = [
+        (section_title, block_ids)
+        for section_title, block_ids in usage_by_section.items()
+        if len(block_ids) > 1
+    ]
+
+    lines = [
+        "# Planned Webpage Outline",
+        "",
+        "This is the planner-stage webpage outline that the first draft will follow.",
+        "Use Revise Outline to add, remove, merge, split, rename, or reorder webpage sections before generating the draft.",
+        "",
+        "## Ordered Webpage Sections",
+    ]
+
+    if not outline_items:
+        lines.append("- No webpage sections are currently planned.")
+        return "\n".join(lines)
+
+    for item in outline_items:
+        lines.extend(
+            [
+                "",
+                f"### {item.order}. {item.title}",
+                f"- `block_id`: `{item.block_id}`",
+                f"- Objective: {item.objective}",
+                "- Source sections: "
+                + (", ".join(item.source_sections) if item.source_sections else "(none)"),
+                f"- Estimated height: {item.estimated_height}",
+            ]
+        )
+
+    lines.extend(["", "## Mapping Diagnostics"])
+    lines.append(
+        "- Unused source sections: "
+        + (", ".join(unused_sections) if unused_sections else "None")
+    )
+    if split_sections:
+        lines.append(
+            "- Split source sections: "
+            + "; ".join(
+                f"`{section_title}` -> {', '.join(block_ids)}"
+                for section_title, block_ids in split_sections
+            )
+        )
+    else:
+        lines.append("- Split source sections: None")
+
+    if merged_blocks:
+        lines.append(
+            "- Merged webpage blocks: "
+            + "; ".join(
+                f"`{block_id}` <- {', '.join(source_sections)}"
+                for block_id, source_sections in merged_blocks
+            )
+        )
+    else:
+        lines.append("- Merged webpage blocks: None")
 
     return "\n".join(lines)
 
@@ -502,30 +637,12 @@ def reader_phase_node(state: WorkflowState) -> dict[str, Any]:
 
 def overview_node(state: WorkflowState) -> dict[str, Any]:
     structured_data = StructuredPaper.model_validate(state.get("structured_paper"))
-    structured_json = json.dumps(structured_data.model_dump(), indent=2, ensure_ascii=False)
-    llm = get_llm(temperature=0.2, use_smart_model=False)
-
-    print("[Overview] Generating human-readable paper overview...")
-    try:
-        response = llm.invoke(
-            [
-                SystemMessage(content=OVERVIEW_SYSTEM_PROMPT),
-                HumanMessage(
-                    content=OVERVIEW_USER_PROMPT_TEMPLATE.format(
-                        structured_paper_json=structured_json,
-                    )
-                ),
-            ]
-        )
-        paper_overview = _message_content_to_text(response)
-    except Exception as exc:
-        print(f"[Overview] Warning: overview generation failed, falling back to deterministic formatter: {exc}")
-        paper_overview = format_paper_to_markdown(structured_data.model_dump())
-
-    if not paper_overview:
-        paper_overview = format_paper_to_markdown(structured_data.model_dump())
-
-    return {"paper_overview": paper_overview, "review_stage": "overview"}
+    print("[Overview] Building deterministic reader extraction review...")
+    return {
+        "paper_overview": format_paper_to_markdown(structured_data.model_dump()),
+        "outline_overview": "",
+        "review_stage": "overview",
+    }
 
 
 def planner_phase_node(state: WorkflowState) -> dict[str, Any]:
@@ -536,6 +653,15 @@ def planner_phase_node(state: WorkflowState) -> dict[str, Any]:
     structured_data = StructuredPaper.model_validate(state.get("structured_paper"))
     generation_constraints = dict(state.get("generation_constraints") or {})
     user_constraints = dict(state.get("user_constraints") or {})
+    previous_page_plan: PagePlan | None = None
+    for candidate in (state.get("page_plan"), state.get("approved_page_plan")):
+        if not candidate:
+            continue
+        try:
+            previous_page_plan = PagePlan.model_validate(candidate)
+            break
+        except Exception:
+            continue
 
     print("[Planner] Running template-first planner graph with designated template...")
     page_plan = run_planner_agent(
@@ -544,15 +670,30 @@ def planner_phase_node(state: WorkflowState) -> dict[str, Any]:
         generation_constraints=generation_constraints,
         user_constraints=user_constraints,
         human_directives=state.get("human_directives"),
+        previous_page_plan=previous_page_plan,
         max_retry=2,
     )
     if not page_plan:
         raise RuntimeError("Planner agent failed to produce a page plan.")
+    page_plan = _enrich_page_plan_shell_contracts(page_plan)
 
     _, _, planner_json_path, _ = get_output_paths(paper_folder_name)
     save_page_plan(planner_json_path, page_plan)
     print(f"[Planner] Saved page plan to {planner_json_path}")
-    return {"page_plan": page_plan}
+    return {"page_plan": page_plan, "approved_page_plan": None}
+
+
+def outline_review_node(state: WorkflowState) -> dict[str, Any]:
+    page_plan = PagePlan.model_validate(state.get("page_plan"))
+    structured_data = StructuredPaper.model_validate(state.get("structured_paper"))
+    print("[Outline] Building deterministic webpage outline review...")
+    return {
+        "outline_overview": format_page_plan_to_markdown(
+            page_plan.model_dump(),
+            structured_data.model_dump(),
+        ),
+        "review_stage": "outline",
+    }
 
 
 def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
@@ -561,7 +702,8 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
         raise ValueError("paper_folder_name is missing for coder phase.")
 
     structured_data = StructuredPaper.model_validate(state.get("structured_paper"))
-    page_plan = PagePlan.model_validate(state.get("page_plan"))
+    approved_page_plan = state.get("approved_page_plan") or state.get("page_plan")
+    page_plan = _enrich_page_plan_shell_contracts(PagePlan.model_validate(approved_page_plan))
     previous_coder_artifact = normalize_coder_artifact(state.get("coder_artifact"))
 
     print("[Coder] Running coder agent...")
@@ -581,6 +723,8 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
     save_coder_artifact(coder_json_path, coder_artifact)
     print(f"[Coder] Generated entry html at {coder_artifact.entry_html}")
     return {
+        "page_plan": page_plan,
+        "approved_page_plan": page_plan,
         "coder_artifact": coder_artifact,
         "patch_error": "",
         "revision_plan": None,
@@ -599,6 +743,12 @@ def human_review_router(state: WorkflowState) -> str:
     return "reader"
 
 
+def outline_review_router(state: WorkflowState) -> str:
+    if bool(state.get("is_outline_approved")):
+        return "coder"
+    return "planner"
+
+
 def webpage_review_router(state: WorkflowState) -> str:
     if bool(state.get("is_webpage_approved")):
         return "end"
@@ -610,6 +760,7 @@ def build_hitl_workflow():
     workflow.add_node("reader", reader_phase_node)
     workflow.add_node("overview", overview_node)
     workflow.add_node("planner", planner_phase_node)
+    workflow.add_node("outline_review", outline_review_node)
     workflow.add_node("webpage_review", webpage_review_node)
     workflow.add_node("translator", translator_node)
     workflow.add_node("patch_agent", patch_agent_node)
@@ -626,7 +777,15 @@ def build_hitl_workflow():
             "reader": "reader",
         },
     )
-    workflow.add_edge("planner", "coder")
+    workflow.add_edge("planner", "outline_review")
+    workflow.add_conditional_edges(
+        "outline_review",
+        outline_review_router,
+        {
+            "planner": "planner",
+            "coder": "coder",
+        },
+    )
     workflow.add_edge("coder", "webpage_review")
     workflow.add_conditional_edges(
         "webpage_review",
@@ -641,7 +800,7 @@ def build_hitl_workflow():
     workflow.add_edge("patch_executor", "webpage_review")
 
     memory = MemorySaver()
-    return workflow.compile(checkpointer=memory, interrupt_after=["overview", "webpage_review"])
+    return workflow.compile(checkpointer=memory, interrupt_after=["overview", "outline_review", "webpage_review"])
 
 
 HITL_WORKFLOW = build_hitl_workflow()
@@ -713,6 +872,8 @@ def run_langgraph_batch(
     )
     if not page_plan:
         raise RuntimeError("Planner agent failed to produce a page plan.")
+
+    page_plan = _enrich_page_plan_shell_contracts(page_plan)
 
     save_page_plan(planner_json_path, page_plan)
     log(f"[Planner] Saved page plan to {planner_json_path}")
@@ -787,8 +948,12 @@ def find_templates(
             gr.update(interactive=False),
             "",
             "",
+            *_review_accordion_updates("webpage"),
+            "",
             None,
             "",
+            gr.update(interactive=False),
+            gr.update(interactive=False),
             gr.update(interactive=False),
             gr.update(interactive=False),
             "",
@@ -806,8 +971,12 @@ def find_templates(
             gr.update(interactive=False),
             "",
             "",
+            *_review_accordion_updates("webpage"),
+            "",
             None,
             "",
+            gr.update(interactive=False),
+            gr.update(interactive=False),
             gr.update(interactive=False),
             gr.update(interactive=False),
             "",
@@ -831,8 +1000,12 @@ def preview_selected_template(
             gr.update(interactive=False),
             "",
             "",
+            *_review_accordion_updates("webpage"),
+            "",
             None,
             "",
+            gr.update(interactive=False),
+            gr.update(interactive=False),
             gr.update(interactive=False),
             gr.update(interactive=False),
             "",
@@ -862,8 +1035,12 @@ def preview_selected_template(
             gr.update(interactive=False),
             "",
             "",
+            *_review_accordion_updates("webpage"),
+            "",
             None,
             "",
+            gr.update(interactive=False),
+            gr.update(interactive=False),
             gr.update(interactive=False),
             gr.update(interactive=False),
             "",
@@ -879,8 +1056,12 @@ def preview_selected_template(
             gr.update(interactive=False),
             "",
             "",
+            *_review_accordion_updates("webpage"),
+            "",
             None,
             "",
+            gr.update(interactive=False),
+            gr.update(interactive=False),
             gr.update(interactive=False),
             gr.update(interactive=False),
             "",
@@ -954,11 +1135,14 @@ def run_extraction(
             "targeted_replacement_plan": None,
             "patch_error": "",
             "paper_overview": "",
+            "outline_overview": "",
             "is_approved": False,
+            "is_outline_approved": False,
             "is_webpage_approved": False,
             "review_stage": "overview",
             "structured_paper": None,
             "page_plan": None,
+            "approved_page_plan": None,
             "coder_artifact": None,
         }
 
@@ -970,15 +1154,19 @@ def run_extraction(
         if not paper_overview:
             structured_data = StructuredPaper.model_validate(paused_values.get("structured_paper"))
             paper_overview = format_paper_to_markdown(structured_data.model_dump())
-        log("[Overview] Extraction complete. Review the overview, revise if needed, or approve to generate the first webpage draft.")
+        log("[Overview] Reader extraction complete. Review the source pack, revise if needed, or approve it to plan the webpage outline.")
         return (
             "\n".join(run_log_lines),
             paper_overview,
+            "",
+            *_review_accordion_updates("overview"),
             "",
             None,
             gr.update(interactive=True),
             gr.update(interactive=True),
             thread_id,
+            gr.update(interactive=False),
+            gr.update(interactive=False),
             gr.update(interactive=False),
             gr.update(interactive=False),
             "",
@@ -989,10 +1177,14 @@ def run_extraction(
             "\n".join(run_log_lines),
             "",
             "",
+            *_review_accordion_updates("webpage"),
+            "",
             None,
             gr.update(interactive=False),
             gr.update(interactive=False),
             "",
+            gr.update(interactive=False),
+            gr.update(interactive=False),
             gr.update(interactive=False),
             gr.update(interactive=False),
             "",
@@ -1005,6 +1197,7 @@ def revise_extraction(
     workflow_thread_id: str,
     current_logs: str,
     current_overview: str,
+    current_outline_overview: str,
 ) -> tuple[Any, ...]:
     run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
 
@@ -1056,18 +1249,32 @@ def revise_extraction(
         if not paper_overview:
             structured_data = StructuredPaper.model_validate(paused_values.get("structured_paper"))
             paper_overview = format_paper_to_markdown(structured_data.model_dump())
-        log("[Overview] Revised extraction complete. Review the updated overview or approve it to generate the first draft.")
-        return "\n".join(run_log_lines), paper_overview, "", None
+        log("[Overview] Revised extraction complete. Review the updated source pack or approve it to plan the webpage outline.")
+        return (
+            "\n".join(run_log_lines),
+            paper_overview,
+            "",
+            *_review_accordion_updates("overview"),
+            "",
+            None,
+        )
     except Exception as exc:
         log(f"[Error] {exc}")
-        return "\n".join(run_log_lines), current_overview, feedback_text, feedback_images
+        return (
+            "\n".join(run_log_lines),
+            current_overview,
+            current_outline_overview,
+            *_review_accordion_updates("overview"),
+            feedback_text,
+            feedback_images,
+        )
 
 
-def approve_extraction_and_generate_draft(
+def approve_extraction_and_plan_outline(
     workflow_thread_id: str,
     current_logs: str,
-    current_preview: str | None,
-    current_html_path: str,
+    current_overview: str,
+    current_outline_overview: str,
 ) -> tuple[Any, ...]:
     run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
 
@@ -1100,12 +1307,176 @@ def approve_extraction_and_generate_draft(
                 "targeted_replacement_plan": None,
                 "patch_error": "",
                 "is_approved": True,
+                "is_outline_approved": False,
                 "is_webpage_approved": False,
             },
             as_node="overview",
         )
 
-        log("[Planner] Extraction approved. Generating the first webpage draft...")
+        log("[Planner] Extraction approved. Planning the webpage outline...")
+        HITL_WORKFLOW.invoke(None, config=config)
+        paused_state = HITL_WORKFLOW.get_state(config)
+        paused_values = dict(paused_state.values or {})
+        if str(paused_values.get("review_stage") or "") != "outline":
+            raise RuntimeError("Workflow did not pause at the outline review stage.")
+        outline_overview = str(paused_values.get("outline_overview") or "").strip()
+        if not outline_overview:
+            page_plan = PagePlan.model_validate(paused_values.get("page_plan"))
+            structured_data = StructuredPaper.model_validate(paused_values.get("structured_paper"))
+            outline_overview = format_page_plan_to_markdown(
+                page_plan.model_dump(),
+                structured_data.model_dump(),
+            )
+        paper_overview = str(paused_values.get("paper_overview") or "").strip() or current_overview
+        log("[Outline] Planner outline ready. Review the planned webpage sections, revise them if needed, or approve the outline to generate the first draft.")
+        return (
+            "\n".join(run_log_lines),
+            paper_overview,
+            outline_overview,
+            *_review_accordion_updates("outline"),
+            "",
+            None,
+            gr.update(interactive=False),
+            gr.update(interactive=False),
+            gr.update(interactive=True),
+            gr.update(interactive=True),
+            gr.update(interactive=True),
+            gr.update(interactive=True),
+            "",
+        )
+    except Exception as exc:
+        log(f"[Error] {exc}")
+        return (
+            "\n".join(run_log_lines),
+            current_overview,
+            current_outline_overview,
+            *_review_accordion_updates("overview"),
+            "",
+            None,
+            gr.update(interactive=True),
+            gr.update(interactive=True),
+            gr.update(interactive=False),
+            gr.update(interactive=False),
+            gr.update(interactive=False),
+            gr.update(interactive=False),
+            "",
+        )
+
+
+def revise_outline(
+    feedback_text: str,
+    feedback_images: Any,
+    workflow_thread_id: str,
+    current_logs: str,
+    current_outline_overview: str,
+) -> tuple[Any, ...]:
+    run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
+
+    def log(message: str) -> None:
+        print(message)
+        run_log_lines.append(message)
+
+    try:
+        thread_id = str(workflow_thread_id or "").strip()
+        if not thread_id:
+            raise ValueError("No paused workflow was found. Approve extraction before revising the outline.")
+
+        config = {"configurable": {"thread_id": thread_id}}
+        snapshot = HITL_WORKFLOW.get_state(config)
+        snapshot_values = dict(snapshot.values or {})
+        if str(snapshot_values.get("review_stage") or "") != "outline":
+            raise ValueError("Outline revisions are only available during the planner outline review stage.")
+
+        feedback_payload = build_human_feedback_payload(feedback_text, feedback_images)
+        human_directives = extract_human_feedback_text(feedback_payload)
+        if not human_directives:
+            raise ValueError("Enter feedback text before requesting an outline revision.")
+
+        log(f"[HITL] Planner outline revision feedback captured: {human_directives}")
+
+        HITL_WORKFLOW.update_state(
+            config,
+            {
+                "human_directives": feedback_payload,
+                "is_outline_approved": False,
+                "approved_page_plan": None,
+            },
+            as_node="outline_review",
+        )
+
+        log("[Planner] Resuming workflow to revise the webpage outline...")
+        HITL_WORKFLOW.invoke(None, config=config)
+        paused_state = HITL_WORKFLOW.get_state(config)
+        paused_values = dict(paused_state.values or {})
+        outline_overview = str(paused_values.get("outline_overview") or "").strip()
+        if not outline_overview:
+            page_plan = PagePlan.model_validate(paused_values.get("page_plan"))
+            structured_data = StructuredPaper.model_validate(paused_values.get("structured_paper"))
+            outline_overview = format_page_plan_to_markdown(
+                page_plan.model_dump(),
+                structured_data.model_dump(),
+            )
+        log("[Outline] Revised outline ready. Review the updated webpage structure or approve it to generate the first draft.")
+        return (
+            "\n".join(run_log_lines),
+            outline_overview,
+            *_review_accordion_updates("outline"),
+            "",
+            None,
+        )
+    except Exception as exc:
+        log(f"[Error] {exc}")
+        return (
+            "\n".join(run_log_lines),
+            current_outline_overview,
+            *_review_accordion_updates("outline"),
+            feedback_text,
+            feedback_images,
+        )
+
+
+def approve_outline_and_generate_draft(
+    workflow_thread_id: str,
+    current_logs: str,
+    current_outline_overview: str,
+    current_preview: str | None,
+    current_html_path: str,
+) -> tuple[Any, ...]:
+    run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
+
+    def log(message: str) -> None:
+        print(message)
+        run_log_lines.append(message)
+
+    try:
+        thread_id = str(workflow_thread_id or "").strip()
+        if not thread_id:
+            raise ValueError("No paused workflow was found. Approve extraction before generating the first draft.")
+
+        config = {"configurable": {"thread_id": thread_id}}
+        snapshot = HITL_WORKFLOW.get_state(config)
+        snapshot_values = dict(snapshot.values or {})
+        if str(snapshot_values.get("review_stage") or "") != "outline":
+            raise ValueError("The first draft can only be generated from the outline review stage.")
+
+        approved_page_plan = PagePlan.model_validate(snapshot_values.get("page_plan"))
+        HITL_WORKFLOW.update_state(
+            config,
+            {
+                "human_directives": empty_human_feedback(),
+                "coder_instructions": "",
+                "patch_agent_output": "",
+                "revision_plan": None,
+                "targeted_replacement_plan": None,
+                "patch_error": "",
+                "approved_page_plan": approved_page_plan,
+                "is_outline_approved": True,
+                "is_webpage_approved": False,
+            },
+            as_node="outline_review",
+        )
+
+        log("[Coder] Outline approved. Generating the first webpage draft...")
         HITL_WORKFLOW.invoke(None, config=config)
         paused_state = HITL_WORKFLOW.get_state(config)
         paused_values = dict(paused_state.values or {})
@@ -1114,12 +1485,14 @@ def approve_extraction_and_generate_draft(
         log("[Webpage] First draft ready. Review the preview, then approve it or request a revision with text and screenshots.")
         return (
             "\n".join(run_log_lines),
+            current_outline_overview,
+            *_review_accordion_updates("webpage"),
             preview_image_path,
             entry_html_path,
-            gr.update(interactive=False),
-            gr.update(interactive=False),
             "",
             None,
+            gr.update(interactive=False),
+            gr.update(interactive=False),
             gr.update(interactive=True),
             gr.update(interactive=True),
         )
@@ -1127,12 +1500,14 @@ def approve_extraction_and_generate_draft(
         log(f"[Error] {exc}")
         return (
             "\n".join(run_log_lines),
+            current_outline_overview,
+            *_review_accordion_updates("outline"),
             current_preview,
             str(current_html_path or ""),
-            gr.update(interactive=True),
-            gr.update(interactive=True),
             "",
             None,
+            gr.update(interactive=True),
+            gr.update(interactive=True),
             gr.update(interactive=False),
             gr.update(interactive=False),
         )
@@ -1198,16 +1573,26 @@ def request_webpage_revision(
             targeted_replacement_plan = targeted_replacement_plan.model_dump()
         if isinstance(targeted_replacement_plan, dict):
             replacements_count = len(targeted_replacement_plan.get("replacements") or [])
+            style_change_count = len(targeted_replacement_plan.get("style_changes") or [])
+            attribute_change_count = len(targeted_replacement_plan.get("attribute_changes") or [])
+            override_rule_count = len(targeted_replacement_plan.get("override_css_rules") or [])
             fallback_count = len(targeted_replacement_plan.get("fallback_blocks") or [])
         else:
             replacements_count = 0
+            style_change_count = 0
+            attribute_change_count = 0
+            override_rule_count = 0
             fallback_count = 0
         if patch_error:
             log(f"[Patch] Safe fail: {patch_error}")
-        elif replacements_count or fallback_count:
+        elif replacements_count or style_change_count or attribute_change_count or override_rule_count or fallback_count:
             log(
                 "[Patch] Anchored DOM revision applied: "
-                f"{replacements_count} targeted replacement(s), {fallback_count} regenerated block(s)."
+                f"{replacements_count} targeted replacement(s), "
+                f"{style_change_count} style change(s), "
+                f"{attribute_change_count} attribute change(s), "
+                f"{override_rule_count} override css rule(s), "
+                f"{fallback_count} regenerated block(s)."
             )
         elif patch_agent_output:
             log(f"[Patch] Anchored DOM revision applied: {patch_agent_output}")
@@ -1216,6 +1601,7 @@ def request_webpage_revision(
         log("[Webpage] Revised draft ready. Review it, then approve it or request another revision.")
         return (
             "\n".join(run_log_lines),
+            *_review_accordion_updates("webpage"),
             preview_image_path,
             "",
             None,
@@ -1227,6 +1613,7 @@ def request_webpage_revision(
         log(f"[Error] {exc}")
         return (
             "\n".join(run_log_lines),
+            *_review_accordion_updates("webpage"),
             current_preview,
             feedback_text,
             feedback_images,
@@ -1278,6 +1665,7 @@ def approve_webpage(
         log("[Done] Webpage approved and workflow completed successfully.")
         return (
             "\n".join(run_log_lines),
+            *_review_accordion_updates("webpage"),
             current_preview,
             str(current_html_path or ""),
             gr.update(interactive=False),
@@ -1289,6 +1677,7 @@ def approve_webpage(
         log(f"[Error] {exc}")
         return (
             "\n".join(run_log_lines),
+            *_review_accordion_updates("webpage"),
             current_preview,
             str(current_html_path or ""),
             gr.update(interactive=True),
@@ -1408,18 +1797,23 @@ def build_app() -> gr.Blocks:
                     interactive=False,
                 )
                 step1_button = gr.Button(
-                    "Step 1: Extract Paper Content",
+                    "Step 1: Extract Source Pack",
                     variant="primary",
                     interactive=False,
                 )
-                gr.Markdown("### Extracted Paper Overview")
-                paper_markdown = gr.Markdown(
-                    value="Run Step 1 to extract the paper into a readable review overview."
-                )
+                with gr.Accordion("Reader Extraction Review", open=False) as paper_review_accordion:
+                    paper_markdown = gr.Markdown(
+                        value="Run Step 1 to extract the paper into a reviewable source pack."
+                    )
+                with gr.Accordion("Planned Webpage Outline", open=False) as outline_review_accordion:
+                    outline_markdown = gr.Markdown(
+                        value="Approve the Reader extraction to generate a reviewable webpage outline."
+                    )
                 feedback_text = gr.Textbox(
                     label="Human Feedback",
                     placeholder=(
-                        "During extraction review: explain what to revise. "
+                        "During extraction review: fix missing or incorrect source material. "
+                        "During outline review: add, remove, merge, split, rename, or reorder sections. "
                         "During webpage review: describe the visual issue and attach screenshots below."
                     ),
                     lines=4,
@@ -1438,7 +1832,17 @@ def build_app() -> gr.Blocks:
                     interactive=False,
                 )
                 approve_button = gr.Button(
-                    "Approve Extraction & Generate First Draft",
+                    "Approve Extraction & Plan Outline",
+                    variant="primary",
+                    interactive=False,
+                )
+                revise_outline_button = gr.Button(
+                    "Revise Outline",
+                    variant="secondary",
+                    interactive=False,
+                )
+                approve_outline_button = gr.Button(
+                    "Approve Outline & Generate First Draft",
                     variant="primary",
                     interactive=False,
                 )
@@ -1456,9 +1860,10 @@ def build_app() -> gr.Blocks:
                     label="System Logs",
                     value=(
                         "Choose constraints, click Find Templates, preview a candidate, then run Step 1 to extract "
-                        "a readable overview. Use Human Feedback plus Revise Extraction until satisfied, then "
-                        "approve the extraction to generate the first webpage draft. After that, attach screenshots "
-                        "and request webpage revisions through the Translator loop until the draft is ready to approve."
+                        "a reviewable source pack. Use Human Feedback plus Revise Extraction until satisfied, then "
+                        "approve the extraction to plan the webpage outline. Revise the outline until it matches the "
+                        "sections you want on the final page, then generate the first draft. After that, attach "
+                        "screenshots and request webpage revisions through the Translator loop until the draft is ready to approve."
                     ),
                     lines=24,
                     interactive=False,
@@ -1487,9 +1892,14 @@ def build_app() -> gr.Blocks:
                 revise_button,
                 approve_button,
                 paper_markdown,
+                outline_markdown,
+                paper_review_accordion,
+                outline_review_accordion,
                 feedback_text,
                 feedback_images,
                 workflow_thread_state,
+                revise_outline_button,
+                approve_outline_button,
                 request_revision_button,
                 approve_webpage_button,
                 current_render_html_state,
@@ -1508,9 +1918,14 @@ def build_app() -> gr.Blocks:
                 revise_button,
                 approve_button,
                 paper_markdown,
+                outline_markdown,
+                paper_review_accordion,
+                outline_review_accordion,
                 feedback_text,
                 feedback_images,
                 workflow_thread_state,
+                revise_outline_button,
+                approve_outline_button,
                 request_revision_button,
                 approve_webpage_button,
                 current_render_html_state,
@@ -1524,11 +1939,16 @@ def build_app() -> gr.Blocks:
             outputs=[
                 system_logs,
                 paper_markdown,
+                outline_markdown,
+                paper_review_accordion,
+                outline_review_accordion,
                 feedback_text,
                 feedback_images,
                 revise_button,
                 approve_button,
                 workflow_thread_state,
+                revise_outline_button,
+                approve_outline_button,
                 request_revision_button,
                 approve_webpage_button,
                 current_render_html_state,
@@ -1538,26 +1958,73 @@ def build_app() -> gr.Blocks:
 
         revise_button.click(
             fn=revise_extraction,
-            inputs=[feedback_text, feedback_images, workflow_thread_state, system_logs, paper_markdown],
-            outputs=[system_logs, paper_markdown, feedback_text, feedback_images],
+            inputs=[feedback_text, feedback_images, workflow_thread_state, system_logs, paper_markdown, outline_markdown],
+            outputs=[
+                system_logs,
+                paper_markdown,
+                outline_markdown,
+                paper_review_accordion,
+                outline_review_accordion,
+                feedback_text,
+                feedback_images,
+            ],
             api_name="revise_extraction",
         )
 
         approve_button.click(
-            fn=approve_extraction_and_generate_draft,
-            inputs=[workflow_thread_state, system_logs, preview_image, current_render_html_state],
+            fn=approve_extraction_and_plan_outline,
+            inputs=[workflow_thread_state, system_logs, paper_markdown, outline_markdown],
             outputs=[
                 system_logs,
-                preview_image,
-                current_render_html_state,
-                revise_button,
-                approve_button,
+                paper_markdown,
+                outline_markdown,
+                paper_review_accordion,
+                outline_review_accordion,
                 feedback_text,
                 feedback_images,
+                revise_button,
+                approve_button,
+                revise_outline_button,
+                approve_outline_button,
+                request_revision_button,
+                approve_webpage_button,
+                current_render_html_state,
+            ],
+            api_name="approve_extraction_and_plan_outline",
+        )
+
+        revise_outline_button.click(
+            fn=revise_outline,
+            inputs=[feedback_text, feedback_images, workflow_thread_state, system_logs, outline_markdown],
+            outputs=[
+                system_logs,
+                outline_markdown,
+                paper_review_accordion,
+                outline_review_accordion,
+                feedback_text,
+                feedback_images,
+            ],
+            api_name="revise_outline",
+        )
+
+        approve_outline_button.click(
+            fn=approve_outline_and_generate_draft,
+            inputs=[workflow_thread_state, system_logs, outline_markdown, preview_image, current_render_html_state],
+            outputs=[
+                system_logs,
+                outline_markdown,
+                paper_review_accordion,
+                outline_review_accordion,
+                preview_image,
+                current_render_html_state,
+                feedback_text,
+                feedback_images,
+                revise_outline_button,
+                approve_outline_button,
                 request_revision_button,
                 approve_webpage_button,
             ],
-            api_name="approve_extraction_and_generate_draft",
+            api_name="approve_outline_and_generate_draft",
         )
 
         request_revision_button.click(
@@ -1565,6 +2032,8 @@ def build_app() -> gr.Blocks:
             inputs=[feedback_text, feedback_images, workflow_thread_state, system_logs, preview_image, current_render_html_state],
             outputs=[
                 system_logs,
+                paper_review_accordion,
+                outline_review_accordion,
                 preview_image,
                 feedback_text,
                 feedback_images,
@@ -1580,6 +2049,8 @@ def build_app() -> gr.Blocks:
             inputs=[workflow_thread_state, system_logs, preview_image, current_render_html_state],
             outputs=[
                 system_logs,
+                paper_review_accordion,
+                outline_review_accordion,
                 preview_image,
                 current_render_html_state,
                 request_revision_button,

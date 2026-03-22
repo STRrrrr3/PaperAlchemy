@@ -8,7 +8,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from src.human_feedback import extract_human_feedback_text
 from src.json_utils import to_pretty_json
 from src.llm import get_llm
-from src.prompts import CRITIC_SYSTEM_PROMPT
+from src.prompts import CRITIC_SYSTEM_PROMPT, READER_CRITIC_USER_PROMPT_TEMPLATE
 from src.schemas import CriticReport, StructuredPaper
 from src.state import ReaderState
 
@@ -271,19 +271,12 @@ def run_semantic_critic(
     llm = get_llm(temperature=0, use_smart_model=False)
     structured_llm = llm.with_structured_output(CriticReport)
 
-    user_msg = f"""
-    ### SOURCE DATA (Original Markdown):
-    {raw_markdown}
-
-    ### HUMAN_DIRECTIVES:
-    {human_directives or "(none)"}
-
-    ### ASSETS LIST:
-    {json.dumps(assets_list, indent=2, ensure_ascii=False)}
-
-    ### CANDIDATE OUTPUT (Reader Agent's JSON):
-    {structured_json}
-    """
+    user_msg = READER_CRITIC_USER_PROMPT_TEMPLATE.format(
+        raw_markdown=raw_markdown,
+        human_directives=human_directives or "(none)",
+        assets_list_json=json.dumps(assets_list, indent=2, ensure_ascii=False),
+        structured_json=structured_json,
+    )
 
     try:
         report = structured_llm.invoke(
