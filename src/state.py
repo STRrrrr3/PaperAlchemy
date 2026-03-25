@@ -4,12 +4,16 @@ from typing import Annotated, Any, List, Optional, TypedDict
 from src.human_feedback import HumanFeedbackPayload
 from src.schemas import (
     CoderArtifact,
+    LayoutComposeSession,
+    LayoutComposeUpdate,
     PagePlan,
     RevisionPlan,
-    SemanticPlan,
+    ShellBindingReview,
+    ShellManualSelection,
     StructuredPaper,
     TargetedReplacementPlan,
     TemplateCandidate,
+    VisualSmokeReport,
 )
 
 
@@ -33,10 +37,8 @@ class PlannerState(TypedDict):
     generation_constraints: dict[str, Any]
     user_constraints: dict[str, Any]
     human_directives: HumanFeedbackPayload
-    semantic_plan: Optional[SemanticPlan]
     template_candidates: List[TemplateCandidate]
     selected_template: Optional[TemplateCandidate]
-    selected_template_path: Optional[str]
     planner_feedback_history: Annotated[List[str], operator.add]
     page_plan: Optional[PagePlan]
     planner_critic_passed: bool
@@ -54,6 +56,7 @@ class CoderState(TypedDict):
     visual_screenshot_path: str
     visual_iterations: int
     is_visually_approved: bool
+    visual_smoke_report: VisualSmokeReport | None
     coder_artifact: Optional[CoderArtifact]
     coder_critic_passed: bool
     coder_retry_count: int
@@ -63,6 +66,7 @@ class WorkflowState(TypedDict):
     paper_folder_name: str
     user_constraints: dict[str, str]
     generation_constraints: dict[str, Any]
+    manual_layout_compose_enabled: bool
     human_directives: HumanFeedbackPayload
     coder_instructions: str
     patch_agent_output: str
@@ -75,6 +79,11 @@ class WorkflowState(TypedDict):
     is_outline_approved: bool
     is_webpage_approved: bool
     review_stage: str
+    shell_binding_review: ShellBindingReview | None
+    shell_manual_selection: ShellManualSelection | None
+    layout_compose_session: LayoutComposeSession | None
+    layout_compose_update: LayoutComposeUpdate | None
+    visual_smoke_report: VisualSmokeReport | None
     structured_paper: Optional[StructuredPaper]
     page_plan: Optional[PagePlan]
     approved_page_plan: Optional[PagePlan]

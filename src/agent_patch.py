@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -10,6 +9,13 @@ from typing import Any
 from bs4 import BeautifulSoup, Tag
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from src.html_utils import (
+    extract_html_fragment,
+    message_content_to_text,
+    read_current_page_html,
+    read_template_reference_html,
+    read_text_with_fallback,
+)
 from src.json_utils import to_pretty_json
 from src.llm import get_llm
 from src.page_manifest import (
@@ -114,67 +120,6 @@ def _normalize_targeted_replacement_plan(plan: Any) -> TargetedReplacementPlan |
         return TargetedReplacementPlan.model_validate(plan)
     except Exception:
         return None
-
-
-def _read_text_with_fallback(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return path.read_text(encoding="latin-1")
-
-
-def _message_content_to_text(message: Any) -> str:
-    content = getattr(message, "content", message)
-    if isinstance(content, str):
-        return content.strip()
-
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str) and item.strip():
-                parts.append(item.strip())
-                continue
-            if isinstance(item, dict):
-                text = str(item.get("text") or "").strip()
-                if text:
-                    parts.append(text)
-        return "\n".join(parts).strip()
-
-    return str(content or "").strip()
-
-
-def _read_current_html(artifact: CoderArtifact | None) -> str:
-    if not artifact:
-        return ""
-
-    entry_path = Path(artifact.entry_html)
-    if not entry_path.exists():
-        return ""
-
-    try:
-        return _read_text_with_fallback(entry_path)
-    except Exception:
-        return ""
-
-
-def _read_template_reference_html(page_plan: PagePlan | None) -> str:
-    if not page_plan:
-        return ""
-
-    selected_root = str(page_plan.template_selection.selected_root_dir or "").strip()
-    selected_entry = str(page_plan.template_selection.selected_entry_html or "").strip()
-    if not selected_root or not selected_entry:
-        return ""
-
-    project_root = Path(__file__).resolve().parent.parent
-    template_entry_path = project_root / selected_root / selected_entry
-    if not template_entry_path.exists():
-        return ""
-
-    try:
-        return _read_text_with_fallback(template_entry_path)
-    except Exception:
-        return ""
 
 
 def _dedupe_paths(paths: list[Path]) -> list[Path]:
@@ -685,18 +630,6 @@ def _load_current_manifest(artifact: CoderArtifact | None):
     return load_page_manifest(build_page_manifest_path(artifact.entry_html))
 
 
-def _extract_html_fragment(text: str) -> str:
-    raw_text = str(text or "").strip()
-    if not raw_text:
-        return ""
-
-    fenced_match = re.search(r"```(?:html)?\s*(.*?)```", raw_text, flags=re.IGNORECASE | re.DOTALL)
-    if fenced_match:
-        raw_text = fenced_match.group(1).strip()
-
-    return raw_text.strip()
-
-
 def _available_asset_manifest_from_artifact(artifact: CoderArtifact) -> list[dict[str, str]]:
     site_dir = Path(artifact.site_dir)
     entry_html_parent = Path(artifact.entry_html).parent
@@ -807,7 +740,7 @@ def _regenerate_block_html(
     except Exception as exc:
         raise PatchApplicationError(f"Block regeneration failed for '{block_id}': {exc}") from exc
 
-    regenerated_html = _extract_html_fragment(_message_content_to_text(response))
+    regenerated_html = extract_html_fragment(message_content_to_text(response))
     if not regenerated_html:
         raise PatchApplicationError(f"Block regeneration returned empty HTML for '{block_id}'.")
 
@@ -823,8 +756,8 @@ def patch_agent_node(state: WorkflowState) -> dict[str, Any]:
     page_plan = _normalize_page_plan(state.get("page_plan"))
     structured_paper = _normalize_structured_paper(state.get("structured_paper"))
     revision_plan = _normalize_revision_plan(state.get("revision_plan"))
-    current_html = _read_current_html(artifact)
-    template_reference_html = _read_template_reference_html(page_plan)
+    current_html = read_current_page_html(artifact, missing_value="")
+    template_reference_html = read_template_reference_html(page_plan, missing_value="")
     manifest = _load_current_manifest(artifact)
 
     if not artifact or not page_plan or not structured_paper or not current_html or not template_reference_html:
@@ -1129,13 +1062,13 @@ def patch_executor_node(state: WorkflowState) -> dict[str, Any]:
         return {"patch_error": LEGACY_PAGE_ERROR}
 
     try:
-        current_html = _read_text_with_fallback(entry_html_path)
+        current_html = read_text_with_fallback(entry_html_path)
     except Exception as exc:
         message = f"Patch Executor failed reading current HTML: {exc}"
         print(f"[PatchExecutor] {message}")
         return {"patch_error": message}
 
-    template_reference_html = _read_template_reference_html(page_plan)
+    template_reference_html = read_template_reference_html(page_plan, missing_value="")
     if not template_reference_html:
         message = "Patch Executor could not read template reference HTML for block fallback regeneration."
         print(f"[PatchExecutor] {message}")
