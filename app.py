@@ -24,24 +24,41 @@ from src.agent_patch import (
     patch_agent_node,
     patch_executor_node,
 )
-from src.agent_coder import run_coder_agent
+from src.agent_coder import run_coder_agent_with_diagnostics
 from src.agent_planner import run_planner_agent
 from src.agent_reader import run_reader_agent
 from src.agent_translator import translator_node
 from src.deterministic_template_selector import score_and_select_templates
+from src.html_utils import read_text_with_fallback, resolve_template_entry_html_path
 from src.human_feedback import (
     build_human_feedback_payload,
     empty_human_feedback,
     extract_human_feedback_text,
 )
-from src.page_manifest import (
-    enrich_page_plan_shell_contracts,
-    missing_shell_contract_block_ids,
-)
 from src.parser import parse_pdf
-from src.schemas import CoderArtifact, PagePlan, StructuredPaper
+from src.preview_utils import (
+    build_binding_candidate_preview_path,
+    build_binding_template_preview_path,
+    take_selector_screenshot,
+)
+from src.schemas import (
+    CoderArtifact,
+    LayoutComposeSession,
+    LayoutComposeUpdate,
+    PagePlan,
+    ShellBindingReview,
+    ShellManualSelection,
+    StructuredPaper,
+    VisualSmokeReport,
+)
 from src.state import WorkflowState
 from src.template_resources import SyncedTemplateAssets, ensure_autopage_template_assets
+from src.template_shell_resolver import (
+    apply_layout_compose_session_to_page_plan,
+    apply_layout_compose_update,
+    build_layout_compose_session,
+    resolve_page_plan_shells,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 INPUT_DIR = PROJECT_ROOT / "data" / "input"
@@ -105,13 +122,6 @@ def save_coder_artifact(path: Path, artifact: CoderArtifact) -> None:
         json.dump(artifact.model_dump(), file, indent=2, ensure_ascii=False)
 
 
-def _read_text_with_fallback(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return path.read_text(encoding="latin-1")
-
-
 def _review_accordion_updates(stage: str) -> tuple[dict[str, Any], dict[str, Any]]:
     normalized_stage = str(stage or "").strip().lower()
     if normalized_stage == "overview":
@@ -121,25 +131,41 @@ def _review_accordion_updates(stage: str) -> tuple[dict[str, Any], dict[str, Any
     return gr.update(open=False), gr.update(open=False)
 
 
-def _enrich_page_plan_shell_contracts(page_plan: PagePlan) -> PagePlan:
-    template_entry_path = (
-        PROJECT_ROOT
-        / page_plan.template_selection.selected_root_dir
-        / str(page_plan.template_selection.selected_entry_html or "").strip()
+def _resolve_page_plan_shell_contracts(
+    page_plan: PagePlan,
+) -> tuple[PagePlan, ShellBindingReview | None]:
+    template_entry_path = _get_template_entry_path(page_plan)
+    resolved_plan, binding_review = resolve_page_plan_shells(
+        page_plan=page_plan,
+        template_reference_html=read_text_with_fallback(template_entry_path),
+        template_entry_html_path=template_entry_path,
     )
-    if not template_entry_path.exists():
-        raise FileNotFoundError(f"Template entry html not found for shell extraction: {template_entry_path}")
+    return resolved_plan, binding_review
 
-    enriched_plan = enrich_page_plan_shell_contracts(
+
+def _get_template_entry_path(page_plan: PagePlan) -> Path:
+    template_entry_path = resolve_template_entry_html_path(
         page_plan,
-        _read_text_with_fallback(template_entry_path),
+        project_root=PROJECT_ROOT,
     )
-    missing_blocks = missing_shell_contract_block_ids(enriched_plan)
-    if missing_blocks:
-        raise ValueError(
-            "Template shell extraction failed for block(s): " + ", ".join(missing_blocks)
-        )
-    return enriched_plan
+    if template_entry_path is None or not template_entry_path.exists():
+        raise FileNotFoundError(f"Template entry html not found for shell resolution: {template_entry_path}")
+    return template_entry_path
+
+
+def _build_layout_compose_session_for_plan(
+    page_plan: PagePlan,
+    structured_data: StructuredPaper,
+    paper_folder_name: str,
+) -> LayoutComposeSession:
+    template_entry_path = _get_template_entry_path(page_plan)
+    return build_layout_compose_session(
+        page_plan=page_plan,
+        structured_paper=structured_data,
+        template_reference_html=read_text_with_fallback(template_entry_path),
+        template_entry_html_path=template_entry_path,
+        paper_folder_name=paper_folder_name,
+    )
 
 
 def normalize_coder_artifact(artifact: Any) -> CoderArtifact | None:
@@ -151,6 +177,437 @@ def normalize_coder_artifact(artifact: Any) -> CoderArtifact | None:
         return CoderArtifact.model_validate(artifact)
     except Exception:
         return None
+
+
+def normalize_shell_binding_review(review: Any) -> ShellBindingReview | None:
+    if review is None:
+        return None
+    if isinstance(review, ShellBindingReview):
+        return review
+    try:
+        return ShellBindingReview.model_validate(review)
+    except Exception:
+        return None
+
+
+def normalize_shell_manual_selection(selection: Any) -> ShellManualSelection | None:
+    if selection is None:
+        return None
+    if isinstance(selection, ShellManualSelection):
+        return selection
+    try:
+        return ShellManualSelection.model_validate(selection)
+    except Exception:
+        return None
+
+
+def normalize_layout_compose_session(session: Any) -> LayoutComposeSession | None:
+    if session is None:
+        return None
+    if isinstance(session, LayoutComposeSession):
+        return session
+    try:
+        return LayoutComposeSession.model_validate(session)
+    except Exception:
+        return None
+
+
+def normalize_layout_compose_update(update: Any) -> LayoutComposeUpdate | None:
+    if update is None:
+        return None
+    if isinstance(update, LayoutComposeUpdate):
+        return update
+    try:
+        return LayoutComposeUpdate.model_validate(update)
+    except Exception:
+        return None
+
+
+def normalize_visual_smoke_report(report: Any) -> VisualSmokeReport | None:
+    if report is None:
+        return None
+    if isinstance(report, VisualSmokeReport):
+        return report
+    try:
+        return VisualSmokeReport.model_validate(report)
+    except Exception:
+        return None
+
+
+def _apply_shell_manual_selection_to_plan(
+    page_plan: PagePlan,
+    manual_selection: ShellManualSelection,
+) -> PagePlan:
+    updated_blocks = []
+    found = False
+    for block in page_plan.blocks:
+        if block.block_id != manual_selection.block_id:
+            updated_blocks.append(block)
+            continue
+        updated_region = block.target_template_region.model_copy(
+            update={"selector_hint": str(manual_selection.selector_hint or "").strip()},
+            deep=True,
+        )
+        updated_blocks.append(
+            block.model_copy(
+                update={
+                    "target_template_region": updated_region,
+                    "shell_contract": None,
+                },
+                deep=True,
+            )
+        )
+        found = True
+    if not found:
+        raise ValueError(f"Manual shell binding referenced unknown block '{manual_selection.block_id}'.")
+    return page_plan.model_copy(update={"blocks": updated_blocks}, deep=True)
+
+
+def _format_shell_binding_review(review: ShellBindingReview) -> str:
+    lines = [
+        f"### Shell Binding Review: {review.block_title}",
+        f"- `block_id`: `{review.block_id}`",
+        f"- original selector: `{review.original_selector_hint or '(none)'}`",
+        f"- reason: {review.failure_reason}",
+        "",
+        "Select one candidate shell below to continue generating the first draft.",
+    ]
+    return "\n".join(lines)
+
+
+def _build_shell_binding_preview_assets(
+    review: ShellBindingReview,
+) -> tuple[str | None, list[tuple[str, str]]]:
+    template_entry_path = Path(str(review.template_entry_html or "")).resolve()
+    if not template_entry_path.exists():
+        return None, []
+
+    template_preview_path = take_local_screenshot(
+        str(template_entry_path),
+        str(build_binding_template_preview_path(template_entry_path, review.block_id)),
+    )
+    gallery_items: list[tuple[str, str]] = []
+    for rank, candidate in enumerate(review.candidates, start=1):
+        preview_path = take_selector_screenshot(
+            str(template_entry_path),
+            candidate.selector_hint,
+            str(build_binding_candidate_preview_path(template_entry_path, review.block_id, rank)),
+        )
+        if not preview_path:
+            continue
+        caption = (
+            f"{rank}. {candidate.selector_hint}\n"
+            f"role={candidate.region_role} | score={candidate.score:.2f}\n"
+            f"{candidate.reason}"
+        )
+        gallery_items.append((preview_path, caption))
+    return template_preview_path or None, gallery_items
+
+
+def _binding_ui_hidden() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    return (
+        gr.update(value="", visible=False),
+        gr.update(value=[], visible=False),
+        gr.update(choices=[], value=None, interactive=False, visible=False),
+        gr.update(interactive=False, visible=False),
+        gr.update(interactive=False, visible=False),
+    )
+
+
+def _binding_ui_active(
+    review: ShellBindingReview,
+) -> tuple[str | None, dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    template_preview_path, gallery_items = _build_shell_binding_preview_assets(review)
+    return (
+        template_preview_path,
+        gr.update(value=_format_shell_binding_review(review), visible=True),
+        gr.update(value=gallery_items, visible=bool(gallery_items)),
+        gr.update(
+            choices=[candidate.selector_hint for candidate in review.candidates],
+            value=review.candidates[0].selector_hint if review.candidates else None,
+            interactive=bool(review.candidates),
+            visible=True,
+        ),
+        gr.update(interactive=bool(review.candidates), visible=True),
+        gr.update(interactive=True, visible=True),
+    )
+
+
+def _visible_preview_update(value: str | None) -> dict[str, Any]:
+    return gr.update(value=value, visible=True)
+
+
+def _hidden_preview_update() -> dict[str, Any]:
+    return gr.update(value=None, visible=False)
+
+
+def _normalize_manual_layout_compose_enabled(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def _stage_action_updates(
+    stage: str,
+    *,
+    feedback_text_value: str = "",
+    feedback_images_value: Any = None,
+    manual_layout_compose_enabled: bool = False,
+) -> tuple[dict[str, Any], ...]:
+    normalized_stage = str(stage or "").strip().lower()
+    is_overview = normalized_stage == "overview"
+    is_outline = normalized_stage == "outline"
+    is_webpage = normalized_stage == "webpage"
+    group_visible = is_overview or is_outline or is_webpage
+
+    if is_overview:
+        placeholder = "Describe missing or incorrect source material from the Reader extraction."
+    elif is_outline:
+        placeholder = "Describe section-level changes: add, remove, merge, split, rename, or reorder."
+    elif is_webpage:
+        placeholder = "Describe the visual issue or requested frontend change. Attach screenshots below if helpful."
+    else:
+        placeholder = ""
+
+    return (
+        gr.update(visible=group_visible),
+        gr.update(
+            value=str(feedback_text_value or ""),
+            visible=group_visible,
+            interactive=group_visible,
+            placeholder=placeholder,
+        ),
+        gr.update(
+            value=feedback_images_value if is_webpage else None,
+            visible=is_webpage,
+            interactive=is_webpage,
+        ),
+        gr.update(
+            value=bool(manual_layout_compose_enabled),
+            visible=is_outline,
+            interactive=is_outline,
+        ),
+        gr.update(interactive=is_overview, visible=is_overview),
+        gr.update(interactive=is_overview, visible=is_overview),
+        gr.update(interactive=is_outline, visible=is_outline),
+        gr.update(interactive=is_outline, visible=is_outline),
+        gr.update(interactive=is_webpage, visible=is_webpage),
+        gr.update(interactive=is_webpage, visible=is_webpage),
+    )
+
+
+def _ordered_layout_compose_blocks(session: LayoutComposeSession) -> list[Any]:
+    return sorted(session.blocks, key=lambda item: (item.current_order, item.block_id))
+
+
+def _active_layout_compose_block(session: LayoutComposeSession) -> Any | None:
+    active_block_id = str(session.active_block_id or "").strip()
+    for block in _ordered_layout_compose_blocks(session):
+        if block.block_id == active_block_id:
+            return block
+    blocks = _ordered_layout_compose_blocks(session)
+    return blocks[0] if blocks else None
+
+
+def _format_layout_compose_block_summary(session: LayoutComposeSession) -> str:
+    lines = [
+        "### Layout Compose",
+        "Review the suggested section bindings, reorder blocks, and choose block-local figures before generating the first draft.",
+        "",
+    ]
+    for block in _ordered_layout_compose_blocks(session):
+        selected_section = str(block.selected_selector_hint or "").strip() or "(unselected)"
+        lines.extend(
+            [
+                f"#### {block.current_order}. {block.title}",
+                f"- `block_id`: `{block.block_id}`",
+                "- Source sections: "
+                + (", ".join(block.source_sections) if block.source_sections else "(none)"),
+                f"- Selected section: `{selected_section}`",
+                f"- Selected images: {len(block.selected_figure_paths)}",
+                "",
+            ]
+        )
+    return "\n".join(lines).rstrip()
+
+
+def _format_layout_compose_editor(block: Any | None) -> str:
+    if block is None:
+        return "### Layout Compose Editor\nNo block is available for editing."
+
+    lines = [
+        f"### Editing: {block.title}",
+        f"- `block_id`: `{block.block_id}`",
+        "- Source sections: " + (", ".join(block.source_sections) if block.source_sections else "(none)"),
+        f"- Current order: {block.current_order}",
+    ]
+    if block.selected_selector_hint:
+        lines.append(f"- Saved section: `{block.selected_selector_hint}`")
+    else:
+        lines.append("- Saved section: `(unselected)`")
+    lines.append(f"- Saved image count: {len(block.selected_figure_paths)}")
+    return "\n".join(lines)
+
+
+def _format_layout_compose_validation(session: LayoutComposeSession) -> str:
+    if not session.validation_errors:
+        return (
+            "### Compose Validation\n"
+            "- All blocks have a valid section selection.\n"
+            "- Section usage is unique and follows template DOM order.\n"
+            "- `Continue To Draft` is enabled."
+        )
+
+    lines = ["### Compose Validation"]
+    lines.extend(f"- {error}" for error in session.validation_errors)
+    return "\n".join(lines)
+
+
+def _layout_compose_section_caption(option: Any) -> str:
+    overlay = f"[{option.overlay_label}] " if str(option.overlay_label or "").strip() else ""
+    return (
+        f"{overlay}{option.selector_hint}\n"
+        f"role={option.region_role} | score={option.score:.2f}\n"
+        f"{option.reason}"
+    )
+
+
+def _layout_compose_figure_caption(option: Any) -> str:
+    section_prefix = f"{option.source_section} | " if str(option.source_section or "").strip() else ""
+    figure_type = str(option.type or "").strip() or "figure"
+    caption = str(option.caption or "").strip()
+    if caption:
+        return f"{section_prefix}{figure_type}\n{caption}"
+    return f"{section_prefix}{figure_type}\n{option.image_path}"
+
+
+def _layout_compose_ui_hidden() -> tuple[dict[str, Any], ...]:
+    return (
+        gr.update(value="", visible=False),
+        gr.update(choices=[], value=None, interactive=False, visible=False),
+        gr.update(value=None, visible=False),
+        gr.update(value="", visible=False),
+        gr.update(value=[], visible=False),
+        gr.update(choices=[], value=None, interactive=False, visible=False),
+        gr.update(value=[], visible=False),
+        gr.update(choices=[], value=[], interactive=False, visible=False),
+        gr.update(value="", visible=False),
+        gr.update(interactive=False, visible=False),
+        gr.update(interactive=False, visible=False),
+        gr.update(interactive=False, visible=False),
+        gr.update(interactive=False, visible=False),
+        gr.update(interactive=False, visible=False),
+    )
+
+
+def _layout_compose_ui_active(session: LayoutComposeSession) -> tuple[dict[str, Any], ...]:
+    active_block = _active_layout_compose_block(session)
+    ordered_blocks = _ordered_layout_compose_blocks(session)
+
+    block_choices = [
+        (
+            f"{block.current_order}. {block.title}",
+            block.block_id,
+        )
+        for block in ordered_blocks
+    ]
+
+    section_gallery_items = []
+    section_choices: list[tuple[str, str]] = []
+    section_value: str | None = None
+    figure_gallery_items = []
+    figure_choices: list[tuple[str, str]] = []
+    figure_values: list[str] = []
+    move_up_interactive = False
+    move_down_interactive = False
+
+    if active_block is not None:
+        section_choices = [
+            (_layout_compose_section_caption(option), option.selector_hint)
+            for option in active_block.section_options
+        ]
+        section_value = str(active_block.selected_selector_hint or "").strip() or None
+        section_gallery_items = [
+            (option.preview_image_path, _layout_compose_section_caption(option))
+            for option in active_block.section_options[:6]
+            if str(option.preview_image_path or "").strip()
+        ]
+        figure_choices = [
+            (_layout_compose_figure_caption(option), option.image_path)
+            for option in active_block.figure_options
+        ]
+        figure_values = list(active_block.selected_figure_paths)
+        figure_gallery_items = [
+            (option.preview_image_path, _layout_compose_figure_caption(option))
+            for option in active_block.figure_options
+            if str(option.preview_image_path or "").strip()
+        ]
+        move_up_interactive = active_block.current_order > 1
+        move_down_interactive = active_block.current_order < len(ordered_blocks)
+
+    return (
+        gr.update(value=_format_layout_compose_block_summary(session), visible=True),
+        gr.update(
+            choices=block_choices,
+            value=active_block.block_id if active_block is not None else None,
+            interactive=bool(block_choices),
+            visible=True,
+        ),
+        gr.update(
+            value=session.template_preview_path or None,
+            visible=bool(session.template_preview_path),
+        ),
+        gr.update(value=_format_layout_compose_editor(active_block), visible=True),
+        gr.update(value=section_gallery_items, visible=bool(section_gallery_items)),
+        gr.update(
+            choices=section_choices,
+            value=section_value,
+            interactive=bool(section_choices),
+            visible=True,
+        ),
+        gr.update(value=figure_gallery_items, visible=bool(figure_gallery_items)),
+        gr.update(
+            choices=figure_choices,
+            value=figure_values,
+            interactive=True,
+            visible=True,
+        ),
+        gr.update(value=_format_layout_compose_validation(session), visible=True),
+        gr.update(interactive=move_up_interactive, visible=True),
+        gr.update(interactive=move_down_interactive, visible=True),
+        gr.update(interactive=active_block is not None, visible=True),
+        gr.update(interactive=not session.validation_errors and active_block is not None, visible=True),
+        gr.update(interactive=True, visible=True),
+    )
+
+
+def _visual_smoke_feedback_text(report: VisualSmokeReport | None) -> str:
+    if not report or report.passed or not report.issues:
+        return ""
+    recovery = str(report.suggested_recovery or "").strip()
+    suffix = f" (recovery: {recovery})" if recovery else ""
+    return "[Visual Smoke] " + "; ".join(report.issues) + suffix
+
+
+def _planner_recovery_feedback_from_visual_smoke(
+    existing_feedback: Any,
+    report: VisualSmokeReport | None,
+) -> Any:
+    if report is None or report.suggested_recovery != "rerun_planner":
+        return existing_feedback
+
+    prior_text = extract_human_feedback_text(existing_feedback)
+    smoke_issue_text = "; ".join(report.issues) or "Visual smoke detected a structural page mismatch."
+    feedback_lines = []
+    if prior_text:
+        feedback_lines.append(prior_text)
+    feedback_lines.append(
+        "Visual smoke requires planner recovery. Rework the page structure/template binding instead of a local patch."
+    )
+    feedback_lines.append(f"Structural issues: {smoke_issue_text}")
+    return build_human_feedback_payload("\n".join(feedback_lines), None)
 
 
 def ensure_parsed_output(pdf_filename: str, output_dir: Path) -> bool:
@@ -317,27 +774,6 @@ def take_local_screenshot(html_absolute_path: str, output_image_path: str) -> st
             f"{html_path}: {exc}. Ensure `playwright` is installed and Chromium is available."
         )
         return ""
-
-
-def _message_content_to_text(message: Any) -> str:
-    content = getattr(message, "content", message)
-    if isinstance(content, str):
-        return content.strip()
-
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str) and item.strip():
-                parts.append(item.strip())
-                continue
-            if isinstance(item, dict):
-                text = str(item.get("text") or "").strip()
-                if text:
-                    parts.append(text)
-        return "\n".join(parts).strip()
-
-    return str(content or "").strip()
-
 
 def _coerce_string_list(value: Any) -> list[str]:
     if isinstance(value, str):
@@ -675,12 +1111,18 @@ def planner_phase_node(state: WorkflowState) -> dict[str, Any]:
     )
     if not page_plan:
         raise RuntimeError("Planner agent failed to produce a page plan.")
-    page_plan = _enrich_page_plan_shell_contracts(page_plan)
 
     _, _, planner_json_path, _ = get_output_paths(paper_folder_name)
     save_page_plan(planner_json_path, page_plan)
     print(f"[Planner] Saved page plan to {planner_json_path}")
-    return {"page_plan": page_plan, "approved_page_plan": None}
+    return {
+        "page_plan": page_plan,
+        "approved_page_plan": None,
+        "shell_binding_review": None,
+        "shell_manual_selection": None,
+        "layout_compose_session": None,
+        "layout_compose_update": None,
+    }
 
 
 def outline_review_node(state: WorkflowState) -> dict[str, Any]:
@@ -703,11 +1145,11 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
 
     structured_data = StructuredPaper.model_validate(state.get("structured_paper"))
     approved_page_plan = state.get("approved_page_plan") or state.get("page_plan")
-    page_plan = _enrich_page_plan_shell_contracts(PagePlan.model_validate(approved_page_plan))
+    page_plan = PagePlan.model_validate(approved_page_plan)
     previous_coder_artifact = normalize_coder_artifact(state.get("coder_artifact"))
 
     print("[Coder] Running coder agent...")
-    coder_artifact = run_coder_agent(
+    coder_artifact, visual_smoke_report, resolved_page_plan = run_coder_agent_with_diagnostics(
         paper_folder_name=paper_folder_name,
         structured_data=structured_data,
         page_plan=page_plan,
@@ -719,18 +1161,106 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
     if not coder_artifact:
         raise RuntimeError("Coder agent failed to build the final webpage.")
 
-    _, _, _, coder_json_path = get_output_paths(paper_folder_name)
+    effective_page_plan = resolved_page_plan or page_plan
+    _, _, planner_json_path, coder_json_path = get_output_paths(paper_folder_name)
+    save_page_plan(planner_json_path, effective_page_plan)
     save_coder_artifact(coder_json_path, coder_artifact)
     print(f"[Coder] Generated entry html at {coder_artifact.entry_html}")
+    updated_human_directives = _planner_recovery_feedback_from_visual_smoke(
+        state.get("human_directives"),
+        visual_smoke_report,
+    )
     return {
-        "page_plan": page_plan,
-        "approved_page_plan": page_plan,
+        "page_plan": effective_page_plan,
+        "approved_page_plan": effective_page_plan,
         "coder_artifact": coder_artifact,
+        "human_directives": updated_human_directives,
         "patch_error": "",
         "revision_plan": None,
         "targeted_replacement_plan": None,
         "patch_agent_output": "",
+        "shell_binding_review": None,
+        "shell_manual_selection": None,
+        "layout_compose_session": None,
+        "layout_compose_update": None,
+        "visual_smoke_report": visual_smoke_report,
     }
+
+
+def layout_compose_prepare_node(state: WorkflowState) -> dict[str, Any]:
+    paper_folder_name = str(state.get("paper_folder_name") or "").strip()
+    if not paper_folder_name:
+        raise ValueError("paper_folder_name is missing for layout compose preparation.")
+
+    approved_page_plan = state.get("approved_page_plan") or state.get("page_plan")
+    page_plan = PagePlan.model_validate(approved_page_plan)
+    structured_data = StructuredPaper.model_validate(state.get("structured_paper"))
+    compose_session = _build_layout_compose_session_for_plan(
+        page_plan=page_plan,
+        structured_data=structured_data,
+        paper_folder_name=paper_folder_name,
+    )
+    print("[LayoutCompose] Prepared layout compose session for manual review.")
+    return {
+        "page_plan": page_plan,
+        "approved_page_plan": page_plan,
+        "layout_compose_session": compose_session,
+        "layout_compose_update": None,
+        "shell_binding_review": None,
+        "shell_manual_selection": None,
+        "visual_smoke_report": None,
+    }
+
+
+def layout_compose_review_node(state: WorkflowState) -> dict[str, Any]:
+    session = normalize_layout_compose_session(state.get("layout_compose_session"))
+    if session is None:
+        raise ValueError("layout_compose_session is missing for manual review.")
+    return {
+        "layout_compose_session": session,
+        "review_stage": "layout_compose",
+    }
+
+
+def shell_resolver_phase_node(state: WorkflowState) -> dict[str, Any]:
+    paper_folder_name = str(state.get("paper_folder_name") or "").strip()
+    if not paper_folder_name:
+        raise ValueError("paper_folder_name is missing for shell resolver phase.")
+
+    approved_page_plan = state.get("approved_page_plan") or state.get("page_plan")
+    page_plan = PagePlan.model_validate(approved_page_plan)
+    manual_selection = normalize_shell_manual_selection(state.get("shell_manual_selection"))
+    if manual_selection is not None:
+        page_plan = _apply_shell_manual_selection_to_plan(page_plan, manual_selection)
+
+    resolved_page_plan, binding_review = _resolve_page_plan_shell_contracts(page_plan)
+    _, _, planner_json_path, _ = get_output_paths(paper_folder_name)
+    save_page_plan(planner_json_path, resolved_page_plan)
+    if binding_review is not None:
+        print(
+            "[ShellResolver] Human review required for "
+            f"block '{binding_review.block_id}' in template {binding_review.template_entry_html}"
+        )
+        return {
+            "page_plan": resolved_page_plan,
+            "approved_page_plan": resolved_page_plan,
+            "shell_binding_review": binding_review,
+            "shell_manual_selection": None,
+            "visual_smoke_report": None,
+        }
+
+    print("[ShellResolver] All blocks resolved to template shells.")
+    return {
+        "page_plan": resolved_page_plan,
+        "approved_page_plan": resolved_page_plan,
+        "shell_binding_review": None,
+        "shell_manual_selection": None,
+        "visual_smoke_report": None,
+    }
+
+
+def binding_review_node(_: WorkflowState) -> dict[str, Any]:
+    return {"review_stage": "binding"}
 
 
 def webpage_review_node(_: WorkflowState) -> dict[str, Any]:
@@ -744,9 +1274,18 @@ def human_review_router(state: WorkflowState) -> str:
 
 
 def outline_review_router(state: WorkflowState) -> str:
-    if bool(state.get("is_outline_approved")):
-        return "coder"
-    return "planner"
+    if not bool(state.get("is_outline_approved")):
+        return "planner"
+    if _normalize_manual_layout_compose_enabled(state.get("manual_layout_compose_enabled")):
+        return "layout_compose_prepare"
+    return "coder"
+
+
+def draft_recovery_router(state: WorkflowState) -> str:
+    smoke_report = normalize_visual_smoke_report(state.get("visual_smoke_report"))
+    if smoke_report is not None and smoke_report.suggested_recovery == "rerun_planner":
+        return "planner"
+    return "webpage_review"
 
 
 def webpage_review_router(state: WorkflowState) -> str:
@@ -761,6 +1300,8 @@ def build_hitl_workflow():
     workflow.add_node("overview", overview_node)
     workflow.add_node("planner", planner_phase_node)
     workflow.add_node("outline_review", outline_review_node)
+    workflow.add_node("layout_compose_prepare", layout_compose_prepare_node)
+    workflow.add_node("layout_compose_review", layout_compose_review_node)
     workflow.add_node("webpage_review", webpage_review_node)
     workflow.add_node("translator", translator_node)
     workflow.add_node("patch_agent", patch_agent_node)
@@ -784,9 +1325,19 @@ def build_hitl_workflow():
         {
             "planner": "planner",
             "coder": "coder",
+            "layout_compose_prepare": "layout_compose_prepare",
         },
     )
-    workflow.add_edge("coder", "webpage_review")
+    workflow.add_edge("layout_compose_prepare", "layout_compose_review")
+    workflow.add_edge("layout_compose_review", "coder")
+    workflow.add_conditional_edges(
+        "coder",
+        draft_recovery_router,
+        {
+            "planner": "planner",
+            "webpage_review": "webpage_review",
+        },
+    )
     workflow.add_conditional_edges(
         "webpage_review",
         webpage_review_router,
@@ -800,7 +1351,7 @@ def build_hitl_workflow():
     workflow.add_edge("patch_executor", "webpage_review")
 
     memory = MemorySaver()
-    return workflow.compile(checkpointer=memory, interrupt_after=["overview", "outline_review", "webpage_review"])
+    return workflow.compile(checkpointer=memory, interrupt_after=["overview", "outline_review", "layout_compose_review", "webpage_review"])
 
 
 HITL_WORKFLOW = build_hitl_workflow()
@@ -873,13 +1424,18 @@ def run_langgraph_batch(
     if not page_plan:
         raise RuntimeError("Planner agent failed to produce a page plan.")
 
-    page_plan = _enrich_page_plan_shell_contracts(page_plan)
+    page_plan, binding_review = _resolve_page_plan_shell_contracts(page_plan)
+    if binding_review is not None:
+        raise RuntimeError(
+            "Template shell rebinding requires human review before coding: "
+            f"block={binding_review.block_id}, reason={binding_review.failure_reason}"
+        )
 
     save_page_plan(planner_json_path, page_plan)
     log(f"[Planner] Saved page plan to {planner_json_path}")
 
     log("[Coder] Running coder agent...")
-    coder_artifact = run_coder_agent(
+    coder_artifact, visual_smoke_report, resolved_page_plan = run_coder_agent_with_diagnostics(
         paper_folder_name=paper_folder_name,
         structured_data=structured_data,
         page_plan=page_plan,
@@ -890,8 +1446,16 @@ def run_langgraph_batch(
     if not coder_artifact:
         raise RuntimeError("Coder agent failed to build the final webpage.")
 
+    if resolved_page_plan is not None:
+        page_plan = resolved_page_plan
+        save_page_plan(planner_json_path, page_plan)
     save_coder_artifact(coder_json_path, coder_artifact)
     log(f"[Coder] Generated entry html at {coder_artifact.entry_html}")
+    smoke_feedback = _visual_smoke_feedback_text(visual_smoke_report)
+    if smoke_feedback:
+        log(smoke_feedback)
+    if visual_smoke_report and visual_smoke_report.suggested_recovery == "rerun_planner":
+        log("[Planner] Visual smoke recommends rerunning planner before accepting this batch draft.")
     log("[Done] Generation completed successfully.")
     return coder_artifact
 
@@ -942,21 +1506,15 @@ def find_templates(
             search_state,
             None,
             "\n".join(log_lines),
-            preview_image_path,
-            gr.update(interactive=False),
-            gr.update(interactive=False),
+            _visible_preview_update(preview_image_path),
             gr.update(interactive=False),
             "",
             "",
             *_review_accordion_updates("webpage"),
             "",
-            None,
             "",
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            "",
+            *_stage_action_updates("none"),
+            *_layout_compose_ui_hidden(),
         )
     except Exception as exc:
         log_lines.append(f"[Error] {exc}")
@@ -967,19 +1525,13 @@ def find_templates(
             "\n".join(log_lines),
             None,
             gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
             "",
             "",
             *_review_accordion_updates("webpage"),
             "",
-            None,
             "",
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            "",
+            *_stage_action_updates("none"),
+            *_layout_compose_ui_hidden(),
         )
 
 
@@ -992,23 +1544,17 @@ def preview_selected_template(
     candidate = resolve_selected_candidate(selected_label, search_state)
     if not candidate:
         return (
-            None,
+            _visible_preview_update(None),
             None,
             current_logs,
-            gr.update(interactive=False),
-            gr.update(interactive=False),
             gr.update(interactive=False),
             "",
             "",
             *_review_accordion_updates("webpage"),
             "",
-            None,
             "",
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            "",
+            *_stage_action_updates("none"),
+            *_layout_compose_ui_hidden(),
         )
 
     try:
@@ -1027,44 +1573,32 @@ def preview_selected_template(
             ],
         )
         return (
-            preview_image_path,
+            _visible_preview_update(preview_image_path),
             candidate,
             updated_logs,
             gr.update(interactive=True),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
             "",
             "",
             *_review_accordion_updates("webpage"),
             "",
-            None,
             "",
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            "",
+            *_stage_action_updates("none"),
+            *_layout_compose_ui_hidden(),
         )
     except Exception as exc:
         updated_logs = append_log_lines(current_logs, [f"[Error] Failed to render template preview: {exc}"])
         return (
-            current_preview_path,
+            _visible_preview_update(current_preview_path),
             None,
             updated_logs,
-            gr.update(interactive=False),
-            gr.update(interactive=False),
             gr.update(interactive=False),
             "",
             "",
             *_review_accordion_updates("webpage"),
             "",
-            None,
             "",
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            "",
+            *_stage_action_updates("none"),
+            *_layout_compose_ui_hidden(),
         )
 
 
@@ -1128,6 +1662,7 @@ def run_extraction(
             "paper_folder_name": paper_folder_name,
             "user_constraints": user_constraints,
             "generation_constraints": generation_constraints,
+            "manual_layout_compose_enabled": False,
             "human_directives": empty_human_feedback(),
             "coder_instructions": "",
             "patch_agent_output": "",
@@ -1144,6 +1679,11 @@ def run_extraction(
             "page_plan": None,
             "approved_page_plan": None,
             "coder_artifact": None,
+            "shell_binding_review": None,
+            "shell_manual_selection": None,
+            "layout_compose_session": None,
+            "layout_compose_update": None,
+            "visual_smoke_report": None,
         }
 
         log("[Reader] Running workflow until the extraction review checkpoint...")
@@ -1160,16 +1700,10 @@ def run_extraction(
             paper_overview,
             "",
             *_review_accordion_updates("overview"),
-            "",
-            None,
-            gr.update(interactive=True),
-            gr.update(interactive=True),
             thread_id,
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
             "",
+            *_stage_action_updates("overview"),
+            *_layout_compose_ui_hidden(),
         )
     except Exception as exc:
         log(f"[Error] {exc}")
@@ -1179,15 +1713,8 @@ def run_extraction(
             "",
             *_review_accordion_updates("webpage"),
             "",
-            None,
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            "",
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            "",
+            *_stage_action_updates("none"),
+            *_layout_compose_ui_hidden(),
         )
 
 
@@ -1237,6 +1764,11 @@ def revise_extraction(
                 "targeted_replacement_plan": None,
                 "patch_error": "",
                 "is_approved": False,
+                "shell_binding_review": None,
+                "shell_manual_selection": None,
+                "layout_compose_session": None,
+                "layout_compose_update": None,
+                "visual_smoke_report": None,
             },
             as_node="overview",
         )
@@ -1255,8 +1787,8 @@ def revise_extraction(
             paper_overview,
             "",
             *_review_accordion_updates("overview"),
-            "",
-            None,
+            *_stage_action_updates("overview"),
+            *_layout_compose_ui_hidden(),
         )
     except Exception as exc:
         log(f"[Error] {exc}")
@@ -1265,8 +1797,8 @@ def revise_extraction(
             current_overview,
             current_outline_overview,
             *_review_accordion_updates("overview"),
-            feedback_text,
-            feedback_images,
+            *_stage_action_updates("overview", feedback_text_value=feedback_text),
+            *_layout_compose_ui_hidden(),
         )
 
 
@@ -1309,6 +1841,11 @@ def approve_extraction_and_plan_outline(
                 "is_approved": True,
                 "is_outline_approved": False,
                 "is_webpage_approved": False,
+                "shell_binding_review": None,
+                "shell_manual_selection": None,
+                "layout_compose_session": None,
+                "layout_compose_update": None,
+                "visual_smoke_report": None,
             },
             as_node="overview",
         )
@@ -1328,6 +1865,9 @@ def approve_extraction_and_plan_outline(
                 structured_data.model_dump(),
             )
         paper_overview = str(paused_values.get("paper_overview") or "").strip() or current_overview
+        manual_layout_compose_enabled = _normalize_manual_layout_compose_enabled(
+            paused_values.get("manual_layout_compose_enabled")
+        )
         log("[Outline] Planner outline ready. Review the planned webpage sections, revise them if needed, or approve the outline to generate the first draft.")
         return (
             "\n".join(run_log_lines),
@@ -1335,14 +1875,11 @@ def approve_extraction_and_plan_outline(
             outline_overview,
             *_review_accordion_updates("outline"),
             "",
-            None,
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=True),
-            gr.update(interactive=True),
-            gr.update(interactive=True),
-            gr.update(interactive=True),
-            "",
+            *_stage_action_updates(
+                "outline",
+                manual_layout_compose_enabled=manual_layout_compose_enabled,
+            ),
+            *_layout_compose_ui_hidden(),
         )
     except Exception as exc:
         log(f"[Error] {exc}")
@@ -1352,14 +1889,8 @@ def approve_extraction_and_plan_outline(
             current_outline_overview,
             *_review_accordion_updates("overview"),
             "",
-            None,
-            gr.update(interactive=True),
-            gr.update(interactive=True),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            "",
+            *_stage_action_updates("overview"),
+            *_layout_compose_ui_hidden(),
         )
 
 
@@ -1400,6 +1931,11 @@ def revise_outline(
                 "human_directives": feedback_payload,
                 "is_outline_approved": False,
                 "approved_page_plan": None,
+                "shell_binding_review": None,
+                "shell_manual_selection": None,
+                "layout_compose_session": None,
+                "layout_compose_update": None,
+                "visual_smoke_report": None,
             },
             as_node="outline_review",
         )
@@ -1416,13 +1952,19 @@ def revise_outline(
                 page_plan.model_dump(),
                 structured_data.model_dump(),
             )
+        manual_layout_compose_enabled = _normalize_manual_layout_compose_enabled(
+            paused_values.get("manual_layout_compose_enabled")
+        )
         log("[Outline] Revised outline ready. Review the updated webpage structure or approve it to generate the first draft.")
         return (
             "\n".join(run_log_lines),
             outline_overview,
             *_review_accordion_updates("outline"),
-            "",
-            None,
+            *_stage_action_updates(
+                "outline",
+                manual_layout_compose_enabled=manual_layout_compose_enabled,
+            ),
+            *_layout_compose_ui_hidden(),
         )
     except Exception as exc:
         log(f"[Error] {exc}")
@@ -1430,8 +1972,11 @@ def revise_outline(
             "\n".join(run_log_lines),
             current_outline_overview,
             *_review_accordion_updates("outline"),
-            feedback_text,
-            feedback_images,
+            *_stage_action_updates(
+                "outline",
+                feedback_text_value=feedback_text,
+            ),
+            *_layout_compose_ui_hidden(),
         )
 
 
@@ -1439,6 +1984,7 @@ def approve_outline_and_generate_draft(
     workflow_thread_id: str,
     current_logs: str,
     current_outline_overview: str,
+    manual_layout_compose_enabled: bool,
     current_preview: str | None,
     current_html_path: str,
 ) -> tuple[Any, ...]:
@@ -1460,6 +2006,7 @@ def approve_outline_and_generate_draft(
             raise ValueError("The first draft can only be generated from the outline review stage.")
 
         approved_page_plan = PagePlan.model_validate(snapshot_values.get("page_plan"))
+        manual_layout_compose_enabled = _normalize_manual_layout_compose_enabled(manual_layout_compose_enabled)
         HITL_WORKFLOW.update_state(
             config,
             {
@@ -1470,31 +2017,92 @@ def approve_outline_and_generate_draft(
                 "targeted_replacement_plan": None,
                 "patch_error": "",
                 "approved_page_plan": approved_page_plan,
+                "manual_layout_compose_enabled": manual_layout_compose_enabled,
                 "is_outline_approved": True,
                 "is_webpage_approved": False,
+                "shell_binding_review": None,
+                "shell_manual_selection": None,
+                "layout_compose_session": None,
+                "layout_compose_update": None,
+                "visual_smoke_report": None,
             },
             as_node="outline_review",
         )
 
-        log("[Coder] Outline approved. Generating the first webpage draft...")
+        if manual_layout_compose_enabled:
+            log("[LayoutCompose] Outline approved. Preparing the optional manual layout compose stage before draft generation...")
+        else:
+            log("[Coder] Outline approved. Skipping manual layout compose and generating the first draft directly...")
         HITL_WORKFLOW.invoke(None, config=config)
         paused_state = HITL_WORKFLOW.get_state(config)
         paused_values = dict(paused_state.values or {})
+        review_stage = str(paused_values.get("review_stage") or "").strip().lower()
+
+        if review_stage == "layout_compose":
+            compose_session = normalize_layout_compose_session(paused_values.get("layout_compose_session"))
+            if compose_session is None:
+                raise RuntimeError("Layout compose stage is active but no compose session payload was found.")
+            log("[LayoutCompose] Manual layout compose is ready. Choose sections, reorder blocks, select figures, then continue to the first draft.")
+            return (
+                "\n".join(run_log_lines),
+                current_outline_overview,
+                *_review_accordion_updates("webpage"),
+                _hidden_preview_update(),
+                "",
+                *_stage_action_updates("none"),
+                *_layout_compose_ui_active(compose_session),
+            )
+
+        smoke_report = normalize_visual_smoke_report(paused_values.get("visual_smoke_report"))
+        feedback_text = _visual_smoke_feedback_text(smoke_report)
+        if feedback_text:
+            log(feedback_text)
+
+        if review_stage == "outline":
+            outline_overview = str(paused_values.get("outline_overview") or "").strip()
+            if not outline_overview:
+                page_plan = PagePlan.model_validate(paused_values.get("page_plan"))
+                structured_data = StructuredPaper.model_validate(paused_values.get("structured_paper"))
+                outline_overview = format_page_plan_to_markdown(
+                    page_plan.model_dump(),
+                    structured_data.model_dump(),
+                )
+            restored_manual_layout_compose_enabled = _normalize_manual_layout_compose_enabled(
+                paused_values.get("manual_layout_compose_enabled")
+            )
+            log("[Planner] Visual smoke flagged a structural mismatch, so the workflow returned to outline planning instead of opening webpage patch review.")
+            return (
+                "\n".join(run_log_lines),
+                outline_overview,
+                *_review_accordion_updates("outline"),
+                _hidden_preview_update(),
+                "",
+                *_stage_action_updates(
+                    "outline",
+                    manual_layout_compose_enabled=restored_manual_layout_compose_enabled,
+                ),
+                *_layout_compose_ui_hidden(),
+            )
+
+        if review_stage != "webpage":
+            raise RuntimeError(
+                f"Workflow paused at unexpected stage '{review_stage or '(empty)'}' after outline approval."
+            )
+
         preview_image_path, entry_html_path = render_current_workflow_preview(paused_values)
         log(f"[Preview] Rendered webpage draft screenshot from {entry_html_path}")
-        log("[Webpage] First draft ready. Review the preview, then approve it or request a revision with text and screenshots.")
+        log("[Webpage] First draft ready. Review the preview, then approve it or request a revision.")
         return (
             "\n".join(run_log_lines),
             current_outline_overview,
             *_review_accordion_updates("webpage"),
-            preview_image_path,
+            _visible_preview_update(preview_image_path),
             entry_html_path,
-            "",
-            None,
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            gr.update(interactive=True),
-            gr.update(interactive=True),
+            *_stage_action_updates(
+                "webpage",
+                feedback_text_value=feedback_text,
+            ),
+            *_layout_compose_ui_hidden(),
         )
     except Exception as exc:
         log(f"[Error] {exc}")
@@ -1502,14 +2110,409 @@ def approve_outline_and_generate_draft(
             "\n".join(run_log_lines),
             current_outline_overview,
             *_review_accordion_updates("outline"),
-            current_preview,
+            _visible_preview_update(current_preview),
             str(current_html_path or ""),
+            *_stage_action_updates(
+                "outline",
+                manual_layout_compose_enabled=manual_layout_compose_enabled,
+            ),
+            *_layout_compose_ui_hidden(),
+        )
+
+
+def _require_layout_compose_snapshot(
+    workflow_thread_id: str,
+ ) -> tuple[dict[str, Any], dict[str, Any], LayoutComposeSession]:
+    thread_id = str(workflow_thread_id or "").strip()
+    if not thread_id:
+        raise ValueError("No paused workflow was found. Re-run outline approval before entering layout compose.")
+
+    config = {"configurable": {"thread_id": thread_id}}
+    snapshot = HITL_WORKFLOW.get_state(config)
+    snapshot_values = dict(snapshot.values or {})
+    if str(snapshot_values.get("review_stage") or "").strip().lower() != "layout_compose":
+        raise ValueError("Layout compose actions are only available during the layout compose review stage.")
+
+    compose_session = normalize_layout_compose_session(snapshot_values.get("layout_compose_session"))
+    if compose_session is None:
+        raise ValueError("No layout compose session payload was found for the current workflow state.")
+    return config, snapshot_values, compose_session
+
+
+def _persist_layout_compose_update(
+    config: dict[str, Any],
+    session: LayoutComposeSession,
+    update: LayoutComposeUpdate,
+) -> LayoutComposeSession:
+    updated_session = apply_layout_compose_update(session, update)
+    HITL_WORKFLOW.update_state(
+        config,
+        {
+            "layout_compose_session": updated_session,
+            "layout_compose_update": update,
+            "visual_smoke_report": None,
+        },
+        as_node="layout_compose_review",
+    )
+    return updated_session
+
+
+def select_layout_compose_block(
+    active_block_id: str | None,
+    workflow_thread_id: str,
+    current_logs: str,
+) -> tuple[Any, ...]:
+    run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
+
+    def log(message: str) -> None:
+        print(message)
+        run_log_lines.append(message)
+
+    try:
+        config, _, compose_session = _require_layout_compose_snapshot(workflow_thread_id)
+        target_block_id = str(active_block_id or "").strip()
+        if not target_block_id:
+            raise ValueError("Choose one block to edit in the layout compose panel.")
+
+        updated_session = _persist_layout_compose_update(
+            config,
+            compose_session,
+            LayoutComposeUpdate(
+                active_block_id=target_block_id,
+                action="select_block",
+            ),
+        )
+        log(f"[LayoutCompose] Active block switched to `{target_block_id}`.")
+        return ("\n".join(run_log_lines), *_layout_compose_ui_active(updated_session))
+    except Exception as exc:
+        log(f"[Error] {exc}")
+        try:
+            _, _, compose_session = _require_layout_compose_snapshot(workflow_thread_id)
+            compose_ui = _layout_compose_ui_active(compose_session)
+        except Exception:
+            compose_ui = _layout_compose_ui_hidden()
+        return ("\n".join(run_log_lines), *compose_ui)
+
+
+def save_layout_compose_block(
+    active_block_id: str | None,
+    selected_selector_hint: str | None,
+    selected_figure_paths: list[str] | None,
+    workflow_thread_id: str,
+    current_logs: str,
+) -> tuple[Any, ...]:
+    run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
+
+    def log(message: str) -> None:
+        print(message)
+        run_log_lines.append(message)
+
+    try:
+        config, _, compose_session = _require_layout_compose_snapshot(workflow_thread_id)
+        target_block_id = str(active_block_id or compose_session.active_block_id or "").strip()
+        if not target_block_id:
+            raise ValueError("No active block is selected for layout compose.")
+
+        updated_session = _persist_layout_compose_update(
+            config,
+            compose_session,
+            LayoutComposeUpdate(
+                active_block_id=target_block_id,
+                selected_selector_hint=selected_selector_hint,
+                selected_figure_paths=list(selected_figure_paths or []),
+                action="save_block",
+            ),
+        )
+        log(f"[LayoutCompose] Saved block `{target_block_id}`.")
+        return ("\n".join(run_log_lines), *_layout_compose_ui_active(updated_session))
+    except Exception as exc:
+        log(f"[Error] {exc}")
+        try:
+            _, _, compose_session = _require_layout_compose_snapshot(workflow_thread_id)
+            compose_ui = _layout_compose_ui_active(compose_session)
+        except Exception:
+            compose_ui = _layout_compose_ui_hidden()
+        return ("\n".join(run_log_lines), *compose_ui)
+
+
+def _move_layout_compose_block(
+    order_action: str,
+    active_block_id: str | None,
+    selected_selector_hint: str | None,
+    selected_figure_paths: list[str] | None,
+    workflow_thread_id: str,
+    current_logs: str,
+) -> tuple[Any, ...]:
+    run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
+
+    def log(message: str) -> None:
+        print(message)
+        run_log_lines.append(message)
+
+    try:
+        config, _, compose_session = _require_layout_compose_snapshot(workflow_thread_id)
+        target_block_id = str(active_block_id or compose_session.active_block_id or "").strip()
+        if not target_block_id:
+            raise ValueError("No active block is selected for layout compose.")
+
+        updated_session = _persist_layout_compose_update(
+            config,
+            compose_session,
+            LayoutComposeUpdate(
+                active_block_id=target_block_id,
+                selected_selector_hint=selected_selector_hint,
+                selected_figure_paths=list(selected_figure_paths or []),
+                order_action=order_action,  # type: ignore[arg-type]
+                action=order_action,
+            ),
+        )
+        log(f"[LayoutCompose] `{target_block_id}` moved {order_action.replace('_', ' ')}.")
+        return ("\n".join(run_log_lines), *_layout_compose_ui_active(updated_session))
+    except Exception as exc:
+        log(f"[Error] {exc}")
+        try:
+            _, _, compose_session = _require_layout_compose_snapshot(workflow_thread_id)
+            compose_ui = _layout_compose_ui_active(compose_session)
+        except Exception:
+            compose_ui = _layout_compose_ui_hidden()
+        return ("\n".join(run_log_lines), *compose_ui)
+
+
+def move_layout_compose_block_up(
+    active_block_id: str | None,
+    selected_selector_hint: str | None,
+    selected_figure_paths: list[str] | None,
+    workflow_thread_id: str,
+    current_logs: str,
+) -> tuple[Any, ...]:
+    return _move_layout_compose_block(
+        "move_up",
+        active_block_id,
+        selected_selector_hint,
+        selected_figure_paths,
+        workflow_thread_id,
+        current_logs,
+    )
+
+
+def move_layout_compose_block_down(
+    active_block_id: str | None,
+    selected_selector_hint: str | None,
+    selected_figure_paths: list[str] | None,
+    workflow_thread_id: str,
+    current_logs: str,
+) -> tuple[Any, ...]:
+    return _move_layout_compose_block(
+        "move_down",
+        active_block_id,
+        selected_selector_hint,
+        selected_figure_paths,
+        workflow_thread_id,
+        current_logs,
+    )
+
+
+def continue_layout_compose_to_draft(
+    active_block_id: str | None,
+    selected_selector_hint: str | None,
+    selected_figure_paths: list[str] | None,
+    workflow_thread_id: str,
+    current_logs: str,
+    current_outline_overview: str,
+    current_preview: str | None,
+    current_html_path: str,
+) -> tuple[Any, ...]:
+    run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
+
+    def log(message: str) -> None:
+        print(message)
+        run_log_lines.append(message)
+
+    try:
+        config, snapshot_values, compose_session = _require_layout_compose_snapshot(workflow_thread_id)
+        target_block_id = str(active_block_id or compose_session.active_block_id or "").strip()
+        if not target_block_id:
+            raise ValueError("No active block is selected for layout compose.")
+
+        update = LayoutComposeUpdate(
+            active_block_id=target_block_id,
+            selected_selector_hint=selected_selector_hint,
+            selected_figure_paths=list(selected_figure_paths or []),
+            action="continue_to_draft",
+        )
+        updated_session = _persist_layout_compose_update(config, compose_session, update)
+        if updated_session.validation_errors:
+            log("[LayoutCompose] Resolve the compose validation errors before continuing to the first draft.")
+            return (
+                "\n".join(run_log_lines),
+                current_outline_overview,
+                *_review_accordion_updates("webpage"),
+                _hidden_preview_update(),
+                "",
+                *_stage_action_updates("none"),
+                *_layout_compose_ui_active(updated_session),
+            )
+
+        approved_page_plan = PagePlan.model_validate(snapshot_values.get("approved_page_plan") or snapshot_values.get("page_plan"))
+        template_entry_path = _get_template_entry_path(approved_page_plan)
+        composed_page_plan = apply_layout_compose_session_to_page_plan(
+            approved_page_plan,
+            updated_session,
+            read_text_with_fallback(template_entry_path),
+        )
+        paper_folder_name = str(snapshot_values.get("paper_folder_name") or "").strip()
+        if not paper_folder_name:
+            raise ValueError("The paused workflow state is missing paper metadata. Re-run outline approval.")
+        _, _, planner_json_path, _ = get_output_paths(paper_folder_name)
+        save_page_plan(planner_json_path, composed_page_plan)
+        HITL_WORKFLOW.update_state(
+            config,
+            {
+                "page_plan": composed_page_plan,
+                "approved_page_plan": composed_page_plan,
+                "layout_compose_session": updated_session,
+                "layout_compose_update": update,
+                "visual_smoke_report": None,
+            },
+            as_node="layout_compose_review",
+        )
+
+        log("[Coder] Layout compose confirmed. Generating the first draft...")
+        HITL_WORKFLOW.invoke(None, config=config)
+        paused_state = HITL_WORKFLOW.get_state(config)
+        paused_values = dict(paused_state.values or {})
+        review_stage = str(paused_values.get("review_stage") or "").strip().lower()
+        smoke_report = normalize_visual_smoke_report(paused_values.get("visual_smoke_report"))
+        feedback_text = _visual_smoke_feedback_text(smoke_report)
+        if feedback_text:
+            log(feedback_text)
+
+        if review_stage == "outline":
+            outline_overview = str(paused_values.get("outline_overview") or "").strip()
+            if not outline_overview:
+                page_plan = PagePlan.model_validate(paused_values.get("page_plan"))
+                structured_data = StructuredPaper.model_validate(paused_values.get("structured_paper"))
+                outline_overview = format_page_plan_to_markdown(
+                    page_plan.model_dump(),
+                    structured_data.model_dump(),
+                )
+            manual_layout_compose_enabled = _normalize_manual_layout_compose_enabled(
+                paused_values.get("manual_layout_compose_enabled")
+            )
+            log("[Planner] Visual smoke flagged a structural mismatch, so the workflow returned to outline planning instead of opening webpage patch review.")
+            return (
+                "\n".join(run_log_lines),
+                outline_overview,
+                *_review_accordion_updates("outline"),
+                _hidden_preview_update(),
+                "",
+                *_stage_action_updates(
+                    "outline",
+                    manual_layout_compose_enabled=manual_layout_compose_enabled,
+                ),
+                *_layout_compose_ui_hidden(),
+            )
+
+        if review_stage != "webpage":
+            raise RuntimeError(
+                f"Workflow paused at unexpected stage '{review_stage or '(empty)'}' after layout compose."
+            )
+
+        preview_image_path, entry_html_path = render_current_workflow_preview(paused_values)
+        log(f"[Preview] Rendered webpage draft screenshot from {entry_html_path}")
+        log("[Webpage] First draft ready. Review the preview, then approve it or request a revision.")
+        return (
+            "\n".join(run_log_lines),
+            current_outline_overview,
+            *_review_accordion_updates("webpage"),
+            _visible_preview_update(preview_image_path),
+            entry_html_path,
+            *_stage_action_updates(
+                "webpage",
+                feedback_text_value=feedback_text,
+            ),
+            *_layout_compose_ui_hidden(),
+        )
+    except Exception as exc:
+        log(f"[Error] {exc}")
+        try:
+            _, _, compose_session = _require_layout_compose_snapshot(workflow_thread_id)
+            compose_ui = _layout_compose_ui_active(compose_session)
+        except Exception:
+            compose_ui = _layout_compose_ui_hidden()
+        return (
+            "\n".join(run_log_lines),
+            current_outline_overview,
+            *_review_accordion_updates("webpage"),
+            _hidden_preview_update(),
+            str(current_html_path or ""),
+            *_stage_action_updates("none"),
+            *compose_ui,
+        )
+
+
+def return_to_outline_review_from_layout_compose(
+    workflow_thread_id: str,
+    current_logs: str,
+    current_outline_overview: str,
+    current_preview: str | None,
+    current_html_path: str,
+) -> tuple[Any, ...]:
+    run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
+
+    def log(message: str) -> None:
+        print(message)
+        run_log_lines.append(message)
+
+    try:
+        config, _, _ = _require_layout_compose_snapshot(workflow_thread_id)
+        HITL_WORKFLOW.update_state(
+            config,
+            {
+                "approved_page_plan": None,
+                "is_outline_approved": False,
+                "layout_compose_session": None,
+                "layout_compose_update": None,
+                "shell_binding_review": None,
+                "shell_manual_selection": None,
+                "visual_smoke_report": None,
+                "review_stage": "outline",
+            },
+            as_node="outline_review",
+        )
+        updated_state = HITL_WORKFLOW.get_state(config)
+        updated_values = dict(updated_state.values or {})
+        manual_layout_compose_enabled = _normalize_manual_layout_compose_enabled(
+            updated_values.get("manual_layout_compose_enabled")
+        )
+        log("[LayoutCompose] Returned to outline review. Revise the outline if needed, then approve it again to rebuild compose suggestions.")
+        return (
+            "\n".join(run_log_lines),
+            current_outline_overview,
+            *_review_accordion_updates("outline"),
+            _visible_preview_update(current_preview),
             "",
-            None,
-            gr.update(interactive=True),
-            gr.update(interactive=True),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
+            *_stage_action_updates(
+                "outline",
+                manual_layout_compose_enabled=manual_layout_compose_enabled,
+            ),
+            *_layout_compose_ui_hidden(),
+        )
+    except Exception as exc:
+        log(f"[Error] {exc}")
+        try:
+            _, _, compose_session = _require_layout_compose_snapshot(workflow_thread_id)
+            compose_ui = _layout_compose_ui_active(compose_session)
+        except Exception:
+            compose_ui = _layout_compose_ui_hidden()
+        return (
+            "\n".join(run_log_lines),
+            current_outline_overview,
+            *_review_accordion_updates("webpage"),
+            _hidden_preview_update(),
+            str(current_html_path or ""),
+            *_stage_action_updates("none"),
+            *compose_ui,
         )
 
 
@@ -1558,6 +2561,7 @@ def request_webpage_revision(
                 "targeted_replacement_plan": None,
                 "patch_error": "",
                 "is_webpage_approved": False,
+                "visual_smoke_report": None,
             },
             as_node="webpage_review",
         )
@@ -1602,24 +2606,24 @@ def request_webpage_revision(
         return (
             "\n".join(run_log_lines),
             *_review_accordion_updates("webpage"),
-            preview_image_path,
-            "",
-            None,
+            _visible_preview_update(preview_image_path),
             entry_html_path,
-            gr.update(interactive=True),
-            gr.update(interactive=True),
+            *_stage_action_updates("webpage"),
+            *_layout_compose_ui_hidden(),
         )
     except Exception as exc:
         log(f"[Error] {exc}")
         return (
             "\n".join(run_log_lines),
             *_review_accordion_updates("webpage"),
-            current_preview,
-            feedback_text,
-            feedback_images,
+            _visible_preview_update(current_preview),
             str(current_html_path or ""),
-            gr.update(interactive=True),
-            gr.update(interactive=True),
+            *_stage_action_updates(
+                "webpage",
+                feedback_text_value=feedback_text,
+                feedback_images_value=feedback_images,
+            ),
+            *_layout_compose_ui_hidden(),
         )
 
 
@@ -1656,6 +2660,7 @@ def approve_webpage(
                 "targeted_replacement_plan": None,
                 "patch_error": "",
                 "is_webpage_approved": True,
+                "visual_smoke_report": None,
             },
             as_node="webpage_review",
         )
@@ -1666,24 +2671,20 @@ def approve_webpage(
         return (
             "\n".join(run_log_lines),
             *_review_accordion_updates("webpage"),
-            current_preview,
+            _visible_preview_update(current_preview),
             str(current_html_path or ""),
-            gr.update(interactive=False),
-            gr.update(interactive=False),
-            "",
-            None,
+            *_stage_action_updates("none"),
+            *_layout_compose_ui_hidden(),
         )
     except Exception as exc:
         log(f"[Error] {exc}")
         return (
             "\n".join(run_log_lines),
             *_review_accordion_updates("webpage"),
-            current_preview,
+            _visible_preview_update(current_preview),
             str(current_html_path or ""),
-            gr.update(interactive=True),
-            gr.update(interactive=True),
-            "",
-            None,
+            *_stage_action_updates("webpage"),
+            *_layout_compose_ui_hidden(),
         )
 
 
@@ -1809,60 +2810,71 @@ def build_app() -> gr.Blocks:
                     outline_markdown = gr.Markdown(
                         value="Approve the Reader extraction to generate a reviewable webpage outline."
                     )
-                feedback_text = gr.Textbox(
-                    label="Human Feedback",
-                    placeholder=(
-                        "During extraction review: fix missing or incorrect source material. "
-                        "During outline review: add, remove, merge, split, rename, or reorder sections. "
-                        "During webpage review: describe the visual issue and attach screenshots below."
-                    ),
-                    lines=4,
-                    value="",
-                )
-                feedback_images = gr.File(
-                    label="Reference Screenshots (Optional)",
-                    file_count="multiple",
-                    file_types=["image"],
-                    type="filepath",
-                    value=None,
-                )
-                revise_button = gr.Button(
-                    "Revise Extraction",
-                    variant="secondary",
-                    interactive=False,
-                )
-                approve_button = gr.Button(
-                    "Approve Extraction & Plan Outline",
-                    variant="primary",
-                    interactive=False,
-                )
-                revise_outline_button = gr.Button(
-                    "Revise Outline",
-                    variant="secondary",
-                    interactive=False,
-                )
-                approve_outline_button = gr.Button(
-                    "Approve Outline & Generate First Draft",
-                    variant="primary",
-                    interactive=False,
-                )
-                request_revision_button = gr.Button(
-                    "Request Webpage Revision",
-                    variant="secondary",
-                    interactive=False,
-                )
-                approve_webpage_button = gr.Button(
-                    "Approve Final Webpage",
-                    variant="primary",
-                    interactive=False,
-                )
+                with gr.Group(visible=False) as stage_actions_group:
+                    gr.Markdown("### Current Stage Actions")
+                    feedback_text = gr.Textbox(
+                        label="Human Feedback",
+                        lines=4,
+                        value="",
+                        visible=False,
+                    )
+                    manual_layout_compose_checkbox = gr.Checkbox(
+                        label="Enable Manual Layout Compose",
+                        value=False,
+                        visible=False,
+                    )
+                    feedback_images = gr.File(
+                        label="Reference Screenshots (Optional)",
+                        file_count="multiple",
+                        file_types=["image"],
+                        type="filepath",
+                        value=None,
+                        visible=False,
+                    )
+                    revise_button = gr.Button(
+                        "Revise Extraction",
+                        variant="secondary",
+                        interactive=False,
+                        visible=False,
+                    )
+                    approve_button = gr.Button(
+                        "Approve Extraction & Plan Outline",
+                        variant="primary",
+                        interactive=False,
+                        visible=False,
+                    )
+                    revise_outline_button = gr.Button(
+                        "Revise Outline",
+                        variant="secondary",
+                        interactive=False,
+                        visible=False,
+                    )
+                    approve_outline_button = gr.Button(
+                        "Approve Outline & Generate First Draft",
+                        variant="primary",
+                        interactive=False,
+                        visible=False,
+                    )
+                    request_revision_button = gr.Button(
+                        "Request Webpage Revision",
+                        variant="secondary",
+                        interactive=False,
+                        visible=False,
+                    )
+                    approve_webpage_button = gr.Button(
+                        "Approve Final Webpage",
+                        variant="primary",
+                        interactive=False,
+                        visible=False,
+                    )
                 system_logs = gr.Textbox(
                     label="System Logs",
                     value=(
                         "Choose constraints, click Find Templates, preview a candidate, then run Step 1 to extract "
                         "a reviewable source pack. Use Human Feedback plus Revise Extraction until satisfied, then "
                         "approve the extraction to plan the webpage outline. Revise the outline until it matches the "
-                        "sections you want on the final page, then generate the first draft. After that, attach "
+                        "sections you want on the final page, optionally enable Layout Compose before generating the "
+                        "first draft, then attach "
                         "screenshots and request webpage revisions through the Translator loop until the draft is ready to approve."
                     ),
                     lines=24,
@@ -1878,6 +2890,123 @@ def build_app() -> gr.Blocks:
                     label="Live Webpage Preview",
                     elem_id="paperalchemy-preview",
                 )
+                with gr.Row():
+                    with gr.Column(scale=1, min_width=280):
+                        layout_compose_blocks_markdown = gr.Markdown(
+                            value="",
+                            visible=False,
+                        )
+                        layout_compose_block_radio = gr.Radio(
+                            choices=[],
+                            label="Active Block",
+                            interactive=False,
+                            visible=False,
+                        )
+                    with gr.Column(scale=1, min_width=360):
+                        layout_compose_template_image = gr.Image(
+                            value=None,
+                            type="filepath",
+                            interactive=False,
+                            label="Template Section Map",
+                            visible=False,
+                        )
+                    with gr.Column(scale=1, min_width=360):
+                        layout_compose_editor_markdown = gr.Markdown(
+                            value="",
+                            visible=False,
+                        )
+                        layout_compose_section_gallery = gr.Gallery(
+                            value=[],
+                            label="Top 6 Section Crops",
+                            visible=False,
+                            columns=2,
+                            height="auto",
+                        )
+                        layout_compose_section_radio = gr.Radio(
+                            choices=[],
+                            label="All Compatible Sections",
+                            interactive=False,
+                            visible=False,
+                        )
+                        layout_compose_figure_gallery = gr.Gallery(
+                            value=[],
+                            label="Related Paper Figures",
+                            visible=False,
+                            columns=2,
+                            height="auto",
+                        )
+                        layout_compose_figure_checkbox = gr.CheckboxGroup(
+                            choices=[],
+                            label="Selected Figures",
+                            interactive=False,
+                            visible=False,
+                        )
+                        layout_compose_validation_markdown = gr.Markdown(
+                            value="",
+                            visible=False,
+                        )
+                        with gr.Row():
+                            layout_compose_move_up_button = gr.Button(
+                                "Move Up",
+                                variant="secondary",
+                                interactive=False,
+                                visible=False,
+                            )
+                            layout_compose_move_down_button = gr.Button(
+                                "Move Down",
+                                variant="secondary",
+                                interactive=False,
+                                visible=False,
+                            )
+                        with gr.Row():
+                            layout_compose_save_button = gr.Button(
+                                "Save Block",
+                                variant="secondary",
+                                interactive=False,
+                                visible=False,
+                            )
+                            layout_compose_continue_button = gr.Button(
+                                "Continue To Draft",
+                                variant="primary",
+                                interactive=False,
+                                visible=False,
+                            )
+                        layout_compose_return_button = gr.Button(
+                            "Return To Outline",
+                            variant="secondary",
+                            interactive=False,
+                            visible=False,
+                        )
+
+        stage_action_outputs = [
+            stage_actions_group,
+            feedback_text,
+            feedback_images,
+            manual_layout_compose_checkbox,
+            revise_button,
+            approve_button,
+            revise_outline_button,
+            approve_outline_button,
+            request_revision_button,
+            approve_webpage_button,
+        ]
+
+        compose_outputs = [
+            layout_compose_blocks_markdown,
+            layout_compose_block_radio,
+            layout_compose_template_image,
+            layout_compose_editor_markdown,
+            layout_compose_section_gallery,
+            layout_compose_section_radio,
+            layout_compose_figure_gallery,
+            layout_compose_figure_checkbox,
+            layout_compose_validation_markdown,
+            layout_compose_move_up_button,
+            layout_compose_move_down_button,
+            layout_compose_save_button,
+            layout_compose_continue_button,
+            layout_compose_return_button,
+        ]
 
         find_templates_button.click(
             fn=find_templates,
@@ -1889,20 +3018,14 @@ def build_app() -> gr.Blocks:
                 system_logs,
                 preview_image,
                 step1_button,
-                revise_button,
-                approve_button,
                 paper_markdown,
                 outline_markdown,
                 paper_review_accordion,
                 outline_review_accordion,
-                feedback_text,
-                feedback_images,
                 workflow_thread_state,
-                revise_outline_button,
-                approve_outline_button,
-                request_revision_button,
-                approve_webpage_button,
                 current_render_html_state,
+                *stage_action_outputs,
+                *compose_outputs,
             ],
             api_name="find_templates",
         )
@@ -1915,20 +3038,14 @@ def build_app() -> gr.Blocks:
                 selected_candidate_state,
                 system_logs,
                 step1_button,
-                revise_button,
-                approve_button,
                 paper_markdown,
                 outline_markdown,
                 paper_review_accordion,
                 outline_review_accordion,
-                feedback_text,
-                feedback_images,
                 workflow_thread_state,
-                revise_outline_button,
-                approve_outline_button,
-                request_revision_button,
-                approve_webpage_button,
                 current_render_html_state,
+                *stage_action_outputs,
+                *compose_outputs,
             ],
             api_name="preview_template",
         )
@@ -1942,16 +3059,10 @@ def build_app() -> gr.Blocks:
                 outline_markdown,
                 paper_review_accordion,
                 outline_review_accordion,
-                feedback_text,
-                feedback_images,
-                revise_button,
-                approve_button,
                 workflow_thread_state,
-                revise_outline_button,
-                approve_outline_button,
-                request_revision_button,
-                approve_webpage_button,
                 current_render_html_state,
+                *stage_action_outputs,
+                *compose_outputs,
             ],
             api_name="extract_and_review",
         )
@@ -1965,8 +3076,8 @@ def build_app() -> gr.Blocks:
                 outline_markdown,
                 paper_review_accordion,
                 outline_review_accordion,
-                feedback_text,
-                feedback_images,
+                *stage_action_outputs,
+                *compose_outputs,
             ],
             api_name="revise_extraction",
         )
@@ -1980,15 +3091,9 @@ def build_app() -> gr.Blocks:
                 outline_markdown,
                 paper_review_accordion,
                 outline_review_accordion,
-                feedback_text,
-                feedback_images,
-                revise_button,
-                approve_button,
-                revise_outline_button,
-                approve_outline_button,
-                request_revision_button,
-                approve_webpage_button,
                 current_render_html_state,
+                *stage_action_outputs,
+                *compose_outputs,
             ],
             api_name="approve_extraction_and_plan_outline",
         )
@@ -2001,15 +3106,22 @@ def build_app() -> gr.Blocks:
                 outline_markdown,
                 paper_review_accordion,
                 outline_review_accordion,
-                feedback_text,
-                feedback_images,
+                *stage_action_outputs,
+                *compose_outputs,
             ],
             api_name="revise_outline",
         )
 
         approve_outline_button.click(
             fn=approve_outline_and_generate_draft,
-            inputs=[workflow_thread_state, system_logs, outline_markdown, preview_image, current_render_html_state],
+            inputs=[
+                workflow_thread_state,
+                system_logs,
+                outline_markdown,
+                manual_layout_compose_checkbox,
+                preview_image,
+                current_render_html_state,
+            ],
             outputs=[
                 system_logs,
                 outline_markdown,
@@ -2017,14 +3129,119 @@ def build_app() -> gr.Blocks:
                 outline_review_accordion,
                 preview_image,
                 current_render_html_state,
-                feedback_text,
-                feedback_images,
-                revise_outline_button,
-                approve_outline_button,
-                request_revision_button,
-                approve_webpage_button,
+                *stage_action_outputs,
+                *compose_outputs,
             ],
             api_name="approve_outline_and_generate_draft",
+        )
+
+        layout_compose_block_radio.change(
+            fn=select_layout_compose_block,
+            inputs=[
+                layout_compose_block_radio,
+                workflow_thread_state,
+                system_logs,
+            ],
+            outputs=[
+                system_logs,
+                *compose_outputs,
+            ],
+            api_name="select_layout_compose_block",
+        )
+
+        layout_compose_save_button.click(
+            fn=save_layout_compose_block,
+            inputs=[
+                layout_compose_block_radio,
+                layout_compose_section_radio,
+                layout_compose_figure_checkbox,
+                workflow_thread_state,
+                system_logs,
+            ],
+            outputs=[
+                system_logs,
+                *compose_outputs,
+            ],
+            api_name="save_layout_compose_block",
+        )
+
+        layout_compose_move_up_button.click(
+            fn=move_layout_compose_block_up,
+            inputs=[
+                layout_compose_block_radio,
+                layout_compose_section_radio,
+                layout_compose_figure_checkbox,
+                workflow_thread_state,
+                system_logs,
+            ],
+            outputs=[
+                system_logs,
+                *compose_outputs,
+            ],
+            api_name="move_layout_compose_block_up",
+        )
+
+        layout_compose_move_down_button.click(
+            fn=move_layout_compose_block_down,
+            inputs=[
+                layout_compose_block_radio,
+                layout_compose_section_radio,
+                layout_compose_figure_checkbox,
+                workflow_thread_state,
+                system_logs,
+            ],
+            outputs=[
+                system_logs,
+                *compose_outputs,
+            ],
+            api_name="move_layout_compose_block_down",
+        )
+
+        layout_compose_continue_button.click(
+            fn=continue_layout_compose_to_draft,
+            inputs=[
+                layout_compose_block_radio,
+                layout_compose_section_radio,
+                layout_compose_figure_checkbox,
+                workflow_thread_state,
+                system_logs,
+                outline_markdown,
+                preview_image,
+                current_render_html_state,
+            ],
+            outputs=[
+                system_logs,
+                outline_markdown,
+                paper_review_accordion,
+                outline_review_accordion,
+                preview_image,
+                current_render_html_state,
+                *stage_action_outputs,
+                *compose_outputs,
+            ],
+            api_name="continue_layout_compose_to_draft",
+        )
+
+        layout_compose_return_button.click(
+            fn=return_to_outline_review_from_layout_compose,
+            inputs=[
+                workflow_thread_state,
+                system_logs,
+                outline_markdown,
+                preview_image,
+                current_render_html_state,
+            ],
+            outputs=[
+                system_logs,
+                outline_markdown,
+                paper_review_accordion,
+                outline_review_accordion,
+                preview_image,
+                current_render_html_state,
+                *stage_action_outputs,
+                *compose_outputs,
+            ],
+            api_name="return_to_outline_review_from_layout_compose",
         )
 
         request_revision_button.click(
@@ -2035,11 +3252,9 @@ def build_app() -> gr.Blocks:
                 paper_review_accordion,
                 outline_review_accordion,
                 preview_image,
-                feedback_text,
-                feedback_images,
                 current_render_html_state,
-                request_revision_button,
-                approve_webpage_button,
+                *stage_action_outputs,
+                *compose_outputs,
             ],
             api_name="request_webpage_revision",
         )
@@ -2053,10 +3268,8 @@ def build_app() -> gr.Blocks:
                 outline_review_accordion,
                 preview_image,
                 current_render_html_state,
-                request_revision_button,
-                approve_webpage_button,
-                feedback_text,
-                feedback_images,
+                *stage_action_outputs,
+                *compose_outputs,
             ],
             api_name="approve_webpage",
         )

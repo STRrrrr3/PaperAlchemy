@@ -8,12 +8,13 @@ from typing import Any
 from bs4 import BeautifulSoup
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from src.html_utils import message_content_to_text
 from src.llm import get_llm
 from src.page_manifest import build_page_manifest_path, extract_page_manifest, load_page_manifest
 from src.page_validation import collect_allowed_asset_web_paths, validate_local_image_references
 from src.preview_utils import build_visual_critic_screenshot_path, take_local_screenshot
 from src.prompts import VISION_CRITIC_SYSTEM_PROMPT, VISION_CRITIC_USER_PROMPT_TEMPLATE
-from src.schemas import CoderArtifact, PagePlan
+from src.schemas import CoderArtifact, PagePlan, VisualSmokeReport
 from src.state import CoderState
 
 MAX_CODER_RETRY_DEFAULT = 1
@@ -41,26 +42,6 @@ def _normalize_page_plan(plan: Any) -> PagePlan | None:
         return PagePlan.model_validate(plan)
     except Exception:
         return None
-
-
-def _message_content_to_text(message: Any) -> str:
-    content = getattr(message, "content", message)
-    if isinstance(content, str):
-        return content.strip()
-
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str) and item.strip():
-                parts.append(item.strip())
-                continue
-            if isinstance(item, dict):
-                text = str(item.get("text") or "").strip()
-                if text:
-                    parts.append(text)
-        return "\n".join(parts).strip()
-
-    return str(content or "").strip()
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -119,15 +100,57 @@ def _normalize_string_list(value: Any) -> list[str]:
     return normalized
 
 
+def _normalize_issue_class(value: Any, *, passed: bool) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"none", "cosmetic", "structure"}:
+        return normalized
+    return "none" if passed else "cosmetic"
+
+
+def _normalize_suggested_recovery(value: Any, *, passed: bool, issue_class: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"accept", "patch_or_review", "rerun_planner"}:
+        return normalized
+    if passed or issue_class == "none":
+        return "accept"
+    if issue_class == "structure":
+        return "rerun_planner"
+    return "patch_or_review"
+
+
 def _normalize_visual_feedback_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    passed = bool(payload.get("passed"))
+    issue_class = _normalize_issue_class(payload.get("issue_class"), passed=passed)
     return {
-        "passed": bool(payload.get("passed")),
+        "passed": passed,
+        "issue_class": issue_class,
+        "suggested_recovery": _normalize_suggested_recovery(
+            payload.get("suggested_recovery"),
+            passed=passed,
+            issue_class=issue_class,
+        ),
         "issues": _normalize_string_list(payload.get("issues")),
         "selectors_to_remove": _normalize_string_list(payload.get("selectors_to_remove")),
         "css_rules_to_inject": _normalize_string_list(
             payload.get("css_rules_to_inject") or payload.get("css_rules")
         ),
     }
+
+
+def _build_visual_smoke_report(
+    payload: dict[str, Any] | None = None,
+    screenshot_path: str = "",
+) -> VisualSmokeReport:
+    normalized_payload = _normalize_visual_feedback_payload(payload or {})
+    return VisualSmokeReport(
+        passed=bool(normalized_payload.get("passed", True)),
+        issue_class=str(normalized_payload.get("issue_class") or "none"),
+        suggested_recovery=str(normalized_payload.get("suggested_recovery") or "accept"),
+        issues=normalized_payload.get("issues") or [],
+        selectors_to_remove=normalized_payload.get("selectors_to_remove") or [],
+        css_rules_to_inject=normalized_payload.get("css_rules_to_inject") or [],
+        screenshot_path=str(screenshot_path or "").strip(),
+    )
 
 
 def _available_asset_manifest_from_artifact(artifact: CoderArtifact) -> list[dict[str, str]]:
@@ -299,17 +322,29 @@ def vision_critic_node(state: CoderState) -> dict[str, Any]:
     screenshot_path_text = str(state.get("visual_screenshot_path") or "").strip()
     if not screenshot_path_text:
         print("[PaperAlchemy-VisionCritic] no screenshot available; skipping visual QA.")
-        return {"visual_iterations": iteration, "is_visually_approved": True}
+        return {
+            "visual_iterations": iteration,
+            "is_visually_approved": True,
+            "visual_smoke_report": VisualSmokeReport(),
+        }
 
     screenshot_path = Path(screenshot_path_text)
     if not screenshot_path.exists():
         print(f"[PaperAlchemy-VisionCritic] screenshot not found: {screenshot_path}")
-        return {"visual_iterations": iteration, "is_visually_approved": True}
+        return {
+            "visual_iterations": iteration,
+            "is_visually_approved": True,
+            "visual_smoke_report": VisualSmokeReport(),
+        }
 
     artifact = _normalize_coder_artifact(state.get("coder_artifact"))
     image_data_url = _encode_image_to_data_url(screenshot_path)
     if not image_data_url:
-        return {"visual_iterations": iteration, "is_visually_approved": True}
+        return {
+            "visual_iterations": iteration,
+            "is_visually_approved": True,
+            "visual_smoke_report": VisualSmokeReport(screenshot_path=screenshot_path_text),
+        }
 
     entry_html_path = str(Path(artifact.entry_html).resolve()) if artifact else "(unknown)"
     selected_template_id = str(artifact.selected_template_id) if artifact else "(unknown)"
@@ -331,15 +366,24 @@ def vision_critic_node(state: CoderState) -> dict[str, Any]:
                 ),
             ]
         )
-        payload = _extract_json_object(_message_content_to_text(response))
+        payload = _extract_json_object(message_content_to_text(response))
         if not payload:
             print("[PaperAlchemy-VisionCritic] invalid JSON response; skipping visual retry.")
-            return {"visual_iterations": iteration, "is_visually_approved": True}
+            return {
+                "visual_iterations": iteration,
+                "is_visually_approved": True,
+                "visual_smoke_report": VisualSmokeReport(screenshot_path=screenshot_path_text),
+            }
 
         normalized_payload = _normalize_visual_feedback_payload(payload)
+        report = _build_visual_smoke_report(normalized_payload, screenshot_path_text)
         if normalized_payload["passed"]:
             print("[PaperAlchemy-VisionCritic] visual QA passed.")
-            return {"visual_iterations": iteration, "is_visually_approved": True}
+            return {
+                "visual_iterations": iteration,
+                "is_visually_approved": True,
+                "visual_smoke_report": report,
+            }
 
         feedback_json = json.dumps(normalized_payload, ensure_ascii=False)
         issues_text = "; ".join(normalized_payload["issues"]) or "visual bugs detected"
@@ -348,10 +392,15 @@ def vision_critic_node(state: CoderState) -> dict[str, Any]:
             "visual_iterations": iteration,
             "is_visually_approved": False,
             "visual_feedback": [feedback_json],
+            "visual_smoke_report": report,
         }
     except Exception as exc:
         print(f"[PaperAlchemy-VisionCritic] vision QA failed unexpectedly: {exc}")
-        return {"visual_iterations": iteration, "is_visually_approved": True}
+        return {
+            "visual_iterations": iteration,
+            "is_visually_approved": True,
+            "visual_smoke_report": VisualSmokeReport(screenshot_path=screenshot_path_text),
+        }
 
 
 def build_coder_critic_router(max_retry: int = MAX_CODER_RETRY_DEFAULT) -> Callable[[CoderState], str]:
@@ -370,11 +419,8 @@ def build_vision_qa_router(
     max_retry: int = MAX_VISUAL_QA_ITERATIONS_DEFAULT,
 ) -> Callable[[CoderState], str]:
     def _router(state: CoderState) -> str:
-        if state.get("is_visually_approved"):
-            return "end"
-        if int(state.get("visual_iterations", 0)) >= max_retry:
-            print(f"[PaperAlchemy-VisionCritic] reached max visual retry limit ({max_retry}), stop.")
-            return "end"
-        return "retry"
+        _ = max_retry
+        _ = state
+        return "end"
 
     return _router

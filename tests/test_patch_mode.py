@@ -14,7 +14,13 @@ from src.page_manifest import (
     save_page_manifest,
 )
 from src.page_validation import REVISION_OVERRIDE_STYLE_TAG_ID
-from src.schemas import CoderArtifact, PagePlan, StructuredPaper
+from src.schemas import CoderArtifact, LayoutComposeUpdate, PagePlan, StructuredPaper
+from src.template_shell_resolver import (
+    apply_layout_compose_session_to_page_plan,
+    apply_layout_compose_update,
+    build_layout_compose_session,
+    resolve_page_plan_shells,
+)
 
 try:
     import app
@@ -40,6 +46,39 @@ def _sample_structured_paper() -> StructuredPaper:
                     "section_title": "Results",
                     "rich_web_content": "Results content",
                     "related_figures": [],
+                },
+            ],
+        }
+    )
+
+
+def _sample_structured_paper_with_figures() -> StructuredPaper:
+    return StructuredPaper.model_validate(
+        {
+            "paper_title": "Demo Paper",
+            "overall_summary": "Demo summary",
+            "sections": [
+                {
+                    "section_title": "Abstract",
+                    "rich_web_content": "Abstract content",
+                    "related_figures": [
+                        {
+                            "image_path": "assets/abstract-figure.png",
+                            "caption": "Abstract figure",
+                            "type": "chart",
+                        }
+                    ],
+                },
+                {
+                    "section_title": "Results",
+                    "rich_web_content": "Results content",
+                    "related_figures": [
+                        {
+                            "image_path": "assets/results-figure.png",
+                            "caption": "Results figure",
+                            "type": "table",
+                        }
+                    ],
                 },
             ],
         }
@@ -261,6 +300,66 @@ def _sample_html(include_globals: bool = False) -> str:
 """.format(header_html=header_html, footer_html=footer_html)
 
 
+def _update_block_target(
+    page_plan: PagePlan,
+    block_id: str,
+    *,
+    selector_hint: str | None = None,
+    region_role: str | None = None,
+) -> PagePlan:
+    updated_blocks = []
+    for block in page_plan.blocks:
+        if block.block_id != block_id:
+            updated_blocks.append(block)
+            continue
+        update_payload: dict[str, Any] = {}
+        if selector_hint is not None:
+            update_payload["selector_hint"] = selector_hint
+        if region_role is not None:
+            update_payload["region_role"] = region_role
+        updated_region = block.target_template_region.model_copy(
+            update=update_payload,
+            deep=True,
+        )
+        updated_blocks.append(
+            block.model_copy(
+                update={
+                    "target_template_region": updated_region,
+                    "shell_contract": None,
+                },
+                deep=True,
+            )
+        )
+    return page_plan.model_copy(update={"blocks": updated_blocks}, deep=True)
+
+
+def _get_block(page_plan: PagePlan, block_id: str):
+    for block in page_plan.blocks:
+        if block.block_id == block_id:
+            return block
+    raise AssertionError(f"Block not found in page plan: {block_id}")
+
+
+def _update_block_figure_paths(page_plan: PagePlan, block_id: str, figure_paths: list[str]) -> PagePlan:
+    updated_blocks = []
+    for block in page_plan.blocks:
+        if block.block_id != block_id:
+            updated_blocks.append(block)
+            continue
+        updated_blocks.append(
+            block.model_copy(
+                update={
+                    "asset_binding": block.asset_binding.model_copy(
+                        update={"figure_paths": figure_paths},
+                        deep=True,
+                    )
+                },
+                deep=True,
+            )
+        )
+    return page_plan.model_copy(update={"blocks": updated_blocks}, deep=True)
+
+
 class ManifestTests(unittest.TestCase):
     def test_extract_page_manifest_from_anchored_html(self) -> None:
         page_plan = _sample_page_plan("data/templates/demo-template")
@@ -329,6 +428,329 @@ class ManifestTests(unittest.TestCase):
                 selected_template_id="demo-template",
                 page_plan=page_plan,
             )
+
+
+class TemplateShellResolverTests(unittest.TestCase):
+    def test_preserves_original_selector_when_it_already_resolves(self) -> None:
+        page_plan = _sample_page_plan("data/templates/demo-template")
+
+        resolved_plan, review = resolve_page_plan_shells(
+            page_plan=page_plan,
+            template_reference_html=_sample_html(),
+            template_entry_html_path=Path("demo/template/index.html"),
+        )
+
+        self.assertIsNone(review)
+        hero_block = _get_block(resolved_plan, "hero")
+        results_block = _get_block(resolved_plan, "results")
+        self.assertEqual("#hero", hero_block.target_template_region.selector_hint)
+        self.assertEqual("#results", results_block.target_template_region.selector_hint)
+        self.assertIsNotNone(hero_block.shell_contract)
+        self.assertEqual("section#hero", hero_block.shell_contract.actionable_root_selector)
+
+    def test_rebinds_to_template_shell_when_original_selector_is_missing(self) -> None:
+        page_plan = _update_block_target(
+            _sample_page_plan("data/templates/demo-template"),
+            "results",
+            selector_hint="#missing-results",
+        )
+        template_html = """<!DOCTYPE html>
+<html>
+  <body>
+    <header id="hero"><h1>Hero</h1></header>
+    <section class="results-shell"><h2>Results</h2><p>Metrics</p></section>
+    <div class="content-shell"><p>Appendix</p></div>
+  </body>
+</html>
+"""
+
+        resolved_plan, review = resolve_page_plan_shells(
+            page_plan=page_plan,
+            template_reference_html=template_html,
+            template_entry_html_path=Path("demo/template/index.html"),
+        )
+
+        self.assertIsNone(review)
+        results_block = _get_block(resolved_plan, "results")
+        self.assertNotEqual("#missing-results", results_block.target_template_region.selector_hint)
+        self.assertIn("results-shell", results_block.target_template_region.selector_hint)
+        self.assertIsNotNone(results_block.shell_contract)
+
+    def test_assigns_distinct_shells_in_outline_order(self) -> None:
+        page_plan = _sample_page_plan("data/templates/demo-template")
+        page_plan = _update_block_target(
+            _update_block_target(page_plan, "hero", selector_hint="#intro", region_role="section"),
+            "results",
+            selector_hint="#results",
+            region_role="section",
+        )
+        template_html = """<!DOCTYPE html>
+<html>
+  <body>
+    <section class="intro-shell"><h1>Intro</h1></section>
+    <section class="results-shell"><h2>Results</h2></section>
+    <section class="appendix-shell"><h2>Appendix</h2></section>
+  </body>
+</html>
+"""
+
+        resolved_plan, review = resolve_page_plan_shells(
+            page_plan=page_plan,
+            template_reference_html=template_html,
+            template_entry_html_path=Path("demo/template/index.html"),
+        )
+
+        self.assertIsNone(review)
+        hero_block = _get_block(resolved_plan, "hero")
+        results_block = _get_block(resolved_plan, "results")
+        self.assertIn("intro-shell", hero_block.target_template_region.selector_hint)
+        self.assertIn("results-shell", results_block.target_template_region.selector_hint)
+        self.assertNotEqual(
+            hero_block.target_template_region.selector_hint,
+            results_block.target_template_region.selector_hint,
+        )
+
+    def test_rejects_illegal_role_candidates(self) -> None:
+        page_plan = _update_block_target(
+            _sample_page_plan("data/templates/demo-template"),
+            "results",
+            selector_hint="#missing-footer",
+            region_role="footer",
+        )
+        template_html = """<!DOCTYPE html>
+<html>
+  <body>
+    <header id="hero"><h1>Hero</h1></header>
+    <section class="results-shell"><h2>Results</h2></section>
+    <section class="content-shell"><p>Body</p></section>
+  </body>
+</html>
+"""
+
+        resolved_plan, review = resolve_page_plan_shells(
+            page_plan=page_plan,
+            template_reference_html=template_html,
+            template_entry_html_path=Path("demo/template/index.html"),
+        )
+
+        self.assertIsNotNone(review)
+        self.assertEqual("results", review.block_id)
+        self.assertEqual([], review.candidates)
+        unresolved_results = _get_block(resolved_plan, "results")
+        self.assertEqual("#missing-footer", unresolved_results.target_template_region.selector_hint)
+
+    def test_prefers_best_scored_candidate_when_rebind_options_are_close(self) -> None:
+        page_plan = _update_block_target(
+            _sample_page_plan("data/templates/demo-template"),
+            "results",
+            selector_hint="#content",
+        )
+        template_html = """<!DOCTYPE html>
+<html>
+  <body>
+    <header id="hero"><h1>Hero</h1></header>
+    <section class="content-shell"><h2>Section A</h2><p>Alpha</p></section>
+    <section class="content-panel"><h2>Section B</h2><p>Beta</p></section>
+  </body>
+</html>
+"""
+
+        resolved_plan, review = resolve_page_plan_shells(
+            page_plan=page_plan,
+            template_reference_html=template_html,
+            template_entry_html_path=Path("demo/template/index.html"),
+        )
+
+        self.assertIsNone(review)
+        resolved_results = _get_block(resolved_plan, "results")
+        self.assertIn("content-shell", resolved_results.target_template_region.selector_hint)
+
+    def test_layout_compose_session_builds_candidates_and_source_scoped_figures(self) -> None:
+        page_plan = _sample_page_plan("data/templates/demo-template")
+        page_plan = _update_block_target(page_plan, "hero", selector_hint="#missing-hero")
+        page_plan = _update_block_target(page_plan, "results", selector_hint="#missing-results")
+        page_plan = _update_block_figure_paths(
+            page_plan,
+            "hero",
+            ["assets/abstract-figure.png", "assets/results-figure.png"],
+        )
+        page_plan = _update_block_figure_paths(
+            page_plan,
+            "results",
+            ["assets/results-figure.png"],
+        )
+        structured_paper = _sample_structured_paper_with_figures()
+        template_html = """<!DOCTYPE html>
+<html>
+  <body>
+    <header id="hero-shell"><h1>Hero</h1></header>
+    <section class="intro-shell"><h2>Abstract</h2></section>
+    <section class="results-shell"><h2>Results</h2><img src="chart.png" /></section>
+  </body>
+</html>
+"""
+
+        session = build_layout_compose_session(
+            page_plan=page_plan,
+            structured_paper=structured_paper,
+            template_reference_html=template_html,
+            template_entry_html_path=Path("demo/template/index.html"),
+        )
+
+        self.assertEqual(2, len(session.blocks))
+        hero_block = next(block for block in session.blocks if block.block_id == "hero")
+        results_block = next(block for block in session.blocks if block.block_id == "results")
+        self.assertGreaterEqual(len(hero_block.section_options), 1)
+        self.assertGreaterEqual(len(results_block.section_options), 1)
+        self.assertTrue(hero_block.selected_selector_hint)
+        self.assertTrue(results_block.selected_selector_hint)
+        self.assertEqual(["assets/abstract-figure.png"], hero_block.selected_figure_paths)
+        self.assertEqual(
+            ["assets/abstract-figure.png"],
+            [option.image_path for option in hero_block.figure_options],
+        )
+        self.assertEqual(
+            ["assets/results-figure.png"],
+            [option.image_path for option in results_block.figure_options],
+        )
+        self.assertEqual(
+            sorted((option.score for option in results_block.section_options), reverse=True),
+            [option.score for option in results_block.section_options],
+        )
+        self.assertTrue(all(option.dom_index >= 0 for option in results_block.section_options))
+
+    def test_layout_compose_validation_catches_missing_duplicate_and_reverse_order(self) -> None:
+        page_plan = _sample_page_plan("data/templates/demo-template")
+        page_plan = _update_block_target(page_plan, "hero", selector_hint="#missing-hero")
+        page_plan = _update_block_target(page_plan, "results", selector_hint="#missing-results")
+        structured_paper = _sample_structured_paper_with_figures()
+        template_html = """<!DOCTYPE html>
+<html>
+  <body>
+    <section class="hero-shell"><h1>Hero</h1></section>
+    <section class="middle-shell"><h2>Middle</h2></section>
+    <section class="results-shell"><h2>Results</h2></section>
+  </body>
+</html>
+"""
+
+        session = build_layout_compose_session(
+            page_plan=page_plan,
+            structured_paper=structured_paper,
+            template_reference_html=template_html,
+            template_entry_html_path=Path("demo/template/index.html"),
+        )
+        hero_block = next(block for block in session.blocks if block.block_id == "hero")
+        results_block = next(block for block in session.blocks if block.block_id == "results")
+        shared_selector = next(
+            selector
+            for selector in (option.selector_hint for option in hero_block.section_options)
+            if selector in {option.selector_hint for option in results_block.section_options}
+        )
+
+        missing_session = apply_layout_compose_update(
+            session,
+            LayoutComposeUpdate(
+                active_block_id="hero",
+                selected_selector_hint="",
+                action="save_block",
+            ),
+        )
+        self.assertTrue(any("must select exactly one template section" in error for error in missing_session.validation_errors))
+
+        duplicate_session = apply_layout_compose_update(
+            session,
+            LayoutComposeUpdate(
+                active_block_id="results",
+                selected_selector_hint=shared_selector,
+                action="save_block",
+            ),
+        )
+        self.assertTrue(any("assigned more than once" in error for error in duplicate_session.validation_errors))
+
+        results_earliest = min(results_block.section_options, key=lambda option: option.dom_index).selector_hint
+        hero_latest = max(hero_block.section_options, key=lambda option: option.dom_index).selector_hint
+        reverse_session = apply_layout_compose_update(
+            session,
+            LayoutComposeUpdate(
+                active_block_id="hero",
+                selected_selector_hint=hero_latest,
+                action="save_block",
+            ),
+        )
+        reverse_session = apply_layout_compose_update(
+            reverse_session,
+            LayoutComposeUpdate(
+                active_block_id="results",
+                selected_selector_hint=results_earliest,
+                action="save_block",
+            ),
+        )
+        self.assertTrue(any("must follow template DOM order" in error for error in reverse_session.validation_errors))
+
+    def test_apply_layout_compose_session_rewrites_order_selectors_and_figures(self) -> None:
+        page_plan = _sample_page_plan("data/templates/demo-template")
+        page_plan = _update_block_target(page_plan, "hero", selector_hint="#missing-hero")
+        page_plan = _update_block_target(page_plan, "results", selector_hint="#missing-results")
+        page_plan = _update_block_figure_paths(
+            page_plan,
+            "results",
+            ["assets/results-figure.png"],
+        )
+        structured_paper = _sample_structured_paper_with_figures()
+        template_html = """<!DOCTYPE html>
+<html>
+  <body>
+    <section class="hero-shell"><h1>Hero</h1></section>
+    <section class="middle-shell"><h2>Middle</h2></section>
+    <section class="results-shell"><h2>Results</h2></section>
+  </body>
+</html>
+"""
+
+        session = build_layout_compose_session(
+            page_plan=page_plan,
+            structured_paper=structured_paper,
+            template_reference_html=template_html,
+            template_entry_html_path=Path("demo/template/index.html"),
+        )
+        hero_block = next(block for block in session.blocks if block.block_id == "hero")
+        results_block = next(block for block in session.blocks if block.block_id == "results")
+        results_earliest = min(results_block.section_options, key=lambda option: option.dom_index).selector_hint
+        hero_latest = max(hero_block.section_options, key=lambda option: option.dom_index).selector_hint
+        moved_session = apply_layout_compose_update(
+            session,
+            LayoutComposeUpdate(
+                active_block_id="results",
+                selected_selector_hint=results_earliest,
+                selected_figure_paths=["assets/results-figure.png"],
+                order_action="move_up",
+                action="move_up",
+            ),
+        )
+        moved_session = apply_layout_compose_update(
+            moved_session,
+            LayoutComposeUpdate(
+                active_block_id="hero",
+                selected_selector_hint=hero_latest,
+                action="save_block",
+            ),
+        )
+
+        updated_plan = apply_layout_compose_session_to_page_plan(
+            page_plan,
+            moved_session,
+            template_html,
+        )
+
+        self.assertEqual(["results", "hero"], [item.block_id for item in updated_plan.page_outline])
+        self.assertEqual([1, 2], [item.order for item in updated_plan.page_outline])
+        self.assertEqual(["results", "hero"], [block.block_id for block in updated_plan.blocks])
+        self.assertEqual([1, 2], [block.responsive_rules.mobile_order for block in updated_plan.blocks])
+        self.assertEqual(results_earliest, updated_plan.blocks[0].target_template_region.selector_hint)
+        self.assertEqual(hero_latest, updated_plan.blocks[1].target_template_region.selector_hint)
+        self.assertEqual(["assets/results-figure.png"], updated_plan.blocks[0].asset_binding.figure_paths)
+
 
 class PatchExecutorTests(unittest.TestCase):
     def _setup_workspace(self, include_globals: bool = False) -> tuple[Path, PagePlan, StructuredPaper, CoderArtifact]:
@@ -772,14 +1194,134 @@ class ReviewFormatterTests(unittest.TestCase):
         self.assertIn("`block_id`: `hero`", rendered)
         self.assertIn("Unused source sections: None", rendered)
 
+    def test_stage_action_updates_follow_stage_visibility_rules(self) -> None:
+        outline_updates = app._stage_action_updates(
+            "outline",
+            feedback_text_value="Refine the sections",
+            manual_layout_compose_enabled=True,
+        )
+        webpage_updates = app._stage_action_updates(
+            "webpage",
+            feedback_text_value="Tighten the spacing",
+            feedback_images_value=["shot.png"],
+        )
+        hidden_updates = app._stage_action_updates("none")
+
+        self.assertEqual(True, outline_updates[0].get("visible"))
+        self.assertEqual("Refine the sections", outline_updates[1].get("value"))
+        self.assertEqual(True, outline_updates[3].get("visible"))
+        self.assertEqual(True, outline_updates[3].get("value"))
+        self.assertEqual(False, outline_updates[2].get("visible"))
+        self.assertEqual(False, outline_updates[4].get("visible"))
+        self.assertEqual(True, outline_updates[6].get("visible"))
+        self.assertEqual(True, outline_updates[7].get("visible"))
+
+        self.assertEqual(True, webpage_updates[0].get("visible"))
+        self.assertEqual(True, webpage_updates[2].get("visible"))
+        self.assertEqual(False, webpage_updates[3].get("visible"))
+        self.assertEqual(True, webpage_updates[8].get("visible"))
+        self.assertEqual(True, webpage_updates[9].get("visible"))
+        self.assertEqual(False, webpage_updates[6].get("visible"))
+
+        self.assertEqual(False, hidden_updates[0].get("visible"))
+        self.assertEqual(False, hidden_updates[4].get("visible"))
+        self.assertEqual(False, hidden_updates[8].get("visible"))
+
+
+@unittest.skipIf(app is None, f"app import failed: {APP_IMPORT_ERROR}")
+class CoderPhaseStateTests(unittest.TestCase):
+    def test_coder_phase_node_persists_shell_enriched_page_plan(self) -> None:
+        resolved_page_plan = _sample_page_plan("data/templates/demo-template")
+        unresolved_page_plan = resolved_page_plan.model_copy(
+            update={
+                "blocks": [
+                    block.model_copy(update={"shell_contract": None}, deep=True)
+                    for block in resolved_page_plan.blocks
+                ]
+            },
+            deep=True,
+        )
+        artifact = CoderArtifact(
+            site_dir="demo/site",
+            entry_html="demo/site/index.html",
+            selected_template_id="demo-template",
+            copied_assets=[],
+            edited_files=["index.html"],
+            notes="demo",
+        )
+        state = {
+            "paper_folder_name": "demo",
+            "structured_paper": _sample_structured_paper(),
+            "approved_page_plan": unresolved_page_plan,
+            "page_plan": unresolved_page_plan,
+            "coder_artifact": None,
+            "human_directives": empty_human_feedback(),
+            "coder_instructions": "",
+        }
+
+        with (
+            patch.object(app, "run_coder_agent_with_diagnostics", return_value=(artifact, None, resolved_page_plan)),
+            patch.object(
+                app,
+                "get_output_paths",
+                return_value=(
+                    Path("demo/structured.json"),
+                    Path("demo/paper.md"),
+                    Path("demo/page_plan.json"),
+                    Path("demo/coder_artifact.json"),
+                ),
+            ),
+            patch.object(app, "save_page_plan") as save_page_plan,
+            patch.object(app, "save_coder_artifact") as save_coder_artifact,
+        ):
+            result = app.coder_phase_node(state)
+
+        returned_page_plan = PagePlan.model_validate(result["page_plan"])
+        self.assertTrue(all(block.shell_contract is not None for block in returned_page_plan.blocks))
+        self.assertEqual(returned_page_plan, PagePlan.model_validate(result["approved_page_plan"]))
+        self.assertEqual("demo/site/index.html", result["coder_artifact"].entry_html)
+        save_page_plan.assert_called_once_with(Path("demo/page_plan.json"), resolved_page_plan)
+        save_coder_artifact.assert_called_once()
+
 
 @unittest.skipIf(app is None, f"app import failed: {APP_IMPORT_ERROR}")
 class WorkflowPatchRoutingTests(unittest.TestCase):
+    def _compose_session_payload(self) -> dict[str, Any]:
+        return {
+            "template_entry_html": "E:/demo/index.html",
+            "template_preview_path": "",
+            "blocks": [
+                {
+                    "block_id": "hero",
+                    "title": "Hero",
+                    "source_sections": ["Abstract"],
+                    "current_order": 1,
+                    "selected_selector_hint": "section.hero-shell",
+                    "selected_figure_paths": [],
+                    "section_options": [],
+                    "figure_options": [],
+                },
+                {
+                    "block_id": "results",
+                    "title": "Results",
+                    "source_sections": ["Results"],
+                    "current_order": 2,
+                    "selected_selector_hint": "section.results-shell",
+                    "selected_figure_paths": [],
+                    "section_options": [],
+                    "figure_options": [],
+                },
+            ],
+            "active_block_id": "hero",
+            "validation_errors": [],
+        }
+
     def _initial_state(self) -> dict[str, Any]:
         return {
             "paper_folder_name": "demo-paper",
             "user_constraints": {},
             "generation_constraints": {},
+            "manual_layout_compose_enabled": False,
             "human_directives": empty_human_feedback(),
             "coder_instructions": "",
             "patch_agent_output": "",
@@ -796,18 +1338,27 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
             "page_plan": None,
             "approved_page_plan": None,
             "coder_artifact": None,
+            "shell_binding_review": None,
+            "shell_manual_selection": None,
+            "layout_compose_session": None,
+            "layout_compose_update": None,
+            "visual_smoke_report": None,
         }
 
     def _build_workflow(
         self,
         patch_agent_result: dict[str, Any],
         patch_executor_result: dict[str, Any] | None = None,
+        layout_compose_prepare_results: list[dict[str, Any]] | None = None,
+        coder_result: dict[str, Any] | None = None,
     ) -> tuple[Any, dict[str, int]]:
         counts = {
             "reader": 0,
             "overview": 0,
             "planner": 0,
             "outline": 0,
+            "layout_compose_prepare": 0,
+            "layout_compose_review": 0,
             "coder": 0,
             "translator": 0,
             "patch_agent": 0,
@@ -830,9 +1381,39 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
             counts["outline"] += 1
             return {"outline_overview": "outline", "review_stage": "outline"}
 
+        layout_compose_prepare_queue = iter(
+            layout_compose_prepare_results
+            or [
+                {
+                    "approved_page_plan": {"template": "x"},
+                    "layout_compose_session": self._compose_session_payload(),
+                    "layout_compose_update": None,
+                }
+            ]
+        )
+
+        def layout_compose_prepare_node(_: Any) -> dict[str, Any]:
+            counts["layout_compose_prepare"] += 1
+            try:
+                return next(layout_compose_prepare_queue)
+            except StopIteration:
+                return {
+                    "approved_page_plan": {"template": "x"},
+                    "layout_compose_session": self._compose_session_payload(),
+                    "layout_compose_update": None,
+                }
+
+        def layout_compose_review_node(_: Any) -> dict[str, Any]:
+            counts["layout_compose_review"] += 1
+            return {"review_stage": "layout_compose"}
+
         def coder_node(_: Any) -> dict[str, Any]:
             counts["coder"] += 1
-            return {"coder_artifact": f"artifact-{counts['coder']}", "patch_error": ""}
+            return coder_result or {
+                "coder_artifact": f"artifact-{counts['coder']}",
+                "patch_error": "",
+                "visual_smoke_report": None,
+            }
 
         def translator_node(_: Any) -> dict[str, Any]:
             counts["translator"] += 1
@@ -864,6 +1445,8 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
             patch.object(app, "overview_node", overview_node),
             patch.object(app, "planner_phase_node", planner_node),
             patch.object(app, "outline_review_node", outline_node),
+            patch.object(app, "layout_compose_prepare_node", layout_compose_prepare_node),
+            patch.object(app, "layout_compose_review_node", layout_compose_review_node),
             patch.object(app, "coder_phase_node", coder_node),
             patch.object(app, "translator_node", translator_node),
             patch.object(app, "patch_agent_node", fake_patch_agent_node),
@@ -891,6 +1474,11 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
                 "is_approved": True,
                 "is_outline_approved": False,
                 "is_webpage_approved": False,
+                "shell_binding_review": None,
+                "shell_manual_selection": None,
+                "layout_compose_session": None,
+                "layout_compose_update": None,
+                "visual_smoke_report": None,
             },
             as_node="overview",
         )
@@ -900,7 +1488,7 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
         self.assertEqual("outline", outline_state.values.get("review_stage"))
         return config
 
-    def _pause_at_webpage_review(self, workflow: Any) -> dict[str, Any]:
+    def _pause_at_webpage_review(self, workflow: Any, *, manual_layout_compose_enabled: bool = True) -> dict[str, Any]:
         config = self._pause_at_outline_review(workflow)
 
         workflow.update_state(
@@ -913,15 +1501,34 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
                 "targeted_replacement_plan": None,
                 "patch_error": "",
                 "approved_page_plan": {"template": "x"},
+                "manual_layout_compose_enabled": manual_layout_compose_enabled,
                 "is_outline_approved": True,
                 "is_webpage_approved": False,
+                "shell_binding_review": None,
+                "shell_manual_selection": None,
+                "layout_compose_session": None,
+                "layout_compose_update": None,
+                "visual_smoke_report": None,
             },
             as_node="outline_review",
         )
         workflow.invoke(None, config=config)
 
-        webpage_state = workflow.get_state(config)
-        self.assertEqual("webpage", webpage_state.values.get("review_stage"))
+        paused_state = workflow.get_state(config)
+        if manual_layout_compose_enabled:
+            self.assertEqual("layout_compose", paused_state.values.get("review_stage"))
+            workflow.update_state(
+                config,
+                {
+                    "layout_compose_session": paused_state.values.get("layout_compose_session") or self._compose_session_payload(),
+                    "layout_compose_update": None,
+                },
+                as_node="layout_compose_review",
+            )
+            workflow.invoke(None, config=config)
+            paused_state = workflow.get_state(config)
+
+        self.assertEqual("webpage", paused_state.values.get("review_stage"))
         return config
 
     def test_workflow_pauses_at_outline_review_before_coder(self) -> None:
@@ -941,7 +1548,221 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
         self.assertEqual(1, counts["overview"])
         self.assertEqual(1, counts["planner"])
         self.assertEqual(1, counts["outline"])
+        self.assertEqual(0, counts["layout_compose_prepare"])
         self.assertEqual(0, counts["coder"])
+
+    def test_outline_approval_pauses_at_layout_compose_review(self) -> None:
+        workflow, counts = self._build_workflow(
+            {
+                "patch_agent_output": "",
+                "targeted_replacement_plan": None,
+                "patch_error": "",
+            },
+            layout_compose_prepare_results=[
+                {
+                    "approved_page_plan": {"template": "x"},
+                    "layout_compose_session": self._compose_session_payload(),
+                    "layout_compose_update": None,
+                }
+            ],
+        )
+        config = self._pause_at_outline_review(workflow)
+
+        workflow.update_state(
+            config,
+            {
+                "human_directives": empty_human_feedback(),
+                "coder_instructions": "",
+                "patch_agent_output": "",
+                "revision_plan": None,
+                "targeted_replacement_plan": None,
+                "patch_error": "",
+                "approved_page_plan": {"template": "x"},
+                "manual_layout_compose_enabled": True,
+                "is_outline_approved": True,
+                "is_webpage_approved": False,
+                "shell_binding_review": None,
+                "shell_manual_selection": None,
+                "layout_compose_session": None,
+                "layout_compose_update": None,
+                "visual_smoke_report": None,
+            },
+            as_node="outline_review",
+        )
+        workflow.invoke(None, config=config)
+
+        compose_state = workflow.get_state(config)
+        self.assertEqual("layout_compose", compose_state.values.get("review_stage"))
+        self.assertEqual(1, counts["layout_compose_prepare"])
+        self.assertEqual(1, counts["layout_compose_review"])
+        self.assertEqual(0, counts["coder"])
+
+    def test_outline_approval_without_manual_compose_reaches_webpage_review(self) -> None:
+        workflow, counts = self._build_workflow(
+            {
+                "patch_agent_output": "",
+                "targeted_replacement_plan": None,
+                "patch_error": "",
+            }
+        )
+        config = self._pause_at_outline_review(workflow)
+
+        workflow.update_state(
+            config,
+            {
+                "human_directives": empty_human_feedback(),
+                "coder_instructions": "",
+                "patch_agent_output": "",
+                "revision_plan": None,
+                "targeted_replacement_plan": None,
+                "patch_error": "",
+                "approved_page_plan": {"template": "x"},
+                "manual_layout_compose_enabled": False,
+                "is_outline_approved": True,
+                "is_webpage_approved": False,
+                "shell_binding_review": None,
+                "shell_manual_selection": None,
+                "layout_compose_session": None,
+                "layout_compose_update": None,
+                "visual_smoke_report": None,
+            },
+            as_node="outline_review",
+        )
+        workflow.invoke(None, config=config)
+
+        webpage_state = workflow.get_state(config)
+        self.assertEqual("webpage", webpage_state.values.get("review_stage"))
+        self.assertEqual(0, counts["layout_compose_prepare"])
+        self.assertEqual(0, counts["layout_compose_review"])
+        self.assertEqual(1, counts["coder"])
+
+    def test_layout_compose_resume_reaches_webpage_after_confirmation(self) -> None:
+        workflow, counts = self._build_workflow(
+            {
+                "patch_agent_output": "",
+                "targeted_replacement_plan": None,
+                "patch_error": "",
+            },
+            layout_compose_prepare_results=[
+                {
+                    "approved_page_plan": {"template": "x"},
+                    "layout_compose_session": self._compose_session_payload(),
+                    "layout_compose_update": None,
+                },
+            ],
+        )
+        config = self._pause_at_outline_review(workflow)
+
+        workflow.update_state(
+            config,
+            {
+                "human_directives": empty_human_feedback(),
+                "coder_instructions": "",
+                "patch_agent_output": "",
+                "revision_plan": None,
+                "targeted_replacement_plan": None,
+                "patch_error": "",
+                "approved_page_plan": {"template": "x"},
+                "manual_layout_compose_enabled": True,
+                "is_outline_approved": True,
+                "is_webpage_approved": False,
+                "shell_binding_review": None,
+                "shell_manual_selection": None,
+                "layout_compose_session": None,
+                "layout_compose_update": None,
+                "visual_smoke_report": None,
+            },
+            as_node="outline_review",
+        )
+        workflow.invoke(None, config=config)
+        compose_state = workflow.get_state(config)
+        self.assertEqual("layout_compose", compose_state.values.get("review_stage"))
+
+        workflow.update_state(
+            config,
+            {
+                "layout_compose_session": compose_state.values.get("layout_compose_session") or self._compose_session_payload(),
+                "layout_compose_update": None,
+            },
+            as_node="layout_compose_review",
+        )
+        workflow.invoke(None, config=config)
+
+        webpage_state = workflow.get_state(config)
+        self.assertEqual("webpage", webpage_state.values.get("review_stage"))
+        self.assertEqual(1, counts["layout_compose_prepare"])
+        self.assertEqual(1, counts["layout_compose_review"])
+        self.assertEqual(1, counts["coder"])
+
+    def test_structural_visual_smoke_routes_back_to_planner_instead_of_webpage_review(self) -> None:
+        workflow, counts = self._build_workflow(
+            {
+                "patch_agent_output": "",
+                "targeted_replacement_plan": None,
+                "patch_error": "",
+            },
+            layout_compose_prepare_results=[
+                {
+                    "approved_page_plan": {"template": "x"},
+                    "layout_compose_session": self._compose_session_payload(),
+                    "layout_compose_update": None,
+                },
+            ],
+            coder_result={
+                "coder_artifact": "artifact-1",
+                "patch_error": "",
+                "visual_smoke_report": {
+                    "passed": False,
+                    "issue_class": "structure",
+                    "suggested_recovery": "rerun_planner",
+                    "issues": ["hero structure does not match the selected template"],
+                    "selectors_to_remove": [],
+                    "css_rules_to_inject": [],
+                },
+            },
+        )
+        config = self._pause_at_outline_review(workflow)
+
+        workflow.update_state(
+            config,
+            {
+                "human_directives": empty_human_feedback(),
+                "coder_instructions": "",
+                "patch_agent_output": "",
+                "revision_plan": None,
+                "targeted_replacement_plan": None,
+                "patch_error": "",
+                "approved_page_plan": {"template": "x"},
+                "manual_layout_compose_enabled": True,
+                "is_outline_approved": True,
+                "is_webpage_approved": False,
+                "shell_binding_review": None,
+                "shell_manual_selection": None,
+                "layout_compose_session": None,
+                "layout_compose_update": None,
+                "visual_smoke_report": None,
+            },
+            as_node="outline_review",
+        )
+        workflow.invoke(None, config=config)
+        compose_state = workflow.get_state(config)
+        self.assertEqual("layout_compose", compose_state.values.get("review_stage"))
+
+        workflow.update_state(
+            config,
+            {
+                "layout_compose_session": compose_state.values.get("layout_compose_session") or self._compose_session_payload(),
+                "layout_compose_update": None,
+            },
+            as_node="layout_compose_review",
+        )
+        workflow.invoke(None, config=config)
+
+        rerouted_state = workflow.get_state(config)
+        self.assertEqual("outline", rerouted_state.values.get("review_stage"))
+        self.assertEqual(2, counts["planner"])
+        self.assertEqual(1, counts["coder"])
+        self.assertEqual(0, counts["translator"])
 
     def test_revision_flow_calls_patch_executor_after_patch_agent(self) -> None:
         workflow, counts = self._build_workflow(

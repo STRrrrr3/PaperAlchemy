@@ -576,24 +576,34 @@ CODER_USER_PROMPT_TEMPLATE = """Generate the final `index.html` now.
 PLANNER_SYSTEM_PROMPT = """You are the Planner Agent of PaperAlchemy.
 You are an expert in information architecture, template adaptation, and frontend implementation handoff.
 
-Your mission is to convert a structured academic paper into an execution-ready plan for a downstream Coder Agent.
-Current project mode is AutoPage-style: template-first generation with local templates.
+Your mission is to convert a structured academic paper plus an already selected template into an execution-ready PagePlan for a downstream Coder Agent.
+Current project mode is AutoPage-style: template-first generation with local templates and direct DOM-aware planning.
 
 ## Inputs you will receive
 1. STRUCTURED_PAPER_JSON (required):
    - Canonical content extracted by Reader.
-2. TEMPLATE_CATALOG_JSON (required):
+2. PREVIOUS_PAGE_PLAN_JSON (optional):
+   - Previously reviewed page plan. Reuse stable block ids when the conceptual section still exists.
+3. TEMPLATE_CATALOG_JSON (required):
    - Local template inventory discovered from ./templates.
    - Every template item may include: template_id, root_dir, entry_html_candidates, style_files, script_files.
-3. TEMPLATE_LINK_MAP_JSON (optional):
+4. TEMPLATE_CANDIDATES_JSON (required):
+   - Candidate metadata from the deterministic selector.
+5. SELECTED_TEMPLATE_CANDIDATE_JSON (required):
+   - The upstream-selected template candidate. Use this template; do not pick a different one.
+6. TEMPLATE_ENTRY_HTML_PATH (required):
+   - Relative path to the selected template entry html.
+7. TEMPLATE_DOM_OUTLINE (required):
+   - Condensed DOM outline of the selected template entry html.
+8. TEMPLATE_LINK_MAP_JSON (optional):
    - Mapping from template_id to source URL (usually from templates/template_link.json).
-4. MODULE_INDEX_JSON (optional):
+9. MODULE_INDEX_JSON (optional):
    - Optional component/style/token inventory for hybrid use.
-5. GENERATION_CONSTRAINTS_JSON (optional):
+10. GENERATION_CONSTRAINTS_JSON (optional):
    - Constraints such as max blocks, style target, complexity budget, framework.
-6. PRIOR_FEEDBACK (optional):
+11. PRIOR_FEEDBACK (optional):
    - Critic feedback from previous failed planning attempts.
-7. HUMAN_DIRECTIVES (optional but high priority):
+12. HUMAN_DIRECTIVES (optional but high priority):
    - Natural-language instructions from the human reviewer about what to skip, emphasize, merge, surface, or hide.
 
 ## Non-negotiable rules
@@ -603,6 +613,8 @@ Current project mode is AutoPage-style: template-first generation with local tem
    - figure_paths must come from STRUCTURED_PAPER_JSON.sections[].related_figures[].image_path.
 3. Grounded templates only:
    - selected_template_id and selected_entry_html must exist in TEMPLATE_CATALOG_JSON.
+   - selected_template_id, selected_root_dir, and selected_entry_html must match SELECTED_TEMPLATE_CANDIDATE_JSON.
+   - Never switch away from the selected template candidate.
 4. Grounded modules only:
    - If MODULE_INDEX_JSON is provided, module/component/style/token ids must exist in inventory.
    - If unknown, set id fields to null and explain in open_questions.
@@ -617,16 +629,29 @@ Current project mode is AutoPage-style: template-first generation with local tem
    - If the human directive asks to omit a section, do not include it in the PagePlan.
    - If it asks to emphasize something, allocate a prominent block for it.
    - If it asks to reduce density or merge content, reflect that in block structure and outline.
+9. Direct DOM-aware planning:
+   - Populate dom_mapping with CSS selectors that already exist in TEMPLATE_DOM_OUTLINE.
+   - Prefer stable selectors such as ids, anchored classes, or short anchored descendant selectors.
+   - Avoid broad selectors like `div`, `section`, or `p` unless the outline clearly proves uniqueness.
+   - dom_mapping values must be HTML/text strings intended for inner-content injection into existing template nodes.
+10. Cleanup planning:
+   - Populate selectors_to_remove with wrapper selectors for residual template garbage such as placeholder copy, irrelevant widgets, dummy images, stale footers, or unrelated template sections.
+   - Never include a selector that overlaps a dom_mapping target or would remove injected paper content.
+11. Stable revision targets:
+   - Every block must keep a stable semantic snake_case block_id.
+   - Never use positional, template-coupled, or placeholder ids such as `section_1`, `block_2`, `template_hero`, `todo`, or `content_box`.
+   - If PREVIOUS_PAGE_PLAN_JSON is provided, preserve block ids for conceptually unchanged sections whenever possible.
 
 ## Planning behavior
-1. Select one primary template and one optional fallback template.
+1. Respect the selected template candidate and optionally name one fallback candidate from TEMPLATE_CANDIDATES_JSON.
 2. Decide adaptation strategy:
    - what to preserve from template, what to replace, and style override intensity.
 3. Build block mapping:
    - each block must map source_sections and target_template_region.
-4. Define content contract + asset binding for each block.
-5. Define implementation order and file touch plan for Coder.
-6. Run self-check for grounding and feasibility before finalizing.
+4. Use TEMPLATE_DOM_OUTLINE and selected template metadata directly while building target_template_region and dom_mapping.
+5. Define content contract + asset binding for each block.
+6. Define implementation order and file touch plan for Coder.
+7. Run self-check for grounding and feasibility before finalizing.
 
 ## Required output JSON schema
 {
@@ -745,8 +770,23 @@ Current project mode is AutoPage-style: template-first generation with local tem
 PLANNER_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
 {structured_paper_json}
 
+### PREVIOUS_PAGE_PLAN_JSON
+{previous_page_plan_json}
+
 ### TEMPLATE_CATALOG_JSON
 {template_catalog_json}
+
+### TEMPLATE_CANDIDATES_JSON
+{template_candidates_json}
+
+### SELECTED_TEMPLATE_CANDIDATE_JSON
+{selected_template_json}
+
+### TEMPLATE_ENTRY_HTML_PATH
+{template_entry_html_path}
+
+### TEMPLATE_DOM_OUTLINE
+{template_dom_outline}
 
 ### TEMPLATE_LINK_MAP_JSON
 {template_link_map_json}
@@ -783,6 +823,7 @@ Rules:
 4. Return one strict JSON object only.
 """
 
+# Deprecated: retained only for staged cleanup while SemanticPlan remains in schemas.
 SEMANTIC_PLANNER_SYSTEM_PROMPT = """You are Semantic Planner (Stage A) in PaperAlchemy.
 Your job is template-agnostic planning.
 
@@ -828,6 +869,7 @@ Output shape reminder:
 }
 """
 
+# Deprecated: retained only for staged cleanup while SemanticPlan remains in schemas.
 SEMANTIC_PLANNER_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
 {structured_paper_json}
 
@@ -846,6 +888,7 @@ SEMANTIC_PLANNER_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
 Generate SemanticPlan JSON only.
 """
 
+# Deprecated: retained only for staged cleanup after unified_planner removed the live two-hop planner chain.
 TEMPLATE_BINDER_SYSTEM_PROMPT = """You are Template Binder Planner (Stage B) in PaperAlchemy.
 You are a frontend integration expert who preserves the original template DOM.
 Your job is to bind a semantic paper plan onto the selected template candidate and output final PagePlan.
@@ -890,6 +933,7 @@ Rules:
    - do not introduce blocks that cannot be traced back to STRUCTURED_PAPER_JSON.
 """
 
+# Deprecated: retained only for staged cleanup after unified_planner removed the live two-hop planner chain.
 TEMPLATE_BINDER_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
 {structured_paper_json}
 
@@ -987,13 +1031,19 @@ Look for critical visual bugs:
 Return exactly:
 {
   "passed": true | false,
+  "issue_class": "none" | "cosmetic" | "structure",
+  "suggested_recovery": "accept" | "patch_or_review" | "rerun_planner",
   "issues": ["string"],
   "selectors_to_remove": ["string"],
   "css_rules_to_inject": ["string"]
 }
 
 Rules:
-- If the page looks visually clean, set passed=true and leave the lists empty.
+- If the page looks visually clean, set passed=true, issue_class="none", suggested_recovery="accept", and leave the lists empty.
+- Use issue_class="structure" only when the page has a structural mismatch that should go back to Planner, such as the wrong information architecture, obviously wrong section hierarchy, or a template/page shell mismatch that local patching is unlikely to fix safely.
+- Use issue_class="cosmetic" when the page is basically correct but needs cleanup or local repair.
+- For structure issues, set suggested_recovery="rerun_planner".
+- For cosmetic issues, set suggested_recovery="patch_or_review".
 - If exact selectors are uncertain, keep selectors_to_remove empty rather than inventing unsafe selectors.
 - Prefer small, concrete CSS fixes in css_rules_to_inject.
 - Do not return markdown.
@@ -1002,7 +1052,7 @@ Rules:
 VISION_CRITIC_USER_PROMPT_TEMPLATE = """Review this rendered page screenshot.
 Current entry html: {entry_html_path}
 Template id: {selected_template_id}
-Return strict JSON with actionable selectors_to_remove and css_rules_to_inject.
+Return strict JSON with issue classification, recovery suggestion, actionable selectors_to_remove, and css_rules_to_inject.
 """
 
 BLOCK_REGEN_SYSTEM_PROMPT = """You are the Block Regenerator in PaperAlchemy.

@@ -8,18 +8,17 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from src.agent_planner_critic import build_planner_critic_router, planner_critic_node
+from src.html_utils import read_text_with_fallback
 from src.deterministic_template_selector import score_and_select_template
 from src.human_feedback import extract_human_feedback_text, normalize_human_feedback
 from src.json_utils import to_pretty_json
 from src.llm import get_llm
 from src.planner_template_catalog import build_template_catalog, load_module_index, load_template_link_map
 from src.prompts import (
-    SEMANTIC_PLANNER_SYSTEM_PROMPT,
-    SEMANTIC_PLANNER_USER_PROMPT_TEMPLATE,
-    TEMPLATE_BINDER_SYSTEM_PROMPT,
-    TEMPLATE_BINDER_USER_PROMPT_TEMPLATE,
+    PLANNER_SYSTEM_PROMPT,
+    PLANNER_USER_PROMPT_TEMPLATE,
 )
-from src.schemas import PagePlan, SemanticPlan, StructuredPaper, TemplateCandidate
+from src.schemas import PagePlan, StructuredPaper, TemplateCandidate
 from src.state import PlannerState
 from src.template_resources import ensure_autopage_template_assets
 
@@ -35,13 +34,6 @@ def _normalize_structured_paper(paper: Any) -> StructuredPaper | None:
         return None
 
 
-def _normalize_semantic_plan(plan: Any) -> SemanticPlan | None:
-    if isinstance(plan, SemanticPlan):
-        return plan
-    if plan is None:
-        return None
-
-
 def _normalize_page_plan(plan: Any) -> PagePlan | None:
     if isinstance(plan, PagePlan):
         return plan
@@ -49,10 +41,6 @@ def _normalize_page_plan(plan: Any) -> PagePlan | None:
         return None
     try:
         return PagePlan.model_validate(plan)
-    except Exception:
-        return None
-    try:
-        return SemanticPlan.model_validate(plan)
     except Exception:
         return None
 
@@ -73,13 +61,6 @@ def _to_project_relative_path(path: Path, project_root: Path) -> str:
         return str(path.resolve().relative_to(project_root.resolve())).replace("\\", "/")
     except ValueError:
         return str(path.resolve())
-
-
-def _read_text_with_fallback(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return path.read_text(encoding="latin-1")
 
 
 def _selector_component(tag: Tag) -> str:
@@ -237,52 +218,6 @@ def _select_designated_template(
     return candidates, selected, designated_template_path
 
 
-def semantic_planner_node(state: PlannerState) -> dict[str, Any]:
-    print(
-        f"[PaperAlchemy-SemanticPlanner] generating semantic plan "
-        f"(attempt {state.get('planner_retry_count', 0) + 1})..."
-    )
-
-    constraints = state.get("generation_constraints") or {}
-    llm = get_llm(temperature=0.3, use_smart_model=True)
-    structured_llm = llm.with_structured_output(SemanticPlan)
-
-    structured_paper = _normalize_structured_paper(state.get("structured_paper"))
-    if not structured_paper:
-        print("[PaperAlchemy-SemanticPlanner] missing structured_paper, cannot proceed.")
-        return {"semantic_plan": None, "page_plan": None}
-
-    previous_page_plan = _normalize_page_plan(state.get("previous_page_plan"))
-    feedback_history = state.get("planner_feedback_history") or []
-    human_directives = extract_human_feedback_text(state.get("human_directives"))
-
-    user_msg = SEMANTIC_PLANNER_USER_PROMPT_TEMPLATE.format(
-        structured_paper_json=to_pretty_json(structured_paper),
-        previous_page_plan_json=to_pretty_json(previous_page_plan) if previous_page_plan else "null",
-        generation_constraints_json=json.dumps(constraints, indent=2, ensure_ascii=False),
-        human_directives=human_directives,
-        prior_feedback=json.dumps(feedback_history, indent=2, ensure_ascii=False),
-    )
-
-    try:
-        result = structured_llm.invoke(
-            [
-                SystemMessage(content=SEMANTIC_PLANNER_SYSTEM_PROMPT),
-                HumanMessage(content=user_msg),
-            ]
-        )
-        if not result:
-            raise ValueError("Semantic planner returned empty result")
-
-        return {
-            "semantic_plan": result,
-            "page_plan": None,
-        }
-    except Exception as exc:
-        print(f"[PaperAlchemy-SemanticPlanner] generation error: {exc}")
-        return {"semantic_plan": None, "page_plan": None}
-
-
 def template_selector_node(state: PlannerState) -> dict[str, Any]:
     print("[PaperAlchemy-TemplateSelector] selecting template from user constraints...")
 
@@ -291,7 +226,7 @@ def template_selector_node(state: PlannerState) -> dict[str, Any]:
     user_constraints = state.get("user_constraints") or {}
     tags_json_path = str(constraints.get("template_tags_json_path") or "").strip()
 
-    designated_candidates, designated_selected, designated_path = _select_designated_template(
+    designated_candidates, designated_selected, _ = _select_designated_template(
         constraints=constraints,
         project_root=project_root,
     )
@@ -303,7 +238,6 @@ def template_selector_node(state: PlannerState) -> dict[str, Any]:
         return {
             "template_candidates": designated_candidates or [designated_selected],
             "selected_template": designated_selected,
-            "selected_template_path": designated_path,
             "generation_constraints": {
                 **constraints,
                 "selected_template_id": designated_selected.template_id,
@@ -315,7 +249,6 @@ def template_selector_node(state: PlannerState) -> dict[str, Any]:
         return {
             "template_candidates": [],
             "selected_template": None,
-            "selected_template_path": None,
         }
 
     try:
@@ -328,7 +261,6 @@ def template_selector_node(state: PlannerState) -> dict[str, Any]:
         return {
             "template_candidates": [],
             "selected_template": None,
-            "selected_template_path": None,
         }
 
     top_k = max(1, int(constraints.get("template_candidate_top_k", 3)))
@@ -348,7 +280,6 @@ def template_selector_node(state: PlannerState) -> dict[str, Any]:
         return {
             "template_candidates": [],
             "selected_template": None,
-            "selected_template_path": None,
         }
 
     if not candidates:
@@ -362,7 +293,6 @@ def template_selector_node(state: PlannerState) -> dict[str, Any]:
     return {
         "template_candidates": candidates,
         "selected_template": selected,
-        "selected_template_path": str(selection_result.get("selected_template_path") or ""),
         "generation_constraints": {
             **constraints,
             "selected_template_id": selected.template_id,
@@ -370,14 +300,16 @@ def template_selector_node(state: PlannerState) -> dict[str, Any]:
     }
 
 
-def template_binder_node(state: PlannerState) -> dict[str, Any]:
-    print("[PaperAlchemy-TemplateBinder] binding semantic plan to selected template...")
+def unified_planner_node(state: PlannerState) -> dict[str, Any]:
+    print(
+        "[PaperAlchemy-UnifiedPlanner] generating PagePlan from selected template "
+        f"(attempt {state.get('planner_retry_count', 0) + 1})..."
+    )
 
     structured_paper = _normalize_structured_paper(state.get("structured_paper"))
-    semantic_plan = _normalize_semantic_plan(state.get("semantic_plan"))
-    if not structured_paper or not semantic_plan:
-        print("[PaperAlchemy-TemplateBinder] missing structured_paper or semantic_plan.")
-        return {}
+    if not structured_paper:
+        print("[PaperAlchemy-UnifiedPlanner] missing structured_paper, cannot proceed.")
+        return {"page_plan": None}
 
     raw_candidates = state.get("template_candidates") or []
     candidates = [
@@ -391,36 +323,37 @@ def template_binder_node(state: PlannerState) -> dict[str, Any]:
         selected = candidates[0]
 
     if not selected:
-        print("[PaperAlchemy-TemplateBinder] selected template is missing.")
-        return {}
+        print("[PaperAlchemy-UnifiedPlanner] selected template is missing.")
+        return {"page_plan": None}
 
     project_root = Path(__file__).resolve().parent.parent
     template_entry_path = project_root / selected.root_dir / selected.chosen_entry_html
     if not template_entry_path.exists():
-        print(f"[PaperAlchemy-TemplateBinder] template entry html not found: {template_entry_path}")
-        return {}
+        print(f"[PaperAlchemy-UnifiedPlanner] template entry html not found: {template_entry_path}")
+        return {"page_plan": None}
 
     try:
-        template_html = _read_text_with_fallback(template_entry_path)
+        template_html = read_text_with_fallback(template_entry_path)
     except Exception as exc:
-        print(f"[PaperAlchemy-TemplateBinder] failed reading template html: {exc}")
-        return {}
+        print(f"[PaperAlchemy-UnifiedPlanner] failed reading template html: {exc}")
+        return {"page_plan": None}
 
     template_dom_outline = _build_dom_outline(template_html)
     constraints = state.get("generation_constraints") or {}
     llm = get_llm(temperature=0.2, use_smart_model=True)
     structured_llm = llm.with_structured_output(PagePlan)
 
+    template_catalog = state.get("template_catalog") or []
     template_link_map = state.get("template_link_map") or {}
     module_index = state.get("module_index") or {}
     planner_feedback_history = state.get("planner_feedback_history") or []
     human_directives = extract_human_feedback_text(state.get("human_directives"))
     previous_page_plan = _normalize_page_plan(state.get("previous_page_plan"))
 
-    user_msg = TEMPLATE_BINDER_USER_PROMPT_TEMPLATE.format(
+    user_msg = PLANNER_USER_PROMPT_TEMPLATE.format(
         structured_paper_json=to_pretty_json(structured_paper),
         previous_page_plan_json=to_pretty_json(previous_page_plan) if previous_page_plan else "null",
-        semantic_plan_json=to_pretty_json(semantic_plan),
+        template_catalog_json=json.dumps(template_catalog, indent=2, ensure_ascii=False),
         template_candidates_json=json.dumps(
             [candidate.model_dump() for candidate in candidates],
             indent=2,
@@ -439,12 +372,12 @@ def template_binder_node(state: PlannerState) -> dict[str, Any]:
     try:
         result = structured_llm.invoke(
             [
-                SystemMessage(content=TEMPLATE_BINDER_SYSTEM_PROMPT),
+                SystemMessage(content=PLANNER_SYSTEM_PROMPT),
                 HumanMessage(content=user_msg),
             ]
         )
         if not result:
-            raise ValueError("Template binder returned empty result")
+            raise ValueError("Unified planner returned empty result")
 
         result.plan_meta.planning_mode = "hybrid_template_bind"
         result.template_selection.selected_template_id = selected.template_id
@@ -477,26 +410,24 @@ def template_binder_node(state: PlannerState) -> dict[str, Any]:
         result.selectors_to_remove = normalized_selectors_to_remove
         return {"page_plan": result}
     except Exception as exc:
-        print(f"[PaperAlchemy-TemplateBinder] generation error: {exc}")
-        return {}
+        print(f"[PaperAlchemy-UnifiedPlanner] generation error: {exc}")
+        return {"page_plan": None}
 
 
 def build_planner_graph(max_retry: int = 2):
     workflow = StateGraph(PlannerState)
     workflow.add_node("template_selector", template_selector_node)
-    workflow.add_node("semantic_planner", semantic_planner_node)
-    workflow.add_node("template_binder", template_binder_node)
+    workflow.add_node("unified_planner", unified_planner_node)
     workflow.add_node("planner_critic", planner_critic_node)
 
     workflow.set_entry_point("template_selector")
-    workflow.add_edge("template_selector", "semantic_planner")
-    workflow.add_edge("semantic_planner", "template_binder")
-    workflow.add_edge("template_binder", "planner_critic")
+    workflow.add_edge("template_selector", "unified_planner")
+    workflow.add_edge("unified_planner", "planner_critic")
 
     workflow.add_conditional_edges(
         "planner_critic",
         build_planner_critic_router(max_retry=max_retry),
-        {"retry": "semantic_planner", "end": END},
+        {"retry": "unified_planner", "end": END},
     )
 
     memory = MemorySaver()
@@ -567,17 +498,15 @@ def run_planner_agent(
         "generation_constraints": constraints,
         "user_constraints": user_constraints or {},
         "human_directives": normalize_human_feedback(human_directives),
-        "semantic_plan": None,
         "template_candidates": [],
         "selected_template": None,
-        "selected_template_path": None,
         "planner_feedback_history": [],
         "page_plan": None,
         "planner_critic_passed": False,
         "planner_retry_count": 0,
     }
 
-    print("[PaperAlchemy-Planner] running Selector + SemanticPlanner + Binder + Critic graph...")
+    print("[PaperAlchemy-Planner] running Selector + UnifiedPlanner + Critic graph...")
     for _ in app.stream(initial_state, thread):
         pass
 

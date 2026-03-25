@@ -16,6 +16,13 @@ from src.agent_coder_critic import (
     take_screenshot_action,
     vision_critic_node,
 )
+from src.html_utils import (
+    extract_html_document,
+    message_content_to_text,
+    normalize_html_document_whitespace,
+    read_current_page_html,
+    read_text_with_fallback,
+)
 from src.human_feedback import extract_human_feedback_text, normalize_human_feedback
 from src.json_utils import to_pretty_json
 from src.llm import get_llm
@@ -30,7 +37,7 @@ from src.page_manifest import (
 )
 from src.page_validation import collect_allowed_asset_web_paths, validate_local_image_references
 from src.prompts import CODER_SYSTEM_PROMPT, CODER_USER_PROMPT_TEMPLATE
-from src.schemas import CoderArtifact, PagePlan, StructuredPaper
+from src.schemas import CoderArtifact, PagePlan, StructuredPaper, VisualSmokeReport
 from src.state import CoderState
 
 
@@ -67,6 +74,17 @@ def _normalize_coder_artifact(artifact: Any) -> CoderArtifact | None:
         return None
 
 
+def _normalize_visual_smoke_report(report: Any) -> VisualSmokeReport | None:
+    if isinstance(report, VisualSmokeReport):
+        return report
+    if report is None:
+        return None
+    try:
+        return VisualSmokeReport.model_validate(report)
+    except Exception:
+        return None
+
+
 def _safe_slug(text: str) -> str:
     slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", text.strip())
     slug = slug.strip("-").lower()
@@ -79,66 +97,6 @@ def _to_html_relative_path(target_path: Path, base_dir: Path) -> str:
     if not web_path.startswith((".", "/")):
         web_path = f"./{web_path}"
     return web_path
-
-
-def _read_text_with_fallback(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return path.read_text(encoding="latin-1")
-
-
-def _message_content_to_text(message: Any) -> str:
-    content = getattr(message, "content", message)
-    if isinstance(content, str):
-        return content.strip()
-
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str) and item.strip():
-                parts.append(item.strip())
-                continue
-            if isinstance(item, dict):
-                text = str(item.get("text") or "").strip()
-                if text:
-                    parts.append(text)
-        return "\n".join(parts).strip()
-
-    return str(content or "").strip()
-
-
-def _extract_html_document(text: str) -> str:
-    raw_text = str(text or "").strip()
-    if not raw_text:
-        return ""
-
-    fenced_match = re.search(r"```(?:html)?\s*(.*?)```", raw_text, flags=re.IGNORECASE | re.DOTALL)
-    if fenced_match:
-        raw_text = fenced_match.group(1).strip()
-
-    doctype_match = re.search(r"<!DOCTYPE\s+html[^>]*>", raw_text, flags=re.IGNORECASE)
-    html_match = re.search(r"<html\b.*?</html>", raw_text, flags=re.IGNORECASE | re.DOTALL)
-
-    if html_match:
-        start = html_match.start()
-        end = html_match.end()
-        if doctype_match and doctype_match.start() <= start:
-            raw_text = raw_text[doctype_match.start() : end]
-        else:
-            raw_text = raw_text[start:end]
-    elif raw_text.lower().startswith("<!doctype") or raw_text.lower().startswith("<html"):
-        pass
-    else:
-        return ""
-
-    if "<html" not in raw_text.lower():
-        return ""
-
-    if "<!doctype" not in raw_text.lower():
-        raw_text = "<!DOCTYPE html>\n" + raw_text
-
-    return raw_text.strip()
 
 
 def _ensure_body_markers(html_text: str) -> str:
@@ -160,10 +118,6 @@ def _ensure_body_markers(html_text: str) -> str:
             flags=re.IGNORECASE,
         )
     return result
-
-
-def _normalize_html_whitespace(html_text: str) -> str:
-    return str(html_text or "").replace("\r\n", "\n").strip() + "\n"
 
 
 def _normalize_asset_key(value: str) -> str:
@@ -281,16 +235,7 @@ def _read_previous_generated_html(state: CoderState) -> str:
     artifact = _normalize_coder_artifact(state.get("coder_artifact"))
     if not artifact:
         return "(none)"
-
-    entry_path = Path(artifact.entry_html)
-    if not entry_path.exists():
-        return "(none)"
-
-    try:
-        previous_html = _read_text_with_fallback(entry_path).strip()
-    except Exception:
-        return "(none)"
-
+    previous_html = read_current_page_html(artifact, missing_value="").strip()
     return previous_html or "(none)"
 
 
@@ -351,7 +296,7 @@ def coder_node(state: CoderState) -> dict[str, Any]:
         return {}
 
     try:
-        template_reference_html = _read_text_with_fallback(template_entry_path)
+        template_reference_html = read_text_with_fallback(template_entry_path)
     except Exception as exc:
         print(f"[PaperAlchemy-Coder] failed reading template reference html: {exc}")
         return {}
@@ -410,13 +355,13 @@ def coder_node(state: CoderState) -> dict[str, Any]:
         print(f"[PaperAlchemy-Coder] llm generation failed: {exc}")
         return {}
 
-    generated_html = _extract_html_document(_message_content_to_text(response))
+    generated_html = extract_html_document(message_content_to_text(response))
     if not generated_html:
         print("[PaperAlchemy-Coder] model did not return a valid HTML document.")
         return {}
 
     generated_html = _ensure_body_markers(generated_html)
-    generated_html = _normalize_html_whitespace(generated_html)
+    generated_html = normalize_html_document_whitespace(generated_html)
     generated_html = annotate_global_anchors(generated_html, page_plan)
 
     asset_critiques = validate_local_image_references(
@@ -507,6 +452,27 @@ def run_coder_agent(
     previous_coder_artifact: CoderArtifact | None = None,
     max_retry: int = 2,
 ) -> CoderArtifact | None:
+    artifact, _, _ = run_coder_agent_with_diagnostics(
+        paper_folder_name=paper_folder_name,
+        structured_data=structured_data,
+        page_plan=page_plan,
+        human_directives=human_directives,
+        coder_instructions=coder_instructions,
+        previous_coder_artifact=previous_coder_artifact,
+        max_retry=max_retry,
+    )
+    return artifact
+
+
+def run_coder_agent_with_diagnostics(
+    paper_folder_name: str,
+    structured_data: StructuredPaper,
+    page_plan: PagePlan,
+    human_directives: str | dict = "",
+    coder_instructions: str = "",
+    previous_coder_artifact: CoderArtifact | None = None,
+    max_retry: int = 2,
+) -> tuple[CoderArtifact | None, VisualSmokeReport | None, PagePlan | None]:
     app = build_coder_graph(max_retry=max_retry)
     thread = {"configurable": {"thread_id": f"coder_{paper_folder_name}"}}
 
@@ -521,6 +487,7 @@ def run_coder_agent(
         "visual_screenshot_path": "",
         "visual_iterations": 0,
         "is_visually_approved": False,
+        "visual_smoke_report": None,
         "coder_artifact": previous_coder_artifact,
         "coder_critic_passed": False,
         "coder_retry_count": 0,
@@ -532,6 +499,8 @@ def run_coder_agent(
 
     final_state = app.get_state(thread)
     artifact_result = final_state.values.get("coder_artifact")
+    resolved_page_plan = _normalize_page_plan(final_state.values.get("page_plan"))
+    visual_smoke_report = _normalize_visual_smoke_report(final_state.values.get("visual_smoke_report"))
     normalized_artifact: CoderArtifact | None = None
     if artifact_result is not None:
         try:
@@ -541,10 +510,10 @@ def run_coder_agent(
 
     if not normalized_artifact or not final_state.values.get("coder_critic_passed"):
         print("[PaperAlchemy-Coder] coder completed but critic did not fully pass.")
-        return None
+        return None, visual_smoke_report, resolved_page_plan
 
     if not final_state.values.get("is_visually_approved") and int(final_state.values.get("visual_iterations", 0)) > 0:
-        print("[PaperAlchemy-Coder] visual QA ended without full approval, returning the latest artifact after retry cap.")
+        print("[PaperAlchemy-Coder] visual smoke test flagged issues; returning the latest artifact for human review.")
 
     print(f"[PaperAlchemy-Coder] build completed: {normalized_artifact.entry_html}")
-    return normalized_artifact
+    return normalized_artifact, visual_smoke_report, resolved_page_plan

@@ -1,7 +1,7 @@
 import json
-from pathlib import Path
 from typing import Any
 
+from src.html_utils import read_current_page_html
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.human_feedback import (
@@ -28,26 +28,6 @@ def _normalize_coder_artifact(artifact: Any) -> CoderArtifact | None:
         return None
 
 
-def _message_content_to_text(message: Any) -> str:
-    content = getattr(message, "content", message)
-    if isinstance(content, str):
-        return content.strip()
-
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str) and item.strip():
-                parts.append(item.strip())
-                continue
-            if isinstance(item, dict):
-                text = str(item.get("text") or "").strip()
-                if text:
-                    parts.append(text)
-        return "\n".join(parts).strip()
-
-    return str(content or "").strip()
-
-
 def _normalize_revision_plan(plan: Any) -> RevisionPlan | None:
     if isinstance(plan, RevisionPlan):
         return plan
@@ -60,19 +40,7 @@ def _normalize_revision_plan(plan: Any) -> RevisionPlan | None:
 
 
 def _read_current_html(artifact: CoderArtifact | None) -> str:
-    if not artifact:
-        return "(none)"
-
-    entry_path = Path(artifact.entry_html)
-    if not entry_path.exists():
-        return "(none)"
-
-    try:
-        return entry_path.read_text(encoding="utf-8")
-    except UnicodeDecodeError:
-        return entry_path.read_text(encoding="latin-1")
-    except Exception:
-        return "(none)"
+    return read_current_page_html(artifact, missing_value="(none)")
 
 
 def _read_current_page_manifest(artifact: CoderArtifact | None) -> str:

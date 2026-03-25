@@ -43,6 +43,8 @@ class SemanticBlock(BaseModel):
 
 
 class SemanticPlan(BaseModel):
+    # Deprecated runtime artifact kept temporarily for staged cleanup. The live planner
+    # flow now produces PagePlan directly via unified_planner.
     plan_version: str = Field(description="Semantic planning schema version.")
     planning_mode: Literal["hybrid_two_stage"] = Field(description="Hybrid planner mode id.")
     design_intent: str = Field(description="High-level design objective.")
@@ -309,6 +311,84 @@ class PageManifest(BaseModel):
     selected_template_id: str
     blocks: List[PageManifestBlock]
     globals: List[PageManifestGlobal] = Field(default_factory=list)
+
+
+class ShellResolutionCandidate(BaseModel):
+    selector_hint: str
+    region_role: Literal["hero", "section", "gallery", "table", "footer", "nav"]
+    score: float
+    reason: str
+    preview_image_path: str = ""
+
+
+class ShellBindingReview(BaseModel):
+    block_id: str
+    block_title: str
+    original_selector_hint: str
+    failure_reason: str
+    template_entry_html: str
+    template_preview_path: str = ""
+    candidates: List[ShellResolutionCandidate] = Field(default_factory=list)
+
+
+class ShellManualSelection(BaseModel):
+    block_id: str
+    selector_hint: str
+
+
+class LayoutSectionOption(BaseModel):
+    selector_hint: str
+    region_role: Literal["hero", "section", "gallery", "table", "footer", "nav"]
+    dom_index: int
+    score: float
+    reason: str
+    preview_image_path: str = ""
+    overlay_label: str = ""
+
+
+class LayoutFigureOption(BaseModel):
+    image_path: str
+    caption: Optional[str] = None
+    type: str
+    source_section: str
+    preview_image_path: str = ""
+
+
+class LayoutComposeBlock(BaseModel):
+    block_id: str
+    title: str
+    source_sections: List[str] = Field(default_factory=list)
+    current_order: int
+    selected_selector_hint: str = ""
+    selected_figure_paths: List[str] = Field(default_factory=list)
+    section_options: List[LayoutSectionOption] = Field(default_factory=list)
+    figure_options: List[LayoutFigureOption] = Field(default_factory=list)
+
+
+class LayoutComposeSession(BaseModel):
+    template_entry_html: str
+    template_preview_path: str = ""
+    blocks: List[LayoutComposeBlock] = Field(default_factory=list)
+    active_block_id: Optional[str] = None
+    validation_errors: List[str] = Field(default_factory=list)
+
+
+class LayoutComposeUpdate(BaseModel):
+    active_block_id: Optional[str] = None
+    selected_selector_hint: Optional[str] = None
+    selected_figure_paths: Optional[List[str]] = None
+    order_action: Optional[Literal["move_up", "move_down"]] = None
+    action: str = ""
+
+
+class VisualSmokeReport(BaseModel):
+    passed: bool = True
+    issue_class: Literal["none", "cosmetic", "structure"] = "none"
+    suggested_recovery: Literal["accept", "patch_or_review", "rerun_planner"] = "accept"
+    issues: List[str] = Field(default_factory=list)
+    selectors_to_remove: List[str] = Field(default_factory=list)
+    css_rules_to_inject: List[str] = Field(default_factory=list)
+    screenshot_path: str = ""
 
 
 class RevisionEdit(BaseModel):
