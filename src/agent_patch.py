@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -48,11 +49,13 @@ from src.schemas import (
     AttributeChange,
     CoderArtifact,
     FallbackBlock,
+    OverrideCssRule,
     PageManifest,
     PagePlan,
     RevisionPlan,
     StructuredPaper,
     StyleChange,
+    TargetedReplacement,
     TargetedReplacementPlan,
 )
 from src.state import WorkflowState
@@ -121,6 +124,272 @@ def _normalize_targeted_replacement_plan(plan: Any) -> TargetedReplacementPlan |
         return TargetedReplacementPlan.model_validate(plan)
     except Exception:
         return None
+
+
+def _extract_json_object(text: str) -> dict[str, Any] | None:
+    raw_text = str(text or "").strip()
+    if not raw_text:
+        return None
+
+    fenced_match = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw_text, flags=re.IGNORECASE | re.DOTALL)
+    if fenced_match:
+        raw_text = fenced_match.group(1).strip()
+
+    try:
+        parsed = json.loads(raw_text)
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        pass
+
+    start = raw_text.find("{")
+    end = raw_text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        return None
+
+    try:
+        parsed = json.loads(raw_text[start : end + 1])
+        return parsed if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+
+def _normalize_identifier(value: Any) -> str | None:
+    clean = str(value or "").strip()
+    return clean or None
+
+
+def _normalize_declarations(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+
+    normalized: dict[str, str] = {}
+    for name, raw_value in value.items():
+        clean_name = str(name or "").strip()
+        clean_value = str(raw_value or "").strip()
+        if clean_name and clean_value:
+            normalized[clean_name] = clean_value
+    return normalized
+
+
+def _normalize_attributes(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+
+    normalized: dict[str, str] = {}
+    for name, raw_value in value.items():
+        clean_name = str(name or "").strip()
+        if not clean_name:
+            continue
+        normalized[clean_name] = "" if raw_value is None else str(raw_value).strip()
+    return normalized
+
+
+def _normalize_replacement_item(item: dict[str, Any]) -> dict[str, Any] | None:
+    scope = _normalize_identifier(item.get("scope"))
+    html = str(item.get("html") or "").strip()
+    block_id = _normalize_identifier(item.get("block_id"))
+    slot_id = _normalize_identifier(item.get("slot_id"))
+    global_id = _normalize_identifier(item.get("global_id"))
+
+    if scope not in {"slot", "block", "global"} or not html:
+        return None
+    if scope == "slot" and (not block_id or not slot_id):
+        return None
+    if scope == "block" and not block_id:
+        return None
+    if scope == "global" and not global_id:
+        return None
+
+    return {
+        "scope": scope,
+        "block_id": block_id,
+        "slot_id": slot_id,
+        "global_id": global_id,
+        "html": html,
+    }
+
+
+def _normalize_scoped_change_target(item: dict[str, Any]) -> dict[str, Any] | None:
+    scope = _normalize_identifier(item.get("scope"))
+    block_id = _normalize_identifier(item.get("block_id"))
+    slot_id = _normalize_identifier(item.get("slot_id"))
+    global_id = _normalize_identifier(item.get("global_id"))
+
+    if scope not in {"slot", "block", "global"}:
+        return None
+    if scope == "slot" and (not block_id or not slot_id):
+        return None
+    if scope == "block" and not block_id:
+        return None
+    if scope == "global" and not global_id:
+        return None
+
+    return {
+        "scope": scope,
+        "block_id": block_id,
+        "slot_id": slot_id,
+        "global_id": global_id,
+    }
+
+
+def _sanitize_targeted_plan_payload(raw_payload: Any) -> tuple[dict[str, Any] | None, list[str]]:
+    if not isinstance(raw_payload, dict):
+        return None, ["patch agent returned a non-object payload"]
+
+    warnings: list[str] = []
+    sanitized: dict[str, Any] = {
+        "replacements": [],
+        "style_changes": [],
+        "attribute_changes": [],
+        "override_css_rules": [],
+        "fallback_blocks": [],
+    }
+
+    for item in raw_payload.get("replacements") or []:
+        if not isinstance(item, dict):
+            warnings.append("dropped invalid replacement")
+            continue
+        normalized = _normalize_replacement_item(item)
+        if normalized is None:
+            warnings.append("dropped invalid replacement")
+            continue
+        sanitized["replacements"].append(normalized)
+
+    for item in raw_payload.get("style_changes") or []:
+        if not isinstance(item, dict):
+            warnings.append("dropped invalid style change")
+            continue
+        target = _normalize_scoped_change_target(item)
+        declarations = _normalize_declarations(item.get("declarations"))
+        if not declarations:
+            warnings.append("dropped empty style change")
+            continue
+        if target is None:
+            warnings.append("dropped invalid style change")
+            continue
+        sanitized["style_changes"].append({**target, "declarations": declarations})
+
+    for item in raw_payload.get("attribute_changes") or []:
+        if not isinstance(item, dict):
+            warnings.append("dropped invalid attribute change")
+            continue
+        target = _normalize_scoped_change_target(item)
+        attributes = _normalize_attributes(item.get("attributes"))
+        if not attributes:
+            warnings.append("dropped empty attribute change")
+            continue
+        if target is None:
+            warnings.append("dropped invalid attribute change")
+            continue
+        sanitized["attribute_changes"].append({**target, "attributes": attributes})
+
+    for item in raw_payload.get("override_css_rules") or []:
+        if not isinstance(item, dict):
+            warnings.append("dropped invalid override css rule")
+            continue
+        selector = str(item.get("selector") or "").strip()
+        declarations = _normalize_declarations(item.get("declarations"))
+        if not selector or not declarations:
+            warnings.append("dropped empty override css rule")
+            continue
+        sanitized["override_css_rules"].append(
+            {
+                "selector": selector,
+                "declarations": declarations,
+            }
+        )
+
+    for item in raw_payload.get("fallback_blocks") or []:
+        if not isinstance(item, dict):
+            warnings.append("dropped invalid fallback block")
+            continue
+        block_id = _normalize_identifier(item.get("block_id"))
+        reason = str(item.get("reason") or "").strip()
+        if not block_id or not reason:
+            warnings.append("dropped invalid fallback block")
+            continue
+        sanitized["fallback_blocks"].append(
+            {
+                "block_id": block_id,
+                "reason": reason,
+            }
+        )
+
+    return sanitized, warnings
+
+
+def _salvage_validated_items(
+    items: list[dict[str, Any]],
+    model: type[Any],
+    warning_label: str,
+) -> tuple[list[Any], list[str]]:
+    validated_items: list[Any] = []
+    warnings: list[str] = []
+    for item in items:
+        try:
+            validated_items.append(model.model_validate(item))
+        except Exception:
+            warnings.append(warning_label)
+    return validated_items, warnings
+
+
+def _build_targeted_replacement_plan_from_response(response: Any) -> tuple[TargetedReplacementPlan | None, list[str]]:
+    raw_payload: dict[str, Any] | None
+    if isinstance(response, dict):
+        raw_payload = response
+    else:
+        raw_payload = _extract_json_object(message_content_to_text(response))
+    if raw_payload is None:
+        return None, ["patch agent returned invalid targeted replacement plan JSON"]
+
+    sanitized_payload, warnings = _sanitize_targeted_plan_payload(raw_payload)
+    if sanitized_payload is None:
+        return None, warnings
+
+    replacements, replacement_warnings = _salvage_validated_items(
+        sanitized_payload["replacements"],
+        TargetedReplacement,
+        "dropped invalid replacement",
+    )
+    style_changes, style_warnings = _salvage_validated_items(
+        sanitized_payload["style_changes"],
+        StyleChange,
+        "dropped invalid style change",
+    )
+    attribute_changes, attribute_warnings = _salvage_validated_items(
+        sanitized_payload["attribute_changes"],
+        AttributeChange,
+        "dropped invalid attribute change",
+    )
+    override_css_rules, override_rule_warnings = _salvage_validated_items(
+        sanitized_payload["override_css_rules"],
+        OverrideCssRule,
+        "dropped invalid override css rule",
+    )
+    fallback_blocks, fallback_warnings = _salvage_validated_items(
+        sanitized_payload["fallback_blocks"],
+        FallbackBlock,
+        "dropped invalid fallback block",
+    )
+    warnings.extend(replacement_warnings)
+    warnings.extend(style_warnings)
+    warnings.extend(attribute_warnings)
+    warnings.extend(override_rule_warnings)
+    warnings.extend(fallback_warnings)
+
+    if warnings and replacements:
+        warnings.append("salvaged replacements after sanitization")
+
+    return (
+        TargetedReplacementPlan(
+            replacements=replacements,
+            style_changes=style_changes,
+            attribute_changes=attribute_changes,
+            override_css_rules=override_css_rules,
+            fallback_blocks=fallback_blocks,
+        ),
+        warnings,
+    )
 
 
 def _dedupe_paths(paths: list[Path]) -> list[Path]:
@@ -808,8 +1077,7 @@ def patch_agent_node(state: WorkflowState) -> dict[str, Any]:
     print("[PatchAgent] Building targeted DOM replacement plan...")
     try:
         llm = get_llm(temperature=0.1, use_smart_model=True)
-        structured_llm = llm.with_structured_output(TargetedReplacementPlan)
-        response = structured_llm.invoke(
+        response = llm.invoke(
             [
                 SystemMessage(content=PATCH_AGENT_SYSTEM_PROMPT),
                 HumanMessage(
@@ -836,8 +1104,14 @@ def patch_agent_node(state: WorkflowState) -> dict[str, Any]:
         print(f"[PatchAgent] {message}")
         return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
 
-    targeted_plan = _normalize_targeted_replacement_plan(response)
-    if not targeted_plan or (
+    targeted_plan, sanitize_warnings = _build_targeted_replacement_plan_from_response(response)
+    for warning in sanitize_warnings:
+        print(f"[PatchAgent] {warning}")
+    if not targeted_plan:
+        message = "Patch Agent returned invalid targeted replacement plan JSON."
+        print(f"[PatchAgent] {message}")
+        return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
+    if (
         not targeted_plan.replacements
         and not targeted_plan.style_changes
         and not targeted_plan.attribute_changes

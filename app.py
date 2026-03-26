@@ -28,6 +28,7 @@ from src.agent_coder import run_coder_agent_with_diagnostics
 from src.agent_planner import run_planner_agent
 from src.agent_reader import run_reader_agent
 from src.agent_translator import translator_node
+from src.agent_translator import edit_intent_router_node
 from src.deterministic_template_selector import score_and_select_templates
 from src.html_utils import read_text_with_fallback, resolve_template_entry_html_path
 from src.human_feedback import (
@@ -1372,6 +1373,19 @@ def webpage_review_node(_: WorkflowState) -> dict[str, Any]:
     return {"review_stage": "webpage"}
 
 
+def non_patch_feedback_node(state: WorkflowState) -> dict[str, Any]:
+    reason = str(state.get("edit_intent_reason") or "").strip()
+    message = "EditIntentRouter routed this request to non_patch; current patch path only supports anchored local edits."
+    if reason:
+        message = f"{message} Reason: {reason}."
+    print(f"[EditIntentRouter] {message}")
+    return {
+        "patch_error": message,
+        "patch_agent_output": "",
+        "targeted_replacement_plan": None,
+    }
+
+
 def human_review_router(state: WorkflowState) -> str:
     if bool(state.get("is_approved")):
         return "template_compile"
@@ -1399,6 +1413,12 @@ def webpage_review_router(state: WorkflowState) -> str:
     return "translator"
 
 
+def edit_intent_route_router(state: WorkflowState) -> str:
+    if str(state.get("edit_intent") or "").strip().lower() == "non_patch":
+        return "non_patch_feedback"
+    return "patch_agent"
+
+
 def build_hitl_workflow():
     workflow = StateGraph(WorkflowState)
     workflow.add_node("reader", reader_phase_node)
@@ -1410,6 +1430,8 @@ def build_hitl_workflow():
     workflow.add_node("layout_compose_review", layout_compose_review_node)
     workflow.add_node("webpage_review", webpage_review_node)
     workflow.add_node("translator", translator_node)
+    workflow.add_node("edit_intent_router", edit_intent_router_node)
+    workflow.add_node("non_patch_feedback", non_patch_feedback_node)
     workflow.add_node("patch_agent", patch_agent_node)
     workflow.add_node("patch_executor", patch_executor_node)
     workflow.add_node("coder", coder_phase_node)
@@ -1453,7 +1475,16 @@ def build_hitl_workflow():
             "end": END,
         },
     )
-    workflow.add_edge("translator", "patch_agent")
+    workflow.add_edge("translator", "edit_intent_router")
+    workflow.add_conditional_edges(
+        "edit_intent_router",
+        edit_intent_route_router,
+        {
+            "patch_agent": "patch_agent",
+            "non_patch_feedback": "non_patch_feedback",
+        },
+    )
+    workflow.add_edge("non_patch_feedback", "webpage_review")
     workflow.add_edge("patch_agent", "patch_executor")
     workflow.add_edge("patch_executor", "webpage_review")
 
@@ -1780,6 +1811,8 @@ def run_extraction(
             "manual_layout_compose_enabled": False,
             "human_directives": empty_human_feedback(),
             "coder_instructions": "",
+            "edit_intent": None,
+            "edit_intent_reason": "",
             "patch_agent_output": "",
             "revision_plan": None,
             "targeted_replacement_plan": None,
@@ -1880,6 +1913,8 @@ def revise_extraction(
             {
                 "human_directives": feedback_payload,
                 "coder_instructions": "",
+                "edit_intent": None,
+                "edit_intent_reason": "",
                 "patch_agent_output": "",
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
@@ -2687,10 +2722,12 @@ def request_webpage_revision(
             as_node="webpage_review",
         )
 
-        log("[Translator] Resuming workflow through Translator -> Patch Agent -> Patch Executor...")
+        log("[Translator] Resuming workflow through Translator -> EditIntentRouter -> Patch pipeline...")
         HITL_WORKFLOW.invoke(None, config=config)
         paused_state = HITL_WORKFLOW.get_state(config)
         paused_values = dict(paused_state.values or {})
+        edit_intent = str(paused_values.get("edit_intent") or "").strip().lower()
+        edit_intent_reason = str(paused_values.get("edit_intent_reason") or "").strip()
         patch_error = str(paused_values.get("patch_error") or "").strip()
         patch_agent_output = str(paused_values.get("patch_agent_output") or "").strip()
         targeted_replacement_plan = paused_values.get("targeted_replacement_plan") or {}
@@ -2708,7 +2745,12 @@ def request_webpage_revision(
             attribute_change_count = 0
             override_rule_count = 0
             fallback_count = 0
-        if patch_error:
+        if edit_intent == "non_patch":
+            if edit_intent_reason:
+                log(f"[EditIntentRouter] Routed revision to non_patch: {edit_intent_reason}")
+            if patch_error:
+                log(f"[Patch] Skipped patch flow: {patch_error}")
+        elif patch_error:
             log(f"[Patch] Safe fail: {patch_error}")
         elif replacements_count or style_change_count or attribute_change_count or override_rule_count or fallback_count:
             log(

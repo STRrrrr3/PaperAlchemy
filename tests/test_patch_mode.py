@@ -1,3 +1,4 @@
+import json
 import shutil
 import unittest
 from pathlib import Path
@@ -5,7 +6,7 @@ from typing import Any
 from unittest.mock import patch
 from uuid import uuid4
 
-from src.agent_patch import LEGACY_PAGE_ERROR, patch_executor_node
+from src.agent_patch import LEGACY_PAGE_ERROR, patch_agent_node, patch_executor_node
 from src.human_feedback import empty_human_feedback
 from src.page_manifest import (
     annotate_global_anchors,
@@ -832,6 +833,67 @@ class PatchExecutorTests(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
+    def test_patch_agent_salvages_valid_replacement_when_style_change_is_empty(self) -> None:
+        root, page_plan, structured_paper, artifact = self._setup_workspace()
+        try:
+            state = {
+                "paper_folder_name": "demo-paper",
+                "page_plan": page_plan,
+                "structured_paper": structured_paper,
+                "coder_artifact": artifact,
+                "patch_error": "",
+                "revision_plan": {
+                    "edits": [
+                        {
+                            "block_id": "hero",
+                            "slot_id": "body",
+                            "scope": "slot",
+                            "change_request": "update hero body",
+                            "preserve_requirements": ["keep title"],
+                            "acceptance_hint": "hero body changes",
+                        }
+                    ]
+                },
+            }
+
+            response_payload = {
+                "replacements": [
+                    {
+                        "block_id": "hero",
+                        "slot_id": "body",
+                        "scope": "slot",
+                        "html": "<p>Updated abstract body</p>",
+                    }
+                ],
+                "style_changes": [
+                    {
+                        "block_id": "hero",
+                        "slot_id": "body",
+                        "scope": "slot",
+                        "declarations": {},
+                    }
+                ],
+                "attribute_changes": [],
+                "override_css_rules": [],
+                "fallback_blocks": [],
+            }
+
+            class _FakeLLM:
+                def invoke(self, _: Any) -> Any:
+                    return type("Response", (), {"content": json.dumps(response_payload)})()
+
+            with patch("src.agent_patch.get_llm", return_value=_FakeLLM()):
+                result = patch_agent_node(state)
+
+            self.assertEqual("", result.get("patch_error"))
+            targeted_plan = result.get("targeted_replacement_plan")
+            self.assertIsNotNone(targeted_plan)
+            self.assertEqual(1, len(targeted_plan.replacements))
+            self.assertEqual(0, len(targeted_plan.style_changes))
+            self.assertIn("replacements=1", str(result.get("patch_agent_output") or ""))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
     def test_patch_executor_falls_back_to_block_regeneration(self) -> None:
         root, page_plan, structured_paper, artifact = self._setup_workspace()
         try:
@@ -1324,6 +1386,8 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
             "manual_layout_compose_enabled": False,
             "human_directives": empty_human_feedback(),
             "coder_instructions": "",
+            "edit_intent": None,
+            "edit_intent_reason": "",
             "patch_agent_output": "",
             "revision_plan": None,
             "targeted_replacement_plan": None,
@@ -1357,6 +1421,7 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
         patch_executor_result: dict[str, Any] | None = None,
         layout_compose_prepare_results: list[dict[str, Any]] | None = None,
         coder_result: dict[str, Any] | None = None,
+        translator_result: dict[str, Any] | None = None,
     ) -> tuple[Any, dict[str, int]]:
         counts = {
             "reader": 0,
@@ -1462,7 +1527,7 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
 
         def translator_node(_: Any) -> dict[str, Any]:
             counts["translator"] += 1
-            return {
+            return translator_result or {
                 "revision_plan": {
                     "edits": [
                         {
@@ -1880,6 +1945,51 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
         state = workflow.get_state(config)
         self.assertEqual(LEGACY_PAGE_ERROR, state.values.get("patch_error"))
         self.assertEqual(1, counts["patch_executor"])
+
+    def test_non_patch_feedback_is_intercepted_before_patch_agent(self) -> None:
+        workflow, counts = self._build_workflow(
+            {
+                "patch_agent_output": "should-not-run",
+                "targeted_replacement_plan": {
+                    "replacements": [
+                        {
+                            "block_id": "hero",
+                            "slot_id": "body",
+                            "scope": "slot",
+                            "html": "<p>Updated</p>",
+                        }
+                    ],
+                    "fallback_blocks": [],
+                },
+                "patch_error": "",
+            },
+            translator_result={"revision_plan": {"edits": []}},
+        )
+        config = self._pause_at_webpage_review(workflow)
+
+        workflow.update_state(
+            config,
+            {
+                "human_directives": {"text": "overall redesign the page rhythm and switch template", "images": []},
+                "coder_instructions": "",
+                "edit_intent": None,
+                "edit_intent_reason": "",
+                "patch_agent_output": "",
+                "revision_plan": None,
+                "targeted_replacement_plan": None,
+                "patch_error": "",
+                "is_webpage_approved": False,
+            },
+            as_node="webpage_review",
+        )
+        workflow.invoke(None, config=config)
+
+        state = workflow.get_state(config)
+        self.assertEqual("non_patch", state.values.get("edit_intent"))
+        self.assertIn("non_patch", str(state.values.get("patch_error") or ""))
+        self.assertEqual(1, counts["translator"])
+        self.assertEqual(0, counts["patch_agent"])
+        self.assertEqual(0, counts["patch_executor"])
 
 
 
