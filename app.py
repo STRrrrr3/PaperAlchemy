@@ -42,6 +42,7 @@ from src.preview_utils import (
     take_selector_screenshot,
 )
 from src.schemas import (
+    BlockRenderArtifact,
     CoderArtifact,
     LayoutComposeSession,
     LayoutComposeUpdate,
@@ -49,9 +50,12 @@ from src.schemas import (
     ShellBindingReview,
     ShellManualSelection,
     StructuredPaper,
+    TemplateCandidate,
+    TemplateProfile,
     VisualSmokeReport,
 )
 from src.state import WorkflowState
+from src.template_compile import prepare_template_compile_bundle
 from src.template_resources import SyncedTemplateAssets, ensure_autopage_template_assets
 from src.template_shell_resolver import (
     apply_layout_compose_session_to_page_plan,
@@ -122,6 +126,12 @@ def save_coder_artifact(path: Path, artifact: CoderArtifact) -> None:
         json.dump(artifact.model_dump(), file, indent=2, ensure_ascii=False)
 
 
+def save_template_profile(path: Path, profile: TemplateProfile) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(profile.model_dump(), file, indent=2, ensure_ascii=False)
+
+
 def _review_accordion_updates(stage: str) -> tuple[dict[str, Any], dict[str, Any]]:
     normalized_stage = str(stage or "").strip().lower()
     if normalized_stage == "overview":
@@ -133,12 +143,14 @@ def _review_accordion_updates(stage: str) -> tuple[dict[str, Any], dict[str, Any
 
 def _resolve_page_plan_shell_contracts(
     page_plan: PagePlan,
+    template_profile: TemplateProfile | None = None,
 ) -> tuple[PagePlan, ShellBindingReview | None]:
     template_entry_path = _get_template_entry_path(page_plan)
     resolved_plan, binding_review = resolve_page_plan_shells(
         page_plan=page_plan,
         template_reference_html=read_text_with_fallback(template_entry_path),
         template_entry_html_path=template_entry_path,
+        template_profile=template_profile,
     )
     return resolved_plan, binding_review
 
@@ -157,6 +169,7 @@ def _build_layout_compose_session_for_plan(
     page_plan: PagePlan,
     structured_data: StructuredPaper,
     paper_folder_name: str,
+    template_profile: TemplateProfile | None = None,
 ) -> LayoutComposeSession:
     template_entry_path = _get_template_entry_path(page_plan)
     return build_layout_compose_session(
@@ -164,6 +177,7 @@ def _build_layout_compose_session_for_plan(
         structured_paper=structured_data,
         template_reference_html=read_text_with_fallback(template_entry_path),
         template_entry_html_path=template_entry_path,
+        template_profile=template_profile,
         paper_folder_name=paper_folder_name,
     )
 
@@ -710,6 +724,27 @@ def get_output_paths(paper_folder_name: str) -> tuple[Path, Path, Path, Path]:
     return output_dir, structured_json_path, planner_json_path, coder_json_path
 
 
+def get_template_profile_output_path(paper_folder_name: str) -> Path:
+    output_dir = OUTPUT_DIR / paper_folder_name
+    return output_dir / "template_profile.json"
+
+
+def load_block_render_artifacts_from_disk(paper_folder_name: str) -> list[BlockRenderArtifact]:
+    output_dir = OUTPUT_DIR / paper_folder_name
+    block_renders_dir = output_dir / "block_renders"
+    if not block_renders_dir.exists():
+        return []
+
+    artifacts: list[BlockRenderArtifact] = []
+    for json_path in sorted(block_renders_dir.glob("*.json"), key=lambda item: item.name.lower()):
+        try:
+            artifact = BlockRenderArtifact.model_validate_json(json_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        artifacts.append(artifact)
+    return artifacts
+
+
 def append_log_lines(existing_text: str, new_lines: list[str]) -> str:
     merged = [line for line in str(existing_text or "").splitlines() if line.strip()]
     merged.extend(line for line in new_lines if str(line).strip())
@@ -1081,6 +1116,32 @@ def overview_node(state: WorkflowState) -> dict[str, Any]:
     }
 
 
+def template_compile_phase_node(state: WorkflowState) -> dict[str, Any]:
+    paper_folder_name = str(state.get("paper_folder_name") or "").strip()
+    if not paper_folder_name:
+        raise ValueError("paper_folder_name is missing for template compile phase.")
+
+    generation_constraints = dict(state.get("generation_constraints") or {})
+    user_constraints = dict(state.get("user_constraints") or {})
+    print("[TemplateCompile] Selecting template and compiling TemplateProfile...")
+    template_candidates, selected_template, template_profile, _, cache_hit, _ = prepare_template_compile_bundle(
+        project_root=PROJECT_ROOT,
+        generation_constraints=generation_constraints,
+        user_constraints=user_constraints,
+        allow_llm=bool(generation_constraints.get("template_compile_use_llm", True)),
+        force_recompile=bool(generation_constraints.get("force_template_recompile")),
+    )
+    template_profile_path = get_template_profile_output_path(paper_folder_name)
+    save_template_profile(template_profile_path, template_profile)
+    return {
+        "template_candidates": template_candidates,
+        "selected_template": selected_template,
+        "template_profile": template_profile,
+        "template_profile_path": str(template_profile_path),
+        "template_compile_cache_hit": cache_hit,
+    }
+
+
 def planner_phase_node(state: WorkflowState) -> dict[str, Any]:
     paper_folder_name = str(state.get("paper_folder_name") or "").strip()
     if not paper_folder_name:
@@ -1089,6 +1150,28 @@ def planner_phase_node(state: WorkflowState) -> dict[str, Any]:
     structured_data = StructuredPaper.model_validate(state.get("structured_paper"))
     generation_constraints = dict(state.get("generation_constraints") or {})
     user_constraints = dict(state.get("user_constraints") or {})
+    template_candidates: list[TemplateCandidate] = []
+    for candidate in (state.get("template_candidates") or []):
+        try:
+            template_candidates.append(TemplateCandidate.model_validate(candidate))
+        except Exception:
+            continue
+    try:
+        selected_template = (
+            TemplateCandidate.model_validate(state.get("selected_template"))
+            if state.get("selected_template")
+            else None
+        )
+    except Exception:
+        selected_template = None
+    try:
+        template_profile = (
+            TemplateProfile.model_validate(state.get("template_profile"))
+            if state.get("template_profile")
+            else None
+        )
+    except Exception:
+        template_profile = None
     previous_page_plan: PagePlan | None = None
     for candidate in (state.get("page_plan"), state.get("approved_page_plan")):
         if not candidate:
@@ -1108,6 +1191,9 @@ def planner_phase_node(state: WorkflowState) -> dict[str, Any]:
         human_directives=state.get("human_directives"),
         previous_page_plan=previous_page_plan,
         max_retry=2,
+        template_candidates=template_candidates,
+        selected_template=selected_template,
+        template_profile=template_profile,
     )
     if not page_plan:
         raise RuntimeError("Planner agent failed to produce a page plan.")
@@ -1122,6 +1208,7 @@ def planner_phase_node(state: WorkflowState) -> dict[str, Any]:
         "shell_manual_selection": None,
         "layout_compose_session": None,
         "layout_compose_update": None,
+        "block_render_artifacts": [],
     }
 
 
@@ -1147,6 +1234,11 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
     approved_page_plan = state.get("approved_page_plan") or state.get("page_plan")
     page_plan = PagePlan.model_validate(approved_page_plan)
     previous_coder_artifact = normalize_coder_artifact(state.get("coder_artifact"))
+    template_profile = (
+        TemplateProfile.model_validate(state.get("template_profile"))
+        if state.get("template_profile")
+        else None
+    )
 
     print("[Coder] Running coder agent...")
     coder_artifact, visual_smoke_report, resolved_page_plan = run_coder_agent_with_diagnostics(
@@ -1157,6 +1249,7 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
         coder_instructions=str(state.get("coder_instructions") or ""),
         previous_coder_artifact=previous_coder_artifact,
         max_retry=2,
+        template_profile=template_profile,
     )
     if not coder_artifact:
         raise RuntimeError("Coder agent failed to build the final webpage.")
@@ -1184,6 +1277,7 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
         "layout_compose_session": None,
         "layout_compose_update": None,
         "visual_smoke_report": visual_smoke_report,
+        "block_render_artifacts": load_block_render_artifacts_from_disk(paper_folder_name),
     }
 
 
@@ -1195,10 +1289,16 @@ def layout_compose_prepare_node(state: WorkflowState) -> dict[str, Any]:
     approved_page_plan = state.get("approved_page_plan") or state.get("page_plan")
     page_plan = PagePlan.model_validate(approved_page_plan)
     structured_data = StructuredPaper.model_validate(state.get("structured_paper"))
+    template_profile = (
+        TemplateProfile.model_validate(state.get("template_profile"))
+        if state.get("template_profile")
+        else None
+    )
     compose_session = _build_layout_compose_session_for_plan(
         page_plan=page_plan,
         structured_data=structured_data,
         paper_folder_name=paper_folder_name,
+        template_profile=template_profile,
     )
     print("[LayoutCompose] Prepared layout compose session for manual review.")
     return {
@@ -1230,10 +1330,15 @@ def shell_resolver_phase_node(state: WorkflowState) -> dict[str, Any]:
     approved_page_plan = state.get("approved_page_plan") or state.get("page_plan")
     page_plan = PagePlan.model_validate(approved_page_plan)
     manual_selection = normalize_shell_manual_selection(state.get("shell_manual_selection"))
+    template_profile = (
+        TemplateProfile.model_validate(state.get("template_profile"))
+        if state.get("template_profile")
+        else None
+    )
     if manual_selection is not None:
         page_plan = _apply_shell_manual_selection_to_plan(page_plan, manual_selection)
 
-    resolved_page_plan, binding_review = _resolve_page_plan_shell_contracts(page_plan)
+    resolved_page_plan, binding_review = _resolve_page_plan_shell_contracts(page_plan, template_profile)
     _, _, planner_json_path, _ = get_output_paths(paper_folder_name)
     save_page_plan(planner_json_path, resolved_page_plan)
     if binding_review is not None:
@@ -1269,7 +1374,7 @@ def webpage_review_node(_: WorkflowState) -> dict[str, Any]:
 
 def human_review_router(state: WorkflowState) -> str:
     if bool(state.get("is_approved")):
-        return "planner"
+        return "template_compile"
     return "reader"
 
 
@@ -1298,6 +1403,7 @@ def build_hitl_workflow():
     workflow = StateGraph(WorkflowState)
     workflow.add_node("reader", reader_phase_node)
     workflow.add_node("overview", overview_node)
+    workflow.add_node("template_compile", template_compile_phase_node)
     workflow.add_node("planner", planner_phase_node)
     workflow.add_node("outline_review", outline_review_node)
     workflow.add_node("layout_compose_prepare", layout_compose_prepare_node)
@@ -1314,10 +1420,11 @@ def build_hitl_workflow():
         "overview",
         human_review_router,
         {
-            "planner": "planner",
+            "template_compile": "template_compile",
             "reader": "reader",
         },
     )
+    workflow.add_edge("template_compile", "planner")
     workflow.add_edge("planner", "outline_review")
     workflow.add_conditional_edges(
         "outline_review",
@@ -1412,6 +1519,17 @@ def run_langgraph_batch(
         selected_candidate=selected_candidate,
         ranked_candidates=ranked_candidates,
     )
+    template_candidates, selected_template, template_profile, _, cache_hit, _ = prepare_template_compile_bundle(
+        project_root=PROJECT_ROOT,
+        generation_constraints=generation_constraints,
+        user_constraints=user_constraints,
+        synced_assets=synced_assets,
+        allow_llm=bool(generation_constraints.get("template_compile_use_llm", True)),
+        force_recompile=bool(generation_constraints.get("force_template_recompile")),
+    )
+    template_profile_path = get_template_profile_output_path(paper_folder_name)
+    save_template_profile(template_profile_path, template_profile)
+    log(f"[TemplateCompile] Compiled profile for {selected_template.template_id} (cache_hit={cache_hit})")
 
     log("[Planner] Running template-first planner graph with designated template...")
     page_plan = run_planner_agent(
@@ -1420,16 +1538,12 @@ def run_langgraph_batch(
         generation_constraints=generation_constraints,
         user_constraints=user_constraints,
         max_retry=2,
+        template_candidates=template_candidates,
+        selected_template=selected_template,
+        template_profile=template_profile,
     )
     if not page_plan:
         raise RuntimeError("Planner agent failed to produce a page plan.")
-
-    page_plan, binding_review = _resolve_page_plan_shell_contracts(page_plan)
-    if binding_review is not None:
-        raise RuntimeError(
-            "Template shell rebinding requires human review before coding: "
-            f"block={binding_review.block_id}, reason={binding_review.failure_reason}"
-        )
 
     save_page_plan(planner_json_path, page_plan)
     log(f"[Planner] Saved page plan to {planner_json_path}")
@@ -1442,6 +1556,7 @@ def run_langgraph_batch(
         human_directives=empty_human_feedback(),
         coder_instructions="",
         max_retry=2,
+        template_profile=template_profile,
     )
     if not coder_artifact:
         raise RuntimeError("Coder agent failed to build the final webpage.")
@@ -1675,6 +1790,12 @@ def run_extraction(
             "is_outline_approved": False,
             "is_webpage_approved": False,
             "review_stage": "overview",
+            "template_candidates": [],
+            "selected_template": None,
+            "template_profile": None,
+            "template_profile_path": "",
+            "template_compile_cache_hit": False,
+            "block_render_artifacts": [],
             "structured_paper": None,
             "page_plan": None,
             "approved_page_plan": None,

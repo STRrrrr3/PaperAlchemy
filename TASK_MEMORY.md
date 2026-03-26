@@ -139,3 +139,50 @@
   - Reader -> Outline -> 不勾选 compose -> 直接进入网页初版
   - Reader -> Outline -> 勾选 compose -> 进入手工 compose -> 再生成网页初版
 - 若你要，我也可以继续帮你逐个查看当前工作区里那些“非本轮修改”的未提交文件分别改了什么。
+---
+
+## 任务
+- 补记“PaperAlchemy 模板编译 + Block 渲染重构”这一轮架构改造，便于后续维护 Git 版本描述与阶段事实追踪。
+
+## 当前计划
+- 本条仅追加历史记录，不新增实现，不改动当前架构代码。
+- 依据当前仓库代码现状与此前已经实际执行过的验证结果，补记这轮架构改造的关键事实。
+
+## 已确认事实
+- 当前主流程已经接入 `template_compile` 节点，工作流顺序中存在 `overview -> template_compile -> planner -> outline_review -> [layout_compose] -> coder -> webpage_review -> translator -> patch_agent -> patch_executor`，对应 `app.py`。
+- 当前公共类型中已经存在 `TemplateProfile`、`TemplateShellCandidate`、`TemplateWidget`、`ResolvedBlockBinding`、`BlockRenderSpec`、`BlockRenderArtifact`，对应 `src/schemas.py`。
+- 当前 `WorkflowState`、`PlannerState`、`CoderState` 已扩展 `template_candidates`、`selected_template`、`template_profile`、`template_profile_path`、`template_compile_cache_hit`、`block_render_artifacts` 等字段，对应 `src/state.py`。
+- 当前仓库中存在独立模板编译模块 `src/template_compile.py`，负责模板候选选择、模板 Profile 编译、缓存命中与复用准备。
+- 当前 Planner 已从主要依赖原始模板 DOM outline 切换为消费 `TemplateProfile`；`plan_meta.render_strategy` 会按模板编译置信度与风险在 `compiled_block_assembly` 和 `legacy_fullpage` 之间切换，对应 `src/agent_planner.py`。
+- 当前 `dom_mapping` 仍然保留，但只作为兼容字段存在，不再是新架构的页面主体生成接口。
+- 当前 Coder 已拆分为块级渲染与页面组装主路径，并保留 legacy 整页生成兜底；代码中存在 `_run_compiled_block_assembly()` 与 `_run_legacy_fullpage_render()`，对应 `src/agent_coder.py`。
+- 当前 `layout_compose` 与 shell resolver 已能以上游 `TemplateProfile.shell_candidates` 作为候选事实源，对应 `src/template_shell_resolver.py`。
+- 当前架构仍保留 `PageManifest`、`data-pa-block`、`data-pa-slot`、`data-pa-global`、translator / patch / patch_executor 这条修订链路兼容性。
+- 当前测试中已包含与这轮架构改造对应的覆盖，包含 `tests/test_template_compile_refactor.py`，且 `tests/test_patch_mode.py` 已适配新增 workflow 节点。
+
+## 开放假设
+- 尚未在当前记录中补写一条真实论文样本从 Reader 到最终网页的在线端到端回归结论，因此块级渲染主路径的生产观感仍主要依赖结构测试与单元测试结果。
+- `TASK_MEMORY.md` 在当前 shell 输出里仍显示乱码；这更像终端编码显示问题，不直接等同于文件内容损坏，后续若继续维护此文件，仍需留意编码一致性。
+
+## 当前阻塞
+- 当前无新增实现阻塞。
+- 如需进一步确认这轮架构改造的实际产出质量，阻塞点主要是是否安排一次真实样本端到端回归，而不是当前代码缺失。
+
+## 最新变更
+- 新增模板编译层，将模板理解从 Planner / Coder 中抽离为可缓存的 `TemplateProfile`。
+- 重构 workflow 接线，把模板选择与模板编译提升为主图中的独立阶段。
+- 重构 Planner，使 block 绑定以上游编译得到的 shell candidates 为准，并按模板风险决定渲染策略。
+- 重构 Coder，使其拆分为 render spec 准备、block 渲染、page 组装、manifest 抽取校验与 critic，旧整页 LLM coder 下沉为 `legacy_fullpage` fallback。
+- 打通 `layout_compose` 与新模板编译层的衔接，使人工 compose 继续可选，但不再是默认主路径。
+
+## 最新验证
+- 之前已实际执行语法检查：
+  - `& "E:\miniconda3\envs\paper-alchemy\python.exe" -m py_compile app.py src\schemas.py src\state.py src\template_compile.py src\agent_planner.py src\agent_planner_critic.py src\agent_coder.py src\template_shell_resolver.py src\prompts.py tests\test_patch_mode.py tests\test_template_compile_refactor.py`
+- 之前已实际执行单元测试：
+  - `& "E:\miniconda3\envs\paper-alchemy\python.exe" -m unittest tests.test_patch_mode tests.test_template_compile_refactor`
+  - 结果：共 36 个测试全部通过。
+- 本次补记前已再次实际检查当前代码入口与关键符号，确认上述架构改造仍真实存在于 `app.py`、`src/schemas.py`、`src/state.py`、`src/template_compile.py`、`src/agent_planner.py`、`src/agent_coder.py`、`src/template_shell_resolver.py`。
+
+## 下一步
+- 如果后续要继续维护这轮架构的稳定性，优先补一条真实论文样本的端到端回归记录，覆盖 `template_compile -> planner -> coder -> patch` 全链路。
+- 如果只是维护 Git 版本描述或阶段里程碑，当前这条补记已经足以作为“模板编译上移 + Block 装配主路径落地”的事实依据。

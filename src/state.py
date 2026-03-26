@@ -3,6 +3,8 @@ from typing import Annotated, Any, List, Optional, TypedDict
 
 from src.human_feedback import HumanFeedbackPayload
 from src.schemas import (
+    BlockRenderArtifact,
+    BlockRenderSpec,
     CoderArtifact,
     LayoutComposeSession,
     LayoutComposeUpdate,
@@ -13,6 +15,7 @@ from src.schemas import (
     StructuredPaper,
     TargetedReplacementPlan,
     TemplateCandidate,
+    TemplateProfile,
     VisualSmokeReport,
 )
 
@@ -39,6 +42,7 @@ class PlannerState(TypedDict):
     human_directives: HumanFeedbackPayload
     template_candidates: List[TemplateCandidate]
     selected_template: Optional[TemplateCandidate]
+    template_profile: Optional[TemplateProfile]
     planner_feedback_history: Annotated[List[str], operator.add]
     page_plan: Optional[PagePlan]
     planner_critic_passed: bool
@@ -51,6 +55,9 @@ class CoderState(TypedDict):
     coder_instructions: str
     structured_paper: StructuredPaper
     page_plan: PagePlan
+    template_profile: Optional[TemplateProfile]
+    block_render_specs: List[BlockRenderSpec]
+    block_render_artifacts: List[BlockRenderArtifact]
     coder_feedback_history: Annotated[List[str], operator.add]
     visual_feedback: Annotated[List[str], operator.add]
     visual_screenshot_path: str
@@ -79,6 +86,12 @@ class WorkflowState(TypedDict):
     is_outline_approved: bool
     is_webpage_approved: bool
     review_stage: str
+    template_candidates: List[TemplateCandidate]
+    selected_template: Optional[TemplateCandidate]
+    template_profile: Optional[TemplateProfile]
+    template_profile_path: str
+    template_compile_cache_hit: bool
+    block_render_artifacts: List[BlockRenderArtifact]
     shell_binding_review: ShellBindingReview | None
     shell_manual_selection: ShellManualSelection | None
     layout_compose_session: LayoutComposeSession | None

@@ -116,6 +116,7 @@ def _normalize_targeted_replacement_plan(plan: Any) -> TargetedReplacementPlan |
         return plan
     if plan is None:
         return None
+
     try:
         return TargetedReplacementPlan.model_validate(plan)
     except Exception:

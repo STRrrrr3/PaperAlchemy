@@ -33,6 +33,7 @@ from src.schemas import (
     ShellBindingReview,
     ShellResolutionCandidate,
     StructuredPaper,
+    TemplateProfile,
 )
 
 AUTO_ACCEPT_MIN_SCORE = 8.0
@@ -161,6 +162,38 @@ def _iter_candidate_roots(template_soup: BeautifulSoup) -> list[_CandidateRoot]:
             )
         )
     return candidates
+
+
+def _profile_candidate_roots(
+    template_soup: BeautifulSoup,
+    template_profile: TemplateProfile,
+) -> list[_CandidateRoot]:
+    roots: list[_CandidateRoot] = []
+    seen: set[str] = set()
+    for candidate in template_profile.shell_candidates:
+        selector_hint = str(candidate.selector or "").strip()
+        if not selector_hint or selector_hint in seen:
+            continue
+        try:
+            matches = [match for match in template_soup.select(selector_hint) if isinstance(match, Tag)]
+        except Exception:
+            matches = []
+        if len(matches) != 1:
+            continue
+        tag = matches[0]
+        seen.add(selector_hint)
+        roots.append(
+            _CandidateRoot(
+                tag=tag,
+                selector_hint=selector_hint,
+                dom_index=int(candidate.dom_index),
+                has_media=tag.find(["img", "video", "figure", "canvas", "svg", "table"]) is not None,
+                has_heading=tag.find(re.compile(r"^h[1-6]$")) is not None,
+                stable_score=max(0.0, float(candidate.confidence or 0.0) * 3.0),
+            )
+        )
+    roots.sort(key=lambda item: (item.dom_index, item.selector_hint))
+    return roots
 
 
 def _candidate_role_for_block(block_role: str, candidate: _CandidateRoot) -> tuple[str, float] | None:
@@ -380,9 +413,14 @@ def resolve_page_plan_shells(
     page_plan: PagePlan,
     template_reference_html: str,
     template_entry_html_path: str | Path,
+    template_profile: TemplateProfile | None = None,
 ) -> tuple[PagePlan, ShellBindingReview | None]:
     template_soup = BeautifulSoup(str(template_reference_html or ""), "html.parser")
-    candidate_roots = _iter_candidate_roots(template_soup)
+    candidate_roots = (
+        _profile_candidate_roots(template_soup, template_profile)
+        if template_profile is not None
+        else _iter_candidate_roots(template_soup)
+    )
     outline_lookup = {item.block_id: item for item in page_plan.page_outline}
     block_lookup = {block.block_id: block for block in page_plan.blocks}
 
@@ -643,12 +681,17 @@ def build_layout_compose_session(
     structured_paper: StructuredPaper,
     template_reference_html: str,
     template_entry_html_path: str | Path,
+    template_profile: TemplateProfile | None = None,
     *,
     paper_folder_name: str = "",
 ) -> LayoutComposeSession:
     template_entry_path = Path(template_entry_html_path).resolve()
     template_soup = BeautifulSoup(str(template_reference_html or ""), "html.parser")
-    candidate_roots = _iter_candidate_roots(template_soup)
+    candidate_roots = (
+        _profile_candidate_roots(template_soup, template_profile)
+        if template_profile is not None
+        else _iter_candidate_roots(template_soup)
+    )
     outline_lookup = {item.block_id: item for item in page_plan.page_outline}
     block_lookup = {block.block_id: block for block in page_plan.blocks}
 

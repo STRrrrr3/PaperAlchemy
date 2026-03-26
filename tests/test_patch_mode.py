@@ -1334,6 +1334,12 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
             "is_outline_approved": False,
             "is_webpage_approved": False,
             "review_stage": "overview",
+            "template_candidates": [],
+            "selected_template": None,
+            "template_profile": None,
+            "template_profile_path": "",
+            "template_compile_cache_hit": False,
+            "block_render_artifacts": [],
             "structured_paper": None,
             "page_plan": None,
             "approved_page_plan": None,
@@ -1355,6 +1361,7 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
         counts = {
             "reader": 0,
             "overview": 0,
+            "template_compile": 0,
             "planner": 0,
             "outline": 0,
             "layout_compose_prepare": 0,
@@ -1372,6 +1379,44 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
         def overview_node(_: Any) -> dict[str, Any]:
             counts["overview"] += 1
             return {"paper_overview": "overview", "review_stage": "overview"}
+
+        def template_compile_node(_: Any) -> dict[str, Any]:
+            counts["template_compile"] += 1
+            return {
+                "template_candidates": [
+                    {
+                        "template_id": "demo-template",
+                        "root_dir": "data/templates/demo-template",
+                        "chosen_entry_html": "index.html",
+                        "score": 1.0,
+                        "reasons": ["test"],
+                    }
+                ],
+                "selected_template": {
+                    "template_id": "demo-template",
+                    "root_dir": "data/templates/demo-template",
+                    "chosen_entry_html": "index.html",
+                    "score": 1.0,
+                    "reasons": ["test"],
+                },
+                "template_profile": {
+                    "template_id": "demo-template",
+                    "template_root_dir": "data/templates/demo-template",
+                    "entry_html": "index.html",
+                    "archetype": "generic_multi_section",
+                    "global_preserve_selectors": [],
+                    "shell_candidates": [],
+                    "optional_widgets": [],
+                    "removable_demo_selectors": [],
+                    "unsafe_selectors": [],
+                    "compile_confidence": 0.95,
+                    "risk_flags": [],
+                    "notes": [],
+                    "source_fingerprint": "test",
+                },
+                "template_profile_path": "demo/template_profile.json",
+                "template_compile_cache_hit": False,
+            }
 
         def planner_node(_: Any) -> dict[str, Any]:
             counts["planner"] += 1
@@ -1443,6 +1488,7 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
         with (
             patch.object(app, "reader_phase_node", reader_node),
             patch.object(app, "overview_node", overview_node),
+            patch.object(app, "template_compile_phase_node", template_compile_node),
             patch.object(app, "planner_phase_node", planner_node),
             patch.object(app, "outline_review_node", outline_node),
             patch.object(app, "layout_compose_prepare_node", layout_compose_prepare_node),
@@ -1546,6 +1592,7 @@ class WorkflowPatchRoutingTests(unittest.TestCase):
         self.assertEqual("outline", outline_state.values.get("review_stage"))
         self.assertEqual(1, counts["reader"])
         self.assertEqual(1, counts["overview"])
+        self.assertEqual(1, counts["template_compile"])
         self.assertEqual(1, counts["planner"])
         self.assertEqual(1, counts["outline"])
         self.assertEqual(0, counts["layout_compose_prepare"])
