@@ -1,0 +1,514 @@
+{
+  "template_id": "aaltoml.github.io",
+  "template_root_dir": "data/templates/autopage/templates/aaltoml.github.io",
+  "entry_html": "sfr/index.html",
+  "archetype": "generic_multi_section",
+  "global_preserve_selectors": [
+    "header.site-header",
+    "nav.site-nav",
+    "input#nav-trigger",
+    "header.post-header",
+    "footer.site-footer.h-card",
+    "h2.footer-heading",
+    "div.footer-col-wrapper",
+    "div.footer-col.footer-col-1",
+    "div.footer-col.footer-col-2",
+    "div.footer-col.footer-col-3"
+  ],
+  "shell_candidates": [
+    {
+      "selector": "header.site-header",
+      "role": "hero",
+      "root_tag": "header",
+      "required_classes": [
+        "site-header"
+      ],
+      "preserve_ids": [],
+      "wrapper_chain": [],
+      "dom_index": 0,
+      "confidence": 0.73,
+      "signals": [
+        "class_selector",
+        "has_media",
+        "hero_token",
+        "semantic_tag"
+      ]
+    },
+    {
+      "selector": "header.site-header > div.wrapper",
+      "role": "gallery",
+      "root_tag": "div",
+      "required_classes": [
+        "wrapper"
+      ],
+      "preserve_ids": [],
+      "wrapper_chain": [
+        {
+          "tag": "header",
+          "required_classes": [
+            "site-header"
+          ],
+          "preserve_ids": []
+        }
+      ],
+      "dom_index": 1,
+      "confidence": 0.65,
+      "signals": [
+        "class_selector",
+        "has_media",
+        "media_token"
+      ]
+    },
+    {
+      "selector": "nav.site-nav",
+      "role": "nav",
+      "root_tag": "nav",
+      "required_classes": [
+        "site-nav"
+      ],
+      "preserve_ids": [],
+      "wrapper_chain": [
+        {
+          "tag": "div",
+          "required_classes": [
+            "wrapper"
+          ],
+          "preserve_ids": []
+        },
+        {
+          "tag": "header",
+          "required_classes": [
+            "site-header"
+          ],
+          "preserve_ids": []
+        }
+      ],
+      "dom_index": 3,
+      "confidence": 0.73,
+      "signals": [
+        "class_selector",
+        "has_media",
+        "nav_token",
+        "semantic_tag"
+      ]
+    },
+    {
+      "selector": "div.trigger",
+      "role": "section",
+      "root_tag": "div",
+      "required_classes": [
+        "trigger"
+      ],
+      "preserve_ids": [],
+      "wrapper_chain": [
+        {
+          "tag": "nav",
+          "required_classes": [
+            "site-nav"
+          ],
+          "preserve_ids": []
+        },
+        {
+          "tag": "div",
+          "required_classes": [
+            "wrapper"
+          ],
+          "preserve_ids": []
+        }
+      ],
+      "dom_index": 9,
+      "confidence": 0.57,
+      "signals": [
+        "class_selector"
+      ]
+    },
+    {
+      "selector": "main.page-content",
+      "role": "table",
+      "root_tag": "main",
+      "required_classes": [
+        "page-content"
+      ],
+      "preserve_ids": [],
+      "wrapper_chain": [],
+      "dom_index": 11,
+      "confidence": 0.81,
+      "signals": [
+        "class_selector",
+        "has_heading",
+        "has_media",
+        "semantic_tag",
+        "table_token"
+      ]
+    },
+    {
+      "selector": "main.page-content > div.wrapper",
+      "role": "table",
+      "root_tag": "div",
+      "required_classes": [
+        "wrapper"
+      ],
+      "preserve_ids": [],
+      "wrapper_chain": [
+        {
+          "tag": "main",
+          "required_classes": [
+            "page-content"
+          ],
+          "preserve_ids": []
+        }
+      ],
+      "dom_index": 12,
+      "confidence": 0.73,
+      "signals": [
+        "class_selector",
+        "has_heading",
+        "has_media",
+        "table_token"
+      ]
+    },
+    {
+      "selector": "article.post.h-entry",
+      "role": "table",
+      "root_tag": "article",
+      "required_classes": [
+        "post",
+        "h-entry"
+      ],
+      "preserve_ids": [],
+      "wrapper_chain": [
+        {
+          "tag": "div",
+          "required_classes": [
+            "wrapper"
+          ],
+          "preserve_ids": []
+        },
+        {
+          "tag": "main",
+          "required_classes": [
+            "page-content"
+          ],
+          "preserve_ids": []
+        }
+      ],
+      "dom_index": 13,
+      "confidence": 0.81,
+      "signals": [
+        "class_selector",
+        "has_heading",
+        "has_media",
+        "semantic_tag",
+        "table_token"
+      ]
+    },
+    {
+      "selector": "header.post-header",
+      "role": "hero",
+      "root_tag": "header",
+      "required_classes": [
+        "post-header"
+      ],
+      "preserve_ids": [],
+      "wrapper_chain": [
+        {
+          "tag": "article",
+          "required_classes": [
+            "post",
+            "h-entry"
+          ],
+          "preserve_ids": []
+        },
+        {
+          "tag": "div",
+          "required_classes": [
+            "wrapper"
+          ],
+          "preserve_ids": []
+        }
+      ],
+      "dom_index": 14,
+      "confidence": 0.73,
+      "signals": [
+        "class_selector",
+        "has_heading",
+        "hero_token",
+        "semantic_tag"
+      ]
+    },
+    {
+      "selector": "div.post-content.e-content",
+      "role": "table",
+      "root_tag": "div",
+      "required_classes": [
+        "post-content",
+        "e-content"
+      ],
+      "preserve_ids": [],
+      "wrapper_chain": [
+        {
+          "tag": "article",
+          "required_classes": [
+            "post",
+            "h-entry"
+          ],
+          "preserve_ids": []
+        },
+        {
+          "tag": "div",
+          "required_classes": [
+            "wrapper"
+          ],
+          "preserve_ids": []
+        }
+      ],
+      "dom_index": 27,
+      "confidence": 0.73,
+      "signals": [
+        "class_selector",
+        "has_heading",
+        "has_media",
+        "table_token"
+      ]
+    },
+    {
+      "selector": "footer.site-footer.h-card",
+      "role": "footer",
+      "root_tag": "footer",
+      "required_classes": [
+        "site-footer",
+        "h-card"
+      ],
+      "preserve_ids": [],
+      "wrapper_chain": [],
+      "dom_index": 524,
+      "confidence": 0.81,
+      "signals": [
+        "class_selector",
+        "footer_token",
+        "has_heading",
+        "has_media",
+        "semantic_tag"
+      ]
+    },
+    {
+      "selector": "footer.site-footer.h-card > div.wrapper",
+      "role": "gallery",
+      "root_tag": "div",
+      "required_classes": [
+        "wrapper"
+      ],
+      "preserve_ids": [],
+      "wrapper_chain": [
+        {
+          "tag": "footer",
+          "required_classes": [
+            "site-footer",
+            "h-card"
+          ],
+          "preserve_ids": []
+        }
+      ],
+      "dom_index": 526,
+      "confidence": 0.73,
+      "signals": [
+        "class_selector",
+        "has_heading",
+        "has_media",
+        "media_token"
+      ]
+    },
+    {
+      "selector": "div.footer-col-wrapper",
+      "role": "footer",
+      "root_tag": "div",
+      "required_classes": [
+        "footer-col-wrapper"
+      ],
+      "preserve_ids": [],
+      "wrapper_chain": [
+        {
+          "tag": "div",
+          "required_classes": [
+            "wrapper"
+          ],
+          "preserve_ids": []
+        },
+        {
+          "tag": "footer",
+          "required_classes": [
+            "site-footer",
+            "h-card"
+          ],
+          "preserve_ids": []
+        }
+      ],
+      "dom_index": 528,
+      "confidence": 0.65,
+      "signals": [
+        "class_selector",
+        "footer_token",
+        "has_media"
+      ]
+    },
+    {
+      "selector": "div.footer-col.footer-col-1",
+      "role": "footer",
+      "root_tag": "div",
+      "required_classes": [
+        "footer-col",
+        "footer-col-1"
+      ],
+      "preserve_ids": [],
+      "wrapper_chain": [
+        {
+          "tag": "div",
+          "required_classes": [
+            "footer-col-wrapper"
+          ],
+          "preserve_ids": []
+        },
+        {
+          "tag": "div",
+          "required_classes": [
+            "wrapper"
+          ],
+          "preserve_ids": []
+        }
+      ],
+      "dom_index": 529,
+      "confidence": 0.57,
+      "signals": [
+        "class_selector",
+        "footer_token"
+      ]
+    },
+    {
+      "selector": "div.footer-col.footer-col-2",
+      "role": "footer",
+      "root_tag": "div",
+      "required_classes": [
+        "footer-col",
+        "footer-col-2"
+      ],
+      "preserve_ids": [],
+      "wrapper_chain": [
+        {
+          "tag": "div",
+          "required_classes": [
+            "footer-col-wrapper"
+          ],
+          "preserve_ids": []
+        },
+        {
+          "tag": "div",
+          "required_classes": [
+            "wrapper"
+          ],
+          "preserve_ids": []
+        }
+      ],
+      "dom_index": 534,
+      "confidence": 0.65,
+      "signals": [
+        "class_selector",
+        "footer_token",
+        "has_media"
+      ]
+    },
+    {
+      "selector": "div.footer-col.footer-col-3",
+      "role": "footer",
+      "root_tag": "div",
+      "required_classes": [
+        "footer-col",
+        "footer-col-3"
+      ],
+      "preserve_ids": [],
+      "wrapper_chain": [
+        {
+          "tag": "div",
+          "required_classes": [
+            "footer-col-wrapper"
+          ],
+          "preserve_ids": []
+        },
+        {
+          "tag": "div",
+          "required_classes": [
+            "wrapper"
+          ],
+          "preserve_ids": []
+        }
+      ],
+      "dom_index": 541,
+      "confidence": 0.57,
+      "signals": [
+        "class_selector",
+        "footer_token"
+      ]
+    }
+  ],
+  "optional_widgets": [
+    {
+      "selector": "main.page-content > div.wrapper > article.post.h-entry > div.post-content.e-content > table",
+      "widget_type": "toc",
+      "required_selectors": [
+        "main.page-content > div.wrapper > article.post.h-entry > div.post-content.e-content > table"
+      ],
+      "script_dependencies": [],
+      "risk_flags": [],
+      "optional": false
+    },
+    {
+      "selector": "table:nth-of-type(2)",
+      "widget_type": "toc",
+      "required_selectors": [
+        "table:nth-of-type(2)"
+      ],
+      "script_dependencies": [],
+      "risk_flags": [],
+      "optional": false
+    },
+    {
+      "selector": "h2#citation",
+      "widget_type": "bibtex",
+      "required_selectors": [
+        "h2#citation"
+      ],
+      "script_dependencies": [],
+      "risk_flags": [
+        "citation_widget"
+      ],
+      "optional": true
+    },
+    {
+      "selector": "main.page-content > div.wrapper > article.post.h-entry > div.post-content.e-content > figure.highlight > pre > code.language-bibtex",
+      "widget_type": "bibtex",
+      "required_selectors": [
+        "main.page-content > div.wrapper > article.post.h-entry > div.post-content.e-content > figure.highlight > pre > code.language-bibtex"
+      ],
+      "script_dependencies": [],
+      "risk_flags": [
+        "citation_widget"
+      ],
+      "optional": true
+    }
+  ],
+  "removable_demo_selectors": [],
+  "unsafe_selectors": [
+    "h2#citation",
+    "main.page-content > div.wrapper > article.post.h-entry > div.post-content.e-content > figure.highlight > pre > code.language-bibtex"
+  ],
+  "compile_confidence": 0.83,
+  "risk_flags": [
+    "citation_widget"
+  ],
+  "notes": [
+    "archetype=generic_multi_section",
+    "globals=10",
+    "shell_candidates=15",
+    "widgets=4"
+  ],
+  "source_fingerprint": "1f41b712d05da80a0cd8666c9460823df2f7011d61227c01396fdb708ee29ba3"
+}

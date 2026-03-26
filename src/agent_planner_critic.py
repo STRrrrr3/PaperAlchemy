@@ -8,7 +8,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from src.json_utils import to_pretty_json
 from src.llm import get_llm
 from src.prompts import PLANNER_CRITIC_SYSTEM_PROMPT, PLANNER_CRITIC_USER_PROMPT_TEMPLATE
-from src.schemas import PagePlan, PlannerCriticReport, StructuredPaper, TemplateCandidate
+from src.schemas import PagePlan, PlannerCriticReport, StructuredPaper, TemplateCandidate, TemplateProfile
 from src.state import PlannerState
 
 MAX_PLANNER_RETRY_DEFAULT = 2
@@ -48,6 +48,17 @@ def _normalize_template_candidate(candidate: Any) -> TemplateCandidate | None:
         return candidate
     try:
         return TemplateCandidate.model_validate(candidate)
+    except Exception:
+        return None
+
+
+def _normalize_template_profile(profile: Any) -> TemplateProfile | None:
+    if profile is None:
+        return None
+    if isinstance(profile, TemplateProfile):
+        return profile
+    try:
+        return TemplateProfile.model_validate(profile)
     except Exception:
         return None
 
@@ -98,6 +109,7 @@ def run_planner_code_critic(
     structured_paper: StructuredPaper | None,
     template_catalog: list[dict[str, Any]],
     template_candidates: list[TemplateCandidate],
+    template_profile: TemplateProfile | None,
 ) -> list[str]:
     critiques: list[str] = []
 
@@ -189,6 +201,42 @@ def run_planner_code_critic(
                     f"file_touch_plan path '{touch.path}' is outside selected template root '{selected_root}'."
                 )
 
+    if template_profile is not None:
+        allowed_shell_selectors = {
+            str(candidate.selector or "").strip()
+            for candidate in template_profile.shell_candidates
+            if str(candidate.selector or "").strip()
+        }
+        allowed_global_selectors = {
+            str(selector or "").strip()
+            for selector in template_profile.global_preserve_selectors
+            if str(selector or "").strip()
+        }
+        for block in page_plan.blocks:
+            selector_hint = str(block.target_template_region.selector_hint or "").strip()
+            if selector_hint not in allowed_shell_selectors:
+                critiques.append(
+                    f"block '{block.block_id}' selector_hint '{selector_hint}' is not present in TemplateProfile.shell_candidates."
+                )
+        unexpected_dom_mapping = sorted(set(page_plan.dom_mapping) - allowed_global_selectors)
+        if unexpected_dom_mapping:
+            critiques.append(
+                "dom_mapping should only contain TemplateProfile.global_preserve_selectors; unexpected keys: "
+                + ", ".join(unexpected_dom_mapping[:6])
+            )
+
+        compile_risky = float(template_profile.compile_confidence or 0.0) < 0.7 or any(
+            risk in {"fetch_runtime_dependency", "chart_runtime_dependency", "math_runtime_dependency"}
+            for risk in template_profile.risk_flags
+        )
+        render_strategy = str(page_plan.plan_meta.render_strategy or "").strip()
+        if compile_risky and render_strategy != "legacy_fullpage":
+            critiques.append(
+                "plan_meta.render_strategy must be 'legacy_fullpage' when template compile confidence is low or runtime widgets are risky."
+            )
+        if not compile_risky and render_strategy not in {"compiled_block_assembly", "legacy_fullpage"}:
+            critiques.append("plan_meta.render_strategy must be a supported planner output.")
+
     return critiques
 
 
@@ -236,12 +284,14 @@ def planner_critic_node(state: PlannerState) -> dict[str, Any]:
         for item in (_normalize_template_candidate(candidate) for candidate in raw_candidates)
         if item is not None
     ]
+    template_profile = _normalize_template_profile(state.get("template_profile"))
 
     critiques = run_planner_code_critic(
         page_plan=page_plan,
         structured_paper=structured_paper,
         template_catalog=template_catalog,
         template_candidates=template_candidates,
+        template_profile=template_profile,
     )
 
     if page_plan and structured_paper and not critiques:

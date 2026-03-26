@@ -79,6 +79,43 @@ class TemplateCandidate(BaseModel):
     reasons: List[str]
 
 
+class TemplateShellCandidate(BaseModel):
+    selector: str
+    role: Literal["hero", "section", "gallery", "table", "footer", "nav"]
+    root_tag: str
+    required_classes: List[str] = Field(default_factory=list)
+    preserve_ids: List[str] = Field(default_factory=list)
+    wrapper_chain: List["ShellWrapperSignature"] = Field(default_factory=list)
+    dom_index: int = 0
+    confidence: float = 0.0
+    signals: List[str] = Field(default_factory=list)
+
+
+class TemplateWidget(BaseModel):
+    selector: str
+    widget_type: str
+    required_selectors: List[str] = Field(default_factory=list)
+    script_dependencies: List[str] = Field(default_factory=list)
+    risk_flags: List[str] = Field(default_factory=list)
+    optional: bool = True
+
+
+class TemplateProfile(BaseModel):
+    template_id: str
+    template_root_dir: str
+    entry_html: str
+    archetype: str
+    global_preserve_selectors: List[str] = Field(default_factory=list)
+    shell_candidates: List[TemplateShellCandidate] = Field(default_factory=list)
+    optional_widgets: List[TemplateWidget] = Field(default_factory=list)
+    removable_demo_selectors: List[str] = Field(default_factory=list)
+    unsafe_selectors: List[str] = Field(default_factory=list)
+    compile_confidence: float = 0.0
+    risk_flags: List[str] = Field(default_factory=list)
+    notes: List[str] = Field(default_factory=list)
+    source_fingerprint: str
+
+
 class PlanMeta(BaseModel):
     plan_version: str = Field(description="Planner schema version, e.g., '1.1'.")
     planning_mode: Literal["autopage_template_first", "hybrid_template_bind"] = Field(
@@ -86,6 +123,10 @@ class PlanMeta(BaseModel):
     )
     target_framework: str = Field(description="Target framework, e.g., 'static-html', 'react', 'vue'.")
     confidence: float = Field(description="Planner confidence in [0, 1].")
+    render_strategy: Literal["compiled_block_assembly", "legacy_fullpage"] = Field(
+        default="compiled_block_assembly",
+        description="Preferred coder execution path for this plan.",
+    )
 
 
 class TemplateSelection(BaseModel):
@@ -228,8 +269,8 @@ class PagePlan(BaseModel):
     dom_mapping: dict[str, str] = Field(
         default_factory=dict,
         description=(
-            "Mapping of existing template CSS selectors to the HTML/text snippets that should be "
-            "injected into those DOM nodes."
+            "Compatibility mapping for preserved global template anchors. The new compiled-block "
+            "path does not use dom_mapping as the primary page-generation interface."
         ),
     )
     selectors_to_remove: List[str] = Field(
@@ -256,6 +297,22 @@ class CoderArtifact(BaseModel):
     copied_assets: List[str] = Field(description="Copied paper asset paths relative to site_dir.")
     edited_files: List[str] = Field(description="Edited file paths relative to site_dir.")
     notes: str = Field(description="Short build summary.")
+    render_mode: Optional[Literal["compiled_block_assembly", "legacy_fullpage"]] = Field(
+        default=None,
+        description="Actual coder render mode used for this artifact.",
+    )
+    template_profile_path: Optional[str] = Field(
+        default=None,
+        description="Saved TemplateProfile path used for the build.",
+    )
+    page_manifest_path: Optional[str] = Field(
+        default=None,
+        description="Saved page manifest path for anchored revisions.",
+    )
+    block_artifact_dir: Optional[str] = Field(
+        default=None,
+        description="Directory containing per-block render artifacts when block assembly is used.",
+    )
 
 
 class CoderCriticReport(BaseModel):
@@ -278,6 +335,48 @@ StylePropertyName = Literal[
     "width",
 ]
 AttributeName = Literal["class", "href", "target", "aria-label", "style", "id"]
+
+
+class ResolvedBlockBinding(BaseModel):
+    block_id: str
+    selector: str
+    region_role: Literal["hero", "section", "gallery", "table", "footer", "nav"]
+    root_tag: str
+    required_classes: List[str] = Field(default_factory=list)
+    preserve_ids: List[str] = Field(default_factory=list)
+    wrapper_chain: List[ShellWrapperSignature] = Field(default_factory=list)
+    actionable_root_selector: str
+    dom_index: int = 0
+
+
+class BlockRenderSpec(BaseModel):
+    block_id: str
+    order: int
+    title: str
+    source_sections: List[str] = Field(default_factory=list)
+    binding: ResolvedBlockBinding
+    content_contract: ContentContract
+    asset_binding: AssetBinding
+    interaction: InteractionPlan
+    responsive_rules: ResponsiveRules
+    shell_contract: Optional[BlockShellContract] = None
+    shell_html: str = ""
+    allowed_slots: List[SlotId] = Field(
+        default_factory=lambda: ["title", "summary", "body", "media", "meta", "actions"]
+    )
+
+
+class BlockRenderArtifact(BaseModel):
+    block_id: str
+    order: int
+    selector: str
+    render_mode: Literal["compiled_block_assembly", "legacy_fullpage"] = "compiled_block_assembly"
+    html: str = ""
+    html_path: str = ""
+    metadata_path: str = ""
+    screenshot_path: str = ""
+    validation_errors: List[str] = Field(default_factory=list)
+    notes: List[str] = Field(default_factory=list)
 
 
 class PageManifestSlot(BaseModel):

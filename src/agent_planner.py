@@ -1,25 +1,21 @@
 import json
+import re
 from pathlib import Path
 from typing import Any
 
-from bs4 import BeautifulSoup, Tag
 from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
 from src.agent_planner_critic import build_planner_critic_router, planner_critic_node
-from src.html_utils import read_text_with_fallback
-from src.deterministic_template_selector import score_and_select_template
 from src.human_feedback import extract_human_feedback_text, normalize_human_feedback
 from src.json_utils import to_pretty_json
 from src.llm import get_llm
 from src.planner_template_catalog import build_template_catalog, load_module_index, load_template_link_map
-from src.prompts import (
-    PLANNER_SYSTEM_PROMPT,
-    PLANNER_USER_PROMPT_TEMPLATE,
-)
-from src.schemas import PagePlan, StructuredPaper, TemplateCandidate
+from src.prompts import PLANNER_SYSTEM_PROMPT, PLANNER_USER_PROMPT_TEMPLATE
+from src.schemas import BlockShellContract, PagePlan, StructuredPaper, TemplateCandidate, TemplateProfile
 from src.state import PlannerState
+from src.template_compile import prepare_template_compile_bundle
 from src.template_resources import ensure_autopage_template_assets
 
 
@@ -56,253 +52,195 @@ def _normalize_template_candidate(candidate: Any) -> TemplateCandidate | None:
         return None
 
 
-def _to_project_relative_path(path: Path, project_root: Path) -> str:
+def _normalize_template_profile(profile: Any) -> TemplateProfile | None:
+    if isinstance(profile, TemplateProfile):
+        return profile
+    if profile is None:
+        return None
     try:
-        return str(path.resolve().relative_to(project_root.resolve())).replace("\\", "/")
-    except ValueError:
-        return str(path.resolve())
-
-
-def _selector_component(tag: Tag) -> str:
-    tag_name = tag.name or "div"
-    element_id = tag.get("id")
-    if element_id:
-        return f"{tag_name}#{element_id}"
-
-    classes = [str(item).strip() for item in tag.get("class", []) if str(item).strip()]
-    if classes:
-        return tag_name + "".join(f".{class_name}" for class_name in classes[:3])
-
-    return tag_name
-
-
-def _selector_hint(tag: Tag, max_depth: int = 3) -> str:
-    parts: list[str] = []
-    current: Tag | None = tag
-
-    while current is not None and len(parts) < max_depth:
-        parts.append(_selector_component(current))
-        if current.get("id"):
-            break
-
-        parent = current.parent
-        current = parent if isinstance(parent, Tag) else None
-
-    return " > ".join(reversed(parts))
-
-
-def _build_dom_outline(template_html: str, max_lines: int = 120) -> str:
-    soup = BeautifulSoup(template_html, "html.parser")
-    root = soup.body or soup
-    lines: list[str] = []
-    seen: set[str] = set()
-
-    for tag in root.find_all(True):
-        if tag.name in {"script", "style", "noscript"}:
-            continue
-
-        selector = _selector_hint(tag)
-        if selector in seen:
-            continue
-        seen.add(selector)
-
-        attrs: list[str] = []
-        for attr_name in ("id", "class", "src", "href", "alt", "aria-label"):
-            value = tag.get(attr_name)
-            if not value:
-                continue
-            if isinstance(value, list):
-                value_text = " ".join(str(item).strip() for item in value if str(item).strip())
-            else:
-                value_text = str(value).strip()
-            if value_text:
-                attrs.append(f'{attr_name}="{value_text[:100]}"')
-
-        text_preview = " ".join(tag.get_text(" ", strip=True).split())
-        attrs_suffix = f" ({', '.join(attrs)})" if attrs else ""
-        preview_suffix = f' text="{text_preview[:120]}"' if text_preview else ""
-        lines.append(f"- {selector}{attrs_suffix}{preview_suffix}")
-
-        if len(lines) >= max_lines:
-            break
-
-    return "\n".join(lines) if lines else "- <empty template body>"
-
-
-def _candidate_from_ranked_match(
-    ranked_match: dict[str, Any],
-    project_root: Path,
-) -> TemplateCandidate | None:
-    template_id = str(ranked_match.get("template_id") or "").strip()
-    template_path = str(ranked_match.get("template_path") or "").strip()
-    entry_html = str(ranked_match.get("entry_html") or "").strip()
-    if not template_id or not template_path or not entry_html:
+        return TemplateProfile.model_validate(profile)
+    except Exception:
         return None
 
-    reasons = [
-        str(item).strip()
-        for item in (ranked_match.get("reasons") or [])
-        if str(item).strip()
-    ]
 
-    return TemplateCandidate(
-        template_id=template_id,
-        root_dir=_to_project_relative_path(Path(template_path), project_root),
-        chosen_entry_html=entry_html,
-        score=float(ranked_match.get("score") or 0.0),
-        reasons=reasons[:8],
-    )
+def _dedupe_strings(values: list[str]) -> list[str]:
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        clean = str(value or "").strip()
+        if clean and clean not in seen:
+            seen.add(clean)
+            deduped.append(clean)
+    return deduped
 
 
-def _select_designated_template(
-    constraints: dict[str, Any],
-    project_root: Path,
-) -> tuple[list[TemplateCandidate], TemplateCandidate | None, str | None]:
-    raw_candidates = constraints.get("ui_ranked_candidates") or []
-    if not isinstance(raw_candidates, list):
-        raw_candidates = []
-
-    top_k = max(1, int(constraints.get("template_candidate_top_k", 3)))
-    candidates = [
-        candidate
-        for candidate in (
-            _candidate_from_ranked_match(item, project_root)
-            for item in raw_candidates[:top_k]
-            if isinstance(item, dict)
-        )
-        if candidate is not None
-    ]
-
-    designated_template_id = str(constraints.get("designated_template_id") or "").strip()
-    designated_template_path = str(constraints.get("designated_template_path") or "").strip()
-    designated_entry_html = str(constraints.get("designated_entry_html") or "").strip()
-
-    if not (designated_template_id and designated_template_path and designated_entry_html):
-        return candidates, None, None
-
-    selected_match = next(
-        (
-            item
-            for item in raw_candidates
-            if isinstance(item, dict)
-            and str(item.get("template_id") or "").strip() == designated_template_id
-            and str(item.get("entry_html") or "").strip() == designated_entry_html
-        ),
-        None,
-    )
-
-    if selected_match is None:
-        selected_match = {
-            "template_id": designated_template_id,
-            "template_name": designated_template_id,
-            "template_path": designated_template_path,
-            "entry_html": designated_entry_html,
-            "entry_html_path": str((Path(designated_template_path) / designated_entry_html).resolve()),
-            "score": float(constraints.get("designated_template_score") or 0.0),
-            "reasons": ["manual_ui_selection"],
-        }
-
-    selected = _candidate_from_ranked_match(selected_match, project_root)
-    if selected is None:
-        return candidates, None, None
-
-    existing_ids = {candidate.template_id for candidate in candidates}
-    if selected.template_id not in existing_ids:
-        candidates = [selected, *candidates]
-    else:
-        candidates = [
-            selected,
-            *[candidate for candidate in candidates if candidate.template_id != selected.template_id],
-        ]
-
-    return candidates, selected, designated_template_path
-
-
-def template_selector_node(state: PlannerState) -> dict[str, Any]:
-    print("[PaperAlchemy-TemplateSelector] selecting template from user constraints...")
-
-    project_root = Path(__file__).resolve().parent.parent
-    constraints = state.get("generation_constraints") or {}
-    user_constraints = state.get("user_constraints") or {}
-    tags_json_path = str(constraints.get("template_tags_json_path") or "").strip()
-
-    designated_candidates, designated_selected, _ = _select_designated_template(
-        constraints=constraints,
-        project_root=project_root,
-    )
-    if designated_selected is not None:
-        print(
-            "[PaperAlchemy-TemplateSelector] using designated template from UI selection: "
-            f"{designated_selected.template_id} entry={designated_selected.chosen_entry_html}"
-        )
-        return {
-            "template_candidates": designated_candidates or [designated_selected],
-            "selected_template": designated_selected,
-            "generation_constraints": {
-                **constraints,
-                "selected_template_id": designated_selected.template_id,
-            },
-        }
-
-    if not tags_json_path:
-        print("[PaperAlchemy-TemplateSelector] template_tags_json_path is missing.")
-        return {
-            "template_candidates": [],
-            "selected_template": None,
-        }
-
-    try:
-        selection_result = score_and_select_template(
-            user_constraints=user_constraints,
-            tags_json_path=tags_json_path,
-        )
-    except Exception as exc:
-        print(f"[PaperAlchemy-TemplateSelector] deterministic selection failed: {exc}")
-        return {
-            "template_candidates": [],
-            "selected_template": None,
-        }
-
-    top_k = max(1, int(constraints.get("template_candidate_top_k", 3)))
-    ranked_matches = list(selection_result.get("ranking") or [])
-    candidates = [
-        candidate
-        for candidate in (
-            _candidate_from_ranked_match(item, project_root)
-            for item in ranked_matches[:top_k]
-        )
-        if candidate is not None
-    ]
-
-    selected = _candidate_from_ranked_match(selection_result, project_root)
-    if selected is None:
-        print("[PaperAlchemy-TemplateSelector] selected template candidate is invalid.")
-        return {
-            "template_candidates": [],
-            "selected_template": None,
-        }
-
-    if not candidates:
-        candidates = [selected]
-
-    print(
-        "[PaperAlchemy-TemplateSelector] selected="
-        f"{selected.template_id} entry={selected.chosen_entry_html} score={selected.score}"
-    )
-
+def _selector_tokens(selector: str) -> set[str]:
     return {
-        "template_candidates": candidates,
-        "selected_template": selected,
-        "generation_constraints": {
-            **constraints,
-            "selected_template_id": selected.template_id,
-        },
+        token
+        for token in re.split(r"[^a-z0-9]+", str(selector or "").lower())
+        if token
     }
+
+
+def _build_shell_contract_from_candidate(candidate: Any) -> BlockShellContract:
+    return BlockShellContract(
+        root_tag=str(candidate.root_tag or "div"),
+        required_classes=list(candidate.required_classes or []),
+        preserve_ids=list(candidate.preserve_ids or []),
+        wrapper_chain=list(candidate.wrapper_chain or []),
+        actionable_root_selector=str(candidate.selector or "").strip(),
+    )
+
+
+def _ordered_shell_candidates(profile: TemplateProfile) -> list[Any]:
+    return sorted(
+        profile.shell_candidates,
+        key=lambda item: (item.dom_index, -item.confidence, item.selector),
+    )
+
+
+def _choose_shell_candidate(
+    profile: TemplateProfile,
+    *,
+    desired_role: str,
+    preferred_selector: str,
+    used_selectors: set[str],
+) -> Any | None:
+    selector_tokens = _selector_tokens(preferred_selector)
+    best_candidate = None
+    best_score = float("-inf")
+
+    for candidate in _ordered_shell_candidates(profile):
+        if candidate.selector in used_selectors:
+            continue
+        score = float(candidate.confidence or 0.0) * 10.0
+        if str(candidate.role or "") == desired_role:
+            score += 5.0
+        elif desired_role in {"hero", "section"} and str(candidate.role or "") in {"hero", "section"}:
+            score += 2.5
+        elif desired_role == "gallery" and str(candidate.role or "") == "section":
+            score += 1.5
+        elif desired_role == "table" and str(candidate.role or "") == "section":
+            score += 1.0
+        else:
+            score -= 1.5
+
+        if preferred_selector and candidate.selector == preferred_selector:
+            score += 6.0
+        elif selector_tokens:
+            score += min(3.0, float(len(selector_tokens & _selector_tokens(candidate.selector))))
+
+        if candidate.preserve_ids:
+            score += 0.6
+        if candidate.required_classes:
+            score += 0.4
+        if score > best_score:
+            best_candidate = candidate
+            best_score = score
+
+    return best_candidate
+
+
+def _normalize_blocks_with_template_profile(page_plan: PagePlan, template_profile: TemplateProfile) -> PagePlan:
+    outline_lookup = {item.block_id: item for item in page_plan.page_outline}
+    updated_blocks = []
+    used_selectors: set[str] = set()
+
+    for block in page_plan.blocks:
+        preferred_selector = str(block.target_template_region.selector_hint or "").strip()
+        desired_role = str(block.target_template_region.region_role or "section").strip() or "section"
+        chosen_candidate = _choose_shell_candidate(
+            template_profile,
+            desired_role=desired_role,
+            preferred_selector=preferred_selector,
+            used_selectors=used_selectors,
+        )
+        if chosen_candidate is None:
+            updated_blocks.append(block)
+            continue
+
+        used_selectors.add(chosen_candidate.selector)
+        updated_region = block.target_template_region.model_copy(
+            update={
+                "selector_hint": chosen_candidate.selector,
+                "region_role": str(chosen_candidate.role or desired_role),
+            },
+            deep=True,
+        )
+        updated_outline = outline_lookup.get(block.block_id)
+        updated_responsive_rules = block.responsive_rules.model_copy(
+            update={
+                "mobile_order": int(updated_outline.order if updated_outline is not None else block.responsive_rules.mobile_order)
+            },
+            deep=True,
+        )
+        updated_blocks.append(
+            block.model_copy(
+                update={
+                    "target_template_region": updated_region,
+                    "shell_contract": _build_shell_contract_from_candidate(chosen_candidate),
+                    "responsive_rules": updated_responsive_rules,
+                },
+                deep=True,
+            )
+        )
+
+    return page_plan.model_copy(update={"blocks": updated_blocks}, deep=True)
+
+
+def _compat_dom_mapping(template_profile: TemplateProfile) -> dict[str, str]:
+    return {
+        selector: "preserve_global_anchor"
+        for selector in template_profile.global_preserve_selectors
+        if str(selector or "").strip()
+    }
+
+
+def _normalize_selectors_to_remove(page_plan: PagePlan, template_profile: TemplateProfile) -> list[str]:
+    protected_selectors = {
+        selector
+        for selector in template_profile.global_preserve_selectors
+        if str(selector or "").strip()
+    }
+    protected_selectors.update(
+        str(candidate.selector or "").strip()
+        for candidate in template_profile.shell_candidates
+        if str(candidate.selector or "").strip()
+    )
+    merged = list(page_plan.selectors_to_remove or []) + list(template_profile.removable_demo_selectors or [])
+    normalized = []
+    for selector in _dedupe_strings(merged):
+        if selector in protected_selectors:
+            continue
+        normalized.append(selector)
+    return normalized
+
+
+def _render_strategy_risks(template_profile: TemplateProfile) -> list[str]:
+    risks: list[str] = []
+    if float(template_profile.compile_confidence or 0.0) < 0.7:
+        risks.append(
+            f"template_compile_confidence={template_profile.compile_confidence:.2f} is below compiled block threshold 0.70"
+        )
+    high_risk_widget_types = {
+        widget.widget_type
+        for widget in template_profile.optional_widgets
+        if {"fetch_runtime_dependency", "chart_runtime_dependency", "math_runtime_dependency"} & set(widget.risk_flags)
+    }
+    if high_risk_widget_types:
+        risks.append(
+            "template widgets require risky runtime handling: " + ", ".join(sorted(high_risk_widget_types))
+        )
+    for risk_flag in template_profile.risk_flags:
+        if risk_flag not in risks:
+            if risk_flag in {"fetch_runtime_dependency", "chart_runtime_dependency", "math_runtime_dependency"}:
+                risks.append(risk_flag)
+    return _dedupe_strings(risks)
 
 
 def unified_planner_node(state: PlannerState) -> dict[str, Any]:
     print(
-        "[PaperAlchemy-UnifiedPlanner] generating PagePlan from selected template "
+        "[PaperAlchemy-UnifiedPlanner] generating PagePlan from compiled template profile "
         f"(attempt {state.get('planner_retry_count', 0) + 1})..."
     )
 
@@ -317,32 +255,15 @@ def unified_planner_node(state: PlannerState) -> dict[str, Any]:
         for candidate in (_normalize_template_candidate(item) for item in raw_candidates)
         if candidate is not None
     ]
-
     selected = _normalize_template_candidate(state.get("selected_template"))
-    if not selected and candidates:
+    template_profile = _normalize_template_profile(state.get("template_profile"))
+    if selected is None and candidates:
         selected = candidates[0]
-
-    if not selected:
-        print("[PaperAlchemy-UnifiedPlanner] selected template is missing.")
+    if selected is None or template_profile is None:
+        print("[PaperAlchemy-UnifiedPlanner] selected template or template_profile is missing.")
         return {"page_plan": None}
 
-    project_root = Path(__file__).resolve().parent.parent
-    template_entry_path = project_root / selected.root_dir / selected.chosen_entry_html
-    if not template_entry_path.exists():
-        print(f"[PaperAlchemy-UnifiedPlanner] template entry html not found: {template_entry_path}")
-        return {"page_plan": None}
-
-    try:
-        template_html = read_text_with_fallback(template_entry_path)
-    except Exception as exc:
-        print(f"[PaperAlchemy-UnifiedPlanner] failed reading template html: {exc}")
-        return {"page_plan": None}
-
-    template_dom_outline = _build_dom_outline(template_html)
     constraints = state.get("generation_constraints") or {}
-    llm = get_llm(temperature=0.2, use_smart_model=True)
-    structured_llm = llm.with_structured_output(PagePlan)
-
     template_catalog = state.get("template_catalog") or []
     template_link_map = state.get("template_link_map") or {}
     module_index = state.get("module_index") or {}
@@ -350,6 +271,8 @@ def unified_planner_node(state: PlannerState) -> dict[str, Any]:
     human_directives = extract_human_feedback_text(state.get("human_directives"))
     previous_page_plan = _normalize_page_plan(state.get("previous_page_plan"))
 
+    llm = get_llm(temperature=0.2, use_smart_model=True)
+    structured_llm = llm.with_structured_output(PagePlan)
     user_msg = PLANNER_USER_PROMPT_TEMPLATE.format(
         structured_paper_json=to_pretty_json(structured_paper),
         previous_page_plan_json=to_pretty_json(previous_page_plan) if previous_page_plan else "null",
@@ -360,8 +283,8 @@ def unified_planner_node(state: PlannerState) -> dict[str, Any]:
             ensure_ascii=False,
         ),
         selected_template_json=json.dumps(selected.model_dump(), indent=2, ensure_ascii=False),
-        template_entry_html_path=_to_project_relative_path(template_entry_path, project_root),
-        template_dom_outline=template_dom_outline,
+        template_entry_html_path=str(selected.chosen_entry_html),
+        template_profile_json=json.dumps(template_profile.model_dump(), indent=2, ensure_ascii=False),
         template_link_map_json=json.dumps(template_link_map, indent=2, ensure_ascii=False),
         module_index_json=json.dumps(module_index, indent=2, ensure_ascii=False),
         generation_constraints_json=json.dumps(constraints, indent=2, ensure_ascii=False),
@@ -383,31 +306,25 @@ def unified_planner_node(state: PlannerState) -> dict[str, Any]:
         result.template_selection.selected_template_id = selected.template_id
         result.template_selection.selected_root_dir = selected.root_dir
         result.template_selection.selected_entry_html = selected.chosen_entry_html
-
         if not result.template_selection.fallback_template_id and len(candidates) > 1:
             result.template_selection.fallback_template_id = candidates[1].template_id
 
-        normalized_dom_mapping: dict[str, str] = {}
-        for selector, content in (result.dom_mapping or {}).items():
-            selector_text = str(selector or "").strip()
-            if not selector_text:
-                continue
-            normalized_dom_mapping[selector_text] = str(content or "")
+        result = _normalize_blocks_with_template_profile(result, template_profile)
+        result.dom_mapping = _compat_dom_mapping(template_profile)
+        result.selectors_to_remove = _normalize_selectors_to_remove(result, template_profile)
 
-        if not normalized_dom_mapping:
-            raise ValueError("Template binder returned empty dom_mapping")
-
-        result.dom_mapping = normalized_dom_mapping
-        normalized_selectors_to_remove: list[str] = []
-        seen_remove_selectors: set[str] = set()
-        for selector in (result.selectors_to_remove or []):
-            selector_text = str(selector or "").strip()
-            if not selector_text or selector_text in seen_remove_selectors:
-                continue
-            seen_remove_selectors.add(selector_text)
-            normalized_selectors_to_remove.append(selector_text)
-
-        result.selectors_to_remove = normalized_selectors_to_remove
+        render_strategy_risks = _render_strategy_risks(template_profile)
+        result.plan_meta.render_strategy = (
+            "legacy_fullpage" if render_strategy_risks else "compiled_block_assembly"
+        )
+        result.coder_handoff = result.coder_handoff.model_copy(
+            update={
+                "known_risks": _dedupe_strings(
+                    list(result.coder_handoff.known_risks or []) + render_strategy_risks
+                )
+            },
+            deep=True,
+        )
         return {"page_plan": result}
     except Exception as exc:
         print(f"[PaperAlchemy-UnifiedPlanner] generation error: {exc}")
@@ -416,14 +333,11 @@ def unified_planner_node(state: PlannerState) -> dict[str, Any]:
 
 def build_planner_graph(max_retry: int = 2):
     workflow = StateGraph(PlannerState)
-    workflow.add_node("template_selector", template_selector_node)
     workflow.add_node("unified_planner", unified_planner_node)
     workflow.add_node("planner_critic", planner_critic_node)
 
-    workflow.set_entry_point("template_selector")
-    workflow.add_edge("template_selector", "unified_planner")
+    workflow.set_entry_point("unified_planner")
     workflow.add_edge("unified_planner", "planner_critic")
-
     workflow.add_conditional_edges(
         "planner_critic",
         build_planner_critic_router(max_retry=max_retry),
@@ -442,37 +356,40 @@ def run_planner_agent(
     human_directives: str | dict = "",
     previous_page_plan: PagePlan | None = None,
     max_retry: int = 2,
+    template_candidates: list[TemplateCandidate] | None = None,
+    selected_template: TemplateCandidate | None = None,
+    template_profile: TemplateProfile | None = None,
 ):
     current_file = Path(__file__).resolve()
     project_root = current_file.parent.parent
+    constraints = dict(generation_constraints or {})
 
-    constraints = generation_constraints or {}
     synced_assets = ensure_autopage_template_assets(
         project_root=project_root,
         force=bool(constraints.get("force_template_sync")),
     )
+    constraints.setdefault("template_tags_json_path", str(synced_assets.tags_json_path))
+
+    if selected_template is None or template_profile is None:
+        compiled_candidates, compiled_selected, compiled_profile, _, _, _ = prepare_template_compile_bundle(
+            project_root=project_root,
+            generation_constraints=constraints,
+            user_constraints=user_constraints or {},
+            synced_assets=synced_assets,
+            allow_llm=bool(constraints.get("template_compile_use_llm", True)),
+            force_recompile=bool(constraints.get("force_template_recompile")),
+        )
+        if template_candidates is None:
+            template_candidates = compiled_candidates
+        selected_template = selected_template or compiled_selected
+        template_profile = template_profile or compiled_profile
 
     templates_dir = synced_assets.templates_dir
     template_links_path = synced_assets.template_link_json_path
     module_index_path = project_root / "data" / "collectors" / "modules" / "module_index.json"
 
-    if synced_assets.missing_template_ids:
-        print(
-            "[PaperAlchemy-Planner] warning: missing AutoPage templates for tagged ids: "
-            f"{synced_assets.missing_template_ids[:8]}"
-        )
-
-    constraints = {
-        **constraints,
-        "template_tags_json_path": str(synced_assets.tags_json_path),
-    }
     max_templates = int(constraints.get("max_templates_for_planner", 120))
     max_entry_candidates = int(constraints.get("max_entry_candidates", 3))
-
-    print(
-        "[PaperAlchemy-Planner] loading template inventory "
-        f"(max_templates={max_templates}, max_entry_candidates={max_entry_candidates})..."
-    )
     template_catalog = build_template_catalog(
         templates_dir=templates_dir,
         project_root=project_root,
@@ -481,14 +398,12 @@ def run_planner_agent(
     )
     template_link_map = load_template_link_map(template_links_path)
     module_index = load_module_index(module_index_path)
-
     if not template_catalog:
         print("[PaperAlchemy-Planner] no valid templates discovered, planner cannot proceed.")
         return None
 
     app = build_planner_graph(max_retry=max_retry)
     thread = {"configurable": {"thread_id": f"planner_{paper_folder_name}"}}
-
     initial_state: PlannerState = {
         "structured_paper": structured_data,
         "previous_page_plan": previous_page_plan,
@@ -498,30 +413,24 @@ def run_planner_agent(
         "generation_constraints": constraints,
         "user_constraints": user_constraints or {},
         "human_directives": normalize_human_feedback(human_directives),
-        "template_candidates": [],
-        "selected_template": None,
+        "template_candidates": list(template_candidates or []),
+        "selected_template": selected_template,
+        "template_profile": template_profile,
         "planner_feedback_history": [],
         "page_plan": None,
         "planner_critic_passed": False,
         "planner_retry_count": 0,
     }
 
-    print("[PaperAlchemy-Planner] running Selector + UnifiedPlanner + Critic graph...")
+    print("[PaperAlchemy-Planner] running UnifiedPlanner + Critic graph...")
     for _ in app.stream(initial_state, thread):
         pass
 
     final_state = app.get_state(thread)
     plan_result = final_state.values.get("page_plan")
-    normalized_plan: PagePlan | None = None
-    if plan_result is not None:
-        try:
-            normalized_plan = PagePlan.model_validate(plan_result)
-        except Exception:
-            normalized_plan = None
-
+    normalized_plan = _normalize_page_plan(plan_result)
     if not normalized_plan or not final_state.values.get("planner_critic_passed"):
         print("[PaperAlchemy-Planner] planner completed but critic did not fully pass.")
     else:
         print("[PaperAlchemy-Planner] planner phase completed successfully.")
-
     return normalized_plan

@@ -576,8 +576,8 @@ CODER_USER_PROMPT_TEMPLATE = """Generate the final `index.html` now.
 PLANNER_SYSTEM_PROMPT = """You are the Planner Agent of PaperAlchemy.
 You are an expert in information architecture, template adaptation, and frontend implementation handoff.
 
-Your mission is to convert a structured academic paper plus an already selected template into an execution-ready PagePlan for a downstream Coder Agent.
-Current project mode is AutoPage-style: template-first generation with local templates and direct DOM-aware planning.
+Your mission is to convert a structured academic paper plus an already selected compiled template profile into an execution-ready PagePlan for a downstream Coder Agent.
+Current project mode is AutoPage-style: template-first generation with local templates and compiled shell-aware planning.
 
 ## Inputs you will receive
 1. STRUCTURED_PAPER_JSON (required):
@@ -593,8 +593,8 @@ Current project mode is AutoPage-style: template-first generation with local tem
    - The upstream-selected template candidate. Use this template; do not pick a different one.
 6. TEMPLATE_ENTRY_HTML_PATH (required):
    - Relative path to the selected template entry html.
-7. TEMPLATE_DOM_OUTLINE (required):
-   - Condensed DOM outline of the selected template entry html.
+7. TEMPLATE_PROFILE_JSON (required):
+   - Compiled TemplateProfile with shell_candidates, global_preserve_selectors, optional_widgets, removable_demo_selectors, unsafe_selectors, compile_confidence, and risk flags.
 8. TEMPLATE_LINK_MAP_JSON (optional):
    - Mapping from template_id to source URL (usually from templates/template_link.json).
 9. MODULE_INDEX_JSON (optional):
@@ -629,14 +629,14 @@ Current project mode is AutoPage-style: template-first generation with local tem
    - If the human directive asks to omit a section, do not include it in the PagePlan.
    - If it asks to emphasize something, allocate a prominent block for it.
    - If it asks to reduce density or merge content, reflect that in block structure and outline.
-9. Direct DOM-aware planning:
-   - Populate dom_mapping with CSS selectors that already exist in TEMPLATE_DOM_OUTLINE.
-   - Prefer stable selectors such as ids, anchored classes, or short anchored descendant selectors.
-   - Avoid broad selectors like `div`, `section`, or `p` unless the outline clearly proves uniqueness.
-   - dom_mapping values must be HTML/text strings intended for inner-content injection into existing template nodes.
+9. TemplateProfile-aware planning:
+   - `blocks[*].target_template_region.selector_hint` must come from TEMPLATE_PROFILE_JSON.shell_candidates[*].selector.
+   - Prefer selector hints with higher compile confidence and stable shell signatures.
+   - Do not invent new shell selectors outside TEMPLATE_PROFILE_JSON.shell_candidates.
+   - Use `dom_mapping` only as a compatibility field for global preserve anchors from TEMPLATE_PROFILE_JSON.global_preserve_selectors.
 10. Cleanup planning:
    - Populate selectors_to_remove with wrapper selectors for residual template garbage such as placeholder copy, irrelevant widgets, dummy images, stale footers, or unrelated template sections.
-   - Never include a selector that overlaps a dom_mapping target or would remove injected paper content.
+   - Prefer TEMPLATE_PROFILE_JSON.removable_demo_selectors and avoid conflicts with shell candidates or global preserve selectors.
 11. Stable revision targets:
    - Every block must keep a stable semantic snake_case block_id.
    - Never use positional, template-coupled, or placeholder ids such as `section_1`, `block_2`, `template_hero`, `todo`, or `content_box`.
@@ -648,10 +648,13 @@ Current project mode is AutoPage-style: template-first generation with local tem
    - what to preserve from template, what to replace, and style override intensity.
 3. Build block mapping:
    - each block must map source_sections and target_template_region.
-4. Use TEMPLATE_DOM_OUTLINE and selected template metadata directly while building target_template_region and dom_mapping.
+4. Use TEMPLATE_PROFILE_JSON directly while building target_template_region and the compatibility dom_mapping field.
 5. Define content contract + asset binding for each block.
 6. Define implementation order and file touch plan for Coder.
 7. Run self-check for grounding and feasibility before finalizing.
+8. Set `plan_meta.render_strategy` to:
+   - `compiled_block_assembly` when TEMPLATE_PROFILE_JSON.compile_confidence is high and widgets look safe.
+   - `legacy_fullpage` when compile confidence is low or the template has risky runtime-dependent widgets. Explain the reason in `coder_handoff.known_risks`.
 
 ## Required output JSON schema
 {
@@ -659,7 +662,8 @@ Current project mode is AutoPage-style: template-first generation with local tem
     "plan_version": "1.1",
     "planning_mode": "autopage_template_first",
     "target_framework": "string",
-    "confidence": 0.0
+    "confidence": 0.0,
+    "render_strategy": "compiled_block_assembly | legacy_fullpage"
   },
   "template_selection": {
     "selected_template_id": "string",
@@ -785,8 +789,8 @@ PLANNER_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
 ### TEMPLATE_ENTRY_HTML_PATH
 {template_entry_html_path}
 
-### TEMPLATE_DOM_OUTLINE
-{template_dom_outline}
+### TEMPLATE_PROFILE_JSON
+{template_profile_json}
 
 ### TEMPLATE_LINK_MAP_JSON
 {template_link_map_json}
@@ -1055,6 +1059,50 @@ Template id: {selected_template_id}
 Return strict JSON with issue classification, recovery suggestion, actionable selectors_to_remove, and css_rules_to_inject.
 """
 
+BLOCK_RENDER_SYSTEM_PROMPT = """You are the Block Renderer in PaperAlchemy.
+Render exactly one compiled webpage block fragment for block-assembly mode.
+
+Rules:
+1. Return exactly one HTML fragment with one root element only.
+2. The root element must keep the exact `data-pa-block` value from BLOCK_RENDER_SPEC_JSON.block_id.
+3. The root element must preserve the block shell contract: root tag, required classes, preserved ids, and wrapper compatibility.
+4. Use only the fixed slot vocabulary:
+   - `title`
+   - `summary`
+   - `body`
+   - `media`
+   - `meta`
+   - `actions`
+5. Do not emit a full HTML document.
+6. Use only grounded paper content and the provided copied asset paths.
+7. Keep the fragment compatible with TEMPLATE_SHELL_HTML and TEMPLATE_REFERENCE_HTML.
+8. Output HTML only, with no markdown fence or explanation.
+"""
+
+BLOCK_RENDER_USER_PROMPT_TEMPLATE = """Render this block now.
+
+### BLOCK_RENDER_SPEC_JSON
+{block_render_spec_json}
+
+### STRUCTURED_PAPER_JSON
+{structured_paper_json}
+
+### TEMPLATE_SHELL_HTML
+{template_shell_html}
+
+### TEMPLATE_REFERENCE_HTML
+{template_reference_html}
+
+### AVAILABLE_PAPER_ASSETS_JSON
+{available_paper_assets_json}
+
+### CODER_INSTRUCTIONS
+{coder_instructions}
+
+### HUMAN_DIRECTIVES
+{human_directives}
+"""
+
 BLOCK_REGEN_SYSTEM_PROMPT = """You are the Block Regenerator in PaperAlchemy.
 Your job is to regenerate exactly one anchored webpage block for DOM replacement.
 
@@ -1109,6 +1157,8 @@ BLOCK_REGEN_USER_PROMPT_TEMPLATE = """Regenerate the target block now.
 
 
 __all__ = [
+    "BLOCK_RENDER_SYSTEM_PROMPT",
+    "BLOCK_RENDER_USER_PROMPT_TEMPLATE",
     "BLOCK_REGEN_SYSTEM_PROMPT",
     "BLOCK_REGEN_USER_PROMPT_TEMPLATE",
     "CODER_SYSTEM_PROMPT",
