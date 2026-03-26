@@ -296,6 +296,9 @@ Rules:
 5. Unsupported requests should return {"edits": []}:
    - cross-block reordering
    - whole-page theme rewrites
+   - overall density / rhythm / page-wide spacing retuning
+   - section redesign / rebuild / restructure requests
+   - template replacement or template swap requests
    - global navigation redesign without a matching global anchor
 6. `scope="slot"` requires block_id and slot_id.
 7. `scope="block"` requires block_id and must set slot_id/global_id to null.
@@ -432,7 +435,12 @@ Rules:
 10. Every referenced block_id or global_id must already exist in CURRENT_PAGE_MANIFEST_JSON.
 11. If you emit local paper images, use only the exact `web_path` values from AVAILABLE_PAPER_ASSETS_JSON.
 12. Prefer the fewest safe changes necessary to satisfy the revision plan.
-13. Do not output explanations, commentary, markdown fences, or extra text.
+13. If one clean replacement already solves the request, do not add redundant `style_changes`, `attribute_changes`, or `override_css_rules`.
+14. Never output empty `declarations`.
+15. Never output empty `attributes`.
+16. If you cannot provide concrete style declarations, omit the style change entirely instead of guessing.
+17. Prioritize a minimal, clean, executable patch plan over a more complicated one.
+18. Do not output explanations, commentary, markdown fences, or extra text.
 """
 
 PATCH_AGENT_USER_PROMPT_TEMPLATE = """Generate grounded webpage patch output now.

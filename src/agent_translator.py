@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Any
 
 from src.html_utils import read_current_page_html
@@ -15,6 +16,42 @@ from src.page_manifest import build_page_manifest_path, load_page_manifest
 from src.prompts import TRANSLATOR_SYSTEM_PROMPT, TRANSLATOR_USER_PROMPT_TEMPLATE
 from src.schemas import CoderArtifact, RevisionPlan
 from src.state import WorkflowState
+
+NON_PATCH_FEEDBACK_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(
+            r"\b(?:whole|entire|overall|global|page-wide)\s+"
+            r"(?:page|webpage|site|layout|style|theme|density|rhythm|spacing|structure)\b",
+            flags=re.IGNORECASE,
+        ),
+        "feedback requests page-level or global adjustments beyond anchored patch scope",
+    ),
+    (
+        re.compile(
+            r"\b(?:section|page)\s+(?:redesign|rebuild|rework|revamp|restructure|redo)\b",
+            flags=re.IGNORECASE,
+        ),
+        "feedback requests section/page redesign instead of a local anchored patch",
+    ),
+    (
+        re.compile(
+            r"\b(?:switch|replace|change)\s+template\b|\btemplate\s+(?:swap|replacement)\b",
+            flags=re.IGNORECASE,
+        ),
+        "feedback requests template replacement which is outside the patch path",
+    ),
+    (
+        re.compile(
+            r"\b(?:global|overall|page-wide)\s+(?:style|styling|theme|density|rhythm|spacing|tone)\b",
+            flags=re.IGNORECASE,
+        ),
+        "feedback requests global style retuning instead of a local anchored edit",
+    ),
+    (
+        re.compile(r"\b(?:replan|rebind)\b", flags=re.IGNORECASE),
+        "feedback requests structural replanning or shell rebinding",
+    ),
+)
 
 
 def _normalize_coder_artifact(artifact: Any) -> CoderArtifact | None:
@@ -51,6 +88,20 @@ def _read_current_page_manifest(artifact: CoderArtifact | None) -> str:
     if not manifest:
         return "{}"
     return json.dumps(manifest.model_dump(), indent=2, ensure_ascii=False)
+
+
+def _classify_edit_intent(feedback: Any, revision_plan: RevisionPlan | None) -> tuple[str, str]:
+    feedback_text = str(extract_human_feedback_text(feedback) or "").strip()
+    lowered_feedback = feedback_text.lower()
+
+    for pattern, reason in NON_PATCH_FEEDBACK_PATTERNS:
+        if pattern.search(lowered_feedback):
+            return "non_patch", reason
+
+    if revision_plan is None or not revision_plan.edits:
+        return "non_patch", "current feedback was not translated into an actionable anchored patch"
+
+    return "patch", "feedback maps to local anchored edits that the patch path can handle"
 
 
 def translator_node(state: WorkflowState) -> dict[str, Any]:
@@ -98,3 +149,13 @@ def translator_node(state: WorkflowState) -> dict[str, Any]:
 
     revision_plan = _normalize_revision_plan(response) or RevisionPlan()
     return {"revision_plan": revision_plan}
+
+
+def edit_intent_router_node(state: WorkflowState) -> dict[str, Any]:
+    revision_plan = _normalize_revision_plan(state.get("revision_plan")) or RevisionPlan()
+    intent, reason = _classify_edit_intent(state.get("human_directives"), revision_plan)
+    print(f"[EditIntentRouter] Routed webpage revision to {intent}: {reason}")
+    return {
+        "edit_intent": intent,
+        "edit_intent_reason": reason,
+    }

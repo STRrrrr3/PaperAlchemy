@@ -1,5 +1,5 @@
 import operator
-from typing import Annotated, Any, List, Optional, TypedDict
+from typing import Annotated, Any, List, Literal, Optional, TypedDict
 
 from src.human_feedback import HumanFeedbackPayload
 from src.schemas import (
@@ -76,6 +76,8 @@ class WorkflowState(TypedDict):
     manual_layout_compose_enabled: bool
     human_directives: HumanFeedbackPayload
     coder_instructions: str
+    edit_intent: Literal["patch", "non_patch"] | None
+    edit_intent_reason: str
     patch_agent_output: str
     revision_plan: RevisionPlan | None
     targeted_replacement_plan: TargetedReplacementPlan | None
