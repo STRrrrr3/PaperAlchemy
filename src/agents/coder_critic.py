@@ -1,4 +1,4 @@
-import base64
+﻿import base64
 import json
 from collections.abc import Callable
 from pathlib import Path
@@ -8,14 +8,14 @@ from typing import Any
 from bs4 import BeautifulSoup
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.html_utils import message_content_to_text
-from src.llm import get_llm
-from src.page_manifest import build_page_manifest_path, extract_page_manifest, load_page_manifest
-from src.page_validation import collect_allowed_asset_web_paths, validate_local_image_references
-from src.preview_utils import build_visual_critic_screenshot_path, take_local_screenshot
+from src.utils.html_utils import message_content_to_text
+from src.services.llm import get_llm
+from src.validators.page_manifest import build_page_manifest_path, extract_page_manifest, load_page_manifest
+from src.validators.page_validation import collect_allowed_asset_web_paths, validate_local_image_references
+from src.services.preview_service import build_visual_critic_screenshot_path, take_local_screenshot
 from src.prompts import VISION_CRITIC_SYSTEM_PROMPT, VISION_CRITIC_USER_PROMPT_TEMPLATE
-from src.schemas import CoderArtifact, PagePlan, VisualSmokeReport
-from src.state import CoderState
+from src.contracts.schemas import CoderArtifact, PagePlan, VisualSmokeReport
+from src.contracts.state import CoderState
 
 MAX_CODER_RETRY_DEFAULT = 1
 MAX_VISUAL_QA_ITERATIONS_DEFAULT = 2
@@ -424,3 +424,4 @@ def build_vision_qa_router(
         return "end"
 
     return _router
+

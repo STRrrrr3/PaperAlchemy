@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -9,17 +9,17 @@ from typing import Any, Iterable
 from bs4 import BeautifulSoup, Tag
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.deterministic_template_selector import score_and_select_template
-from src.llm import get_llm
-from src.page_manifest import _capture_wrapper_chain, _tag_classes, _tag_ids, _tag_tokens
-from src.planner_template_catalog import find_entry_html_candidates
-from src.schemas import (
+from src.template.deterministic_selector import score_and_select_template
+from src.services.llm import get_llm
+from src.validators.page_manifest import _capture_wrapper_chain, _tag_classes, _tag_ids, _tag_tokens
+from src.template.catalog import find_entry_html_candidates
+from src.contracts.schemas import (
     TemplateCandidate,
     TemplateProfile,
     TemplateShellCandidate,
     TemplateWidget,
 )
-from src.template_resources import SyncedTemplateAssets, ensure_autopage_template_assets
+from src.template.resources import SyncedTemplateAssets, ensure_autopage_template_assets
 
 _CACHE_DIR_NAME = ".paperalchemy"
 _CACHE_PROFILE_DIR_NAME = "template_compile_cache"
@@ -733,3 +733,4 @@ def hydrate_template_candidate_from_root(
         score=float(score),
         reasons=list(reasons or []),
     )
+

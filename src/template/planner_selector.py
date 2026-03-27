@@ -1,8 +1,8 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from typing import Any
 
-from src.schemas import SemanticPlan, TemplateCandidate
+from src.contracts.schemas import SemanticPlan, TemplateCandidate
 
 
 def _text_blob(template_item: dict[str, Any]) -> str:
@@ -114,3 +114,4 @@ def select_template_candidates(
 
     scored.sort(key=lambda x: (x.score, x.template_id), reverse=True)
     return scored[:k]
+

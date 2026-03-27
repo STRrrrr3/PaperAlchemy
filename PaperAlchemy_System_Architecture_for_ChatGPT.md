@@ -1,378 +1,119 @@
-# PaperAlchemy: Current Project Architecture Brief for ChatGPT
+# PaperAlchemy: Current Architecture Context Pack for ChatGPT
 
-This document is meant to be pasted into ChatGPT before discussing the next design step.
-It is based on the current repository implementation, not on an older conceptual description.
+This document is intended to be pasted into ChatGPT before discussing the next design step.
+It is based on the repository state inspected on March 27, 2026.
+It should be treated as a code-derived architecture brief, not a marketing summary.
 
-## 1. What This Project Does
+## 1. Project Purpose
 
-PaperAlchemy is a staged multi-agent system that turns an academic PDF into a static project webpage.
+PaperAlchemy is a multi-stage system that transforms an academic PDF into a static project webpage.
 
-At a high level, the pipeline is:
+The product goal is not "let an LLM freestyle an academic site from scratch."
+The goal is controlled page generation with:
 
-1. Parse the PDF into markdown plus extracted visual assets.
-2. Use a Reader agent to convert the raw paper into a webpage-oriented semantic content pack.
-3. Use a Planner agent to map that content onto a selected local HTML template.
-4. Use a Coder agent to generate a full `index.html` that stays compatible with the chosen template's shell and styles.
-5. Let a human review the result and request anchored revisions through Translator + Patch agents instead of regenerating the entire page each time.
+- a fixed local template inventory
+- staged semantic extraction
+- explicit planning contracts
+- human review checkpoints
+- revision-safe HTML anchors
+- deterministic patch execution for local edits
 
-The system is not a generic "ask an LLM to write a webpage from scratch" demo.
-It is a controlled pipeline with typed schema boundaries, a local template inventory, critique/validation steps, and human checkpoints.
+In practical terms, the system takes a PDF, extracts a webpage-oriented semantic representation, maps that representation onto a chosen template, generates a webpage draft, and then supports human-guided iterative revision.
 
-## 2. Core Product Philosophy
+## 2. The Most Important Current Architecture Fact
 
-The current implementation follows these principles:
+The project has evolved beyond the older "template-first planner plus fullpage coder" description.
 
-- Template-first generation: a human first picks a template candidate from a local catalog.
-- Schema-first handoff: each stage passes typed data, mainly via Pydantic models.
-- Critic-assisted generation: Reader, Planner, and Coder each have validation layers.
-- Human-in-the-loop workflow: the pipeline intentionally pauses at review checkpoints.
-- Revision-friendly HTML: generated pages must expose stable `data-pa-*` anchors so later edits can target precise regions safely.
+The current architecture now has two rendering strategies:
 
-This means the project is closer to a controllable webpage production pipeline than a single-shot text-to-HTML generator.
+1. `compiled_block_assembly`
+2. `legacy_fullpage`
 
-## 3. Main Entry Points
+`compiled_block_assembly` is the preferred path.
+In that mode, the system:
 
-- `main.py`: launches the app.
-- `app.py`: the real application entry and workflow controller. It contains:
-  - the Gradio UI
-  - the LangGraph HITL workflow
-  - checkpoint resume logic
-  - template search and preview
-  - stage approval/revision handlers
-- `src/`: implementation of agents, schemas, validation, template resources, and patching logic.
+- compiles the selected template into a `TemplateProfile`
+- plans against compiled shell candidates instead of raw DOM outline text
+- renders each page block separately as a constrained HTML fragment
+- assembles the final page programmatically from block fragments
 
-## 4. Current End-to-End Runtime Flow
+`legacy_fullpage` still exists as a fallback when the template is too risky or compilation confidence is too low.
 
-### 4.1 Template Selection Before Generation
+This is the single most important thing ChatGPT should know before proposing future changes.
 
-The UI asks the user to choose high-level style constraints:
+## 3. High-Level Runtime Pipeline
 
-- background color
-- page density
-- navigation yes/no
-- layout style
+The active user-facing flow is:
 
-These constraints are scored against local template tags through `src/deterministic_template_selector.py`.
-The user is shown the top 5 ranked templates and previews one before starting generation.
+1. Select a paper PDF and style constraints.
+2. Rank and preview template candidates.
+3. Parse the PDF into markdown plus assets.
+4. Run Reader to produce `StructuredPaper`.
+5. Pause for human review of extracted content.
+6. Run `template_compile` to produce `TemplateProfile`.
+7. Run Planner to produce `PagePlan`.
+8. Pause for human review of the outline.
+9. Optionally enter manual `layout_compose`.
+10. Run Coder to generate the first draft.
+11. Run deterministic critic plus visual QA.
+12. Pause for webpage review.
+13. On revision requests, run Translator.
+14. Route feedback through `edit_intent_router`.
+15. If patchable, run Patch Agent and Patch Executor.
+16. If not patchable, return a safe non-patch message to the webpage review stage.
 
-Important detail: the user-selected template is treated as designated input for downstream planning. The Planner is not free to switch to another template.
+## 4. Main Runtime Entry Points
 
-### 4.2 PDF Parsing
+- `main.py`
+  - thin entry point that launches the app
+- `app.py`
+  - the real orchestration layer
+  - Gradio UI
+  - LangGraph HITL workflow
+  - stage transitions
+  - review-state management
+  - persistence helpers
+- `src/`
+  - all agents, schemas, template compilation, validation, page manifest logic, and patch execution
 
-`src/parser.py` uses Docling to parse the PDF and produce:
+## 5. Current HITL LangGraph Workflow
 
-- `full_paper.md`
-- `parsed_data.json`
-- page screenshots
-- extracted figure/table images under `assets/`
-
-The parser enables:
-
-- OCR
-- table structure extraction
-- page image generation
-- figure/table image generation
-
-Output location:
-
-- `data/output/<paper_name>/full_paper.md`
-- `data/output/<paper_name>/parsed_data.json`
-- `data/output/<paper_name>/assets/...`
-
-If `full_paper.md` and `parsed_data.json` already exist, the app reuses them and skips parsing.
-
-### 4.3 Reader Phase
-
-Files:
-
-- `src/agent_reader.py`
-- `src/agent_reader_critic.py`
-
-Reader input:
-
-- `full_paper.md`
-- extracted assets list from `parsed_data.json`
-- optional human directives from the review UI
-- optional previous `StructuredPaper`
-
-Reader output:
-
-- `StructuredPaper`
-
-Reader responsibilities:
-
-- recover paper identity from noisy front matter
-- preserve author and affiliation information in human-visible text
-- choose only landing-page-worthy sections instead of mirroring the full paper
-- produce dense `rich_web_content` for each kept section
-- attach only high-value figures/tables to sections
-
-The Reader prompt explicitly assumes downstream agents will not reread the raw markdown, so the extraction must be information-dense enough to support planning and webpage generation later.
-
-#### Reader Critic
-
-The Reader Critic has two layers:
-
-- deterministic checks:
-  - referenced asset paths must exist
-  - section count must be reasonable
-  - summaries and key sections must have enough density
-  - method/evaluation sections must be technically rich
-- semantic LLM critic:
-  - checks whether the extraction is grounded and sufficiently useful for downstream generation
-
-If the critic fails, the Reader loops with feedback until max retry is reached.
-
-### 4.4 Planner Phase
-
-Files:
-
-- `src/agent_planner.py`
-- `src/agent_planner_critic.py`
-
-Planner input:
-
-- `StructuredPaper`
-- selected template candidate
-- template catalog
-- DOM outline of the selected template entry HTML
-- optional previous `PagePlan`
-- optional human directives
-
-Planner output:
-
-- `PagePlan`
-
-Planner responsibilities:
-
-- keep the selected template fixed
-- convert paper semantics into a page blueprint
-- define the page outline as stable semantic blocks
-- map blocks to template regions
-- define content contracts, asset bindings, interactions, and implementation handoff
-- generate `dom_mapping` and `selectors_to_remove`
-
-The Planner is "DOM-aware" but not yet doing final HTML generation. It builds the contract that the Coder must follow.
-
-#### Planner Critic
-
-The Planner Critic also has two layers:
-
-- deterministic checks:
-  - selected template must exist in the template catalog
-  - `selected_entry_html` must be valid
-  - `block_id` values must be stable snake_case
-  - no positional IDs like `section_1`
-  - source section references must exist
-  - asset paths must exist in `StructuredPaper`
-  - block IDs in `page_outline` and `blocks` must match exactly
-- semantic LLM critic:
-  - checks design feasibility and planning quality
-
-If the critic fails, the Planner loops and retries.
-
-### 4.5 Outline Review Checkpoint
-
-After planning, the workflow pauses in the UI at the outline review stage.
-
-The human can:
-
-- revise the outline by giving instructions
-- approve the outline
-- optionally enable manual layout compose before draft generation
-
-This stage is the main semantic review boundary before HTML is generated.
-
-### 4.6 Optional Manual Layout Compose Stage
-
-Files:
-
-- `src/template_shell_resolver.py`
-- related UI handlers in `app.py`
-
-This stage is optional and only happens if the human checks `Enable Manual Layout Compose` during outline approval.
-
-It lets the human:
-
-- inspect candidate template sections
-- choose which template section a block should bind to
-- reorder blocks
-- choose which extracted figures belong to each block
-
-The state object used here is `LayoutComposeSession`.
-
-This is important: manual layout compose is now optional.
-If it is not enabled, the workflow goes from outline approval directly to Coder.
-
-### 4.7 Coder Phase
-
-Files:
-
-- `src/agent_coder.py`
-- `src/agent_coder_critic.py`
-
-Coder input:
-
-- `StructuredPaper`
-- `PagePlan`
-- template reference HTML
-- copied paper assets
-- optional human directives
-- optional coder instructions
-- previous generated HTML
-
-Coder output:
-
-- `CoderArtifact`
-- optional `VisualSmokeReport`
-- possibly an enriched/resolved `PagePlan`
-
-Important correction versus older descriptions:
-
-The current Coder is not just a deterministic BeautifulSoup injector that fills fixed selectors.
-It asks the LLM to generate a complete HTML document, but under strict constraints:
-
-- reuse the selected template's design language and structure
-- preserve shell compatibility with each block's target region
-- generate exactly one root element per block with `data-pa-block`
-- use only the fixed slot vocabulary:
-  - `title`
-  - `summary`
-  - `body`
-  - `media`
-  - `meta`
-  - `actions`
-- preserve required global anchors when applicable
-- reference only copied paper assets
-- produce a full valid HTML document with body markers
-
-Before generation, the Coder:
-
-- copies the entire template directory to `data/output/<paper>/site`
-- copies selected paper assets into `site/assets/paper`
-- enriches the `PagePlan` with shell contracts if needed
-
-After generation, it:
-
-- validates local image references
-- extracts a `PageManifest`
-- saves the HTML and manifest
-
-Generated artifacts typically include:
-
-- `data/output/<paper>/site/index.html`
-- `data/output/<paper>/coder_artifact.json`
-- `data/output/<paper>/page_manifest.json`
-
-### 4.8 Coder Critic and Visual QA
-
-The Coder Critic validates:
-
-- generated site directory exists
-- entry HTML exists
-- exactly one `<title>` exists
-- body markers exist in the correct place
-- `page_manifest.json` matches current HTML
-- `data-pa-block` order matches approved page outline
-- copied assets actually exist and are referenced
-
-Then the system takes a screenshot with Playwright and runs a visual QA pass.
-
-The visual critic returns a `VisualSmokeReport` with:
-
-- `passed`
-- `issue_class`: `none`, `cosmetic`, or `structure`
-- `suggested_recovery`: `accept`, `patch_or_review`, or `rerun_planner`
-- issue list
-- optional selectors/CSS suggestions
-
-Important implementation detail:
-
-The visual critic currently classifies and reports issues, but it does not run a deep automatic retry loop back into Coder.
-Instead:
-
-- if the issue is structural, the app can route back to Planner
-- otherwise the workflow proceeds to human review and anchored patching
-
-### 4.9 Webpage Review and Anchored Revision Loop
-
-Files:
-
-- `src/agent_translator.py`
-- `src/agent_patch.py`
-
-After first draft generation, the workflow pauses again at webpage review.
-
-The human can:
-
-- approve the final webpage
-- request a revision with text and optional screenshots
-
-#### Translator Agent
-
-The Translator converts multimodal human feedback into a structured `RevisionPlan`.
-
-It uses:
-
-- current HTML
-- current `PageManifest`
-- uploaded screenshots
-- human text feedback
-
-The Translator does not directly edit HTML.
-It only decides what the requested edit is and where it should apply:
-
-- slot-level
-- block-level
-- global anchor-level
-
-#### Patch Agent
-
-The Patch Agent converts `RevisionPlan` into a `TargetedReplacementPlan` containing:
-
-- HTML replacements
-- style changes
-- attribute changes
-- override CSS rules
-- fallback blocks
-
-This is still schema-bound and anchor-aware.
-
-#### Patch Executor
-
-The Patch Executor applies changes deterministically with BeautifulSoup and guarded validation.
-
-It can:
-
-- replace slot inner HTML
-- replace block HTML
-- update attributes
-- inject limited anchored CSS overrides
-- fall back to block-level regeneration for hard cases
-
-If a requested edit cannot be safely applied, it returns a safe failure instead of silently corrupting the page.
-
-## 5. The Active HITL LangGraph Workflow
-
-The currently wired main workflow in `app.py` is:
+The current active graph in `app.py` is:
 
 1. `reader`
 2. `overview`
 3. human checkpoint
-4. `planner`
-5. `outline_review`
-6. human checkpoint
-7. optional `layout_compose_prepare`
-8. optional `layout_compose_review`
-9. human checkpoint
-10. `coder`
-11. if structural visual issue: back to `planner`
-12. otherwise `webpage_review`
+4. `template_compile`
+5. `planner`
+6. `outline_review`
+7. human checkpoint
+8. optional `layout_compose_prepare`
+9. optional `layout_compose_review`
+10. human checkpoint
+11. `coder`
+12. `webpage_review`
 13. human checkpoint
 14. `translator`
-15. `patch_agent`
-16. `patch_executor`
-17. back to `webpage_review`
+15. `edit_intent_router`
+16. either:
+   - `patch_agent -> patch_executor -> webpage_review`
+   - or `non_patch_feedback -> webpage_review`
+
+Routing details:
+
+- after `overview`
+  - approve -> `template_compile`
+  - revise -> back to `reader`
+- after `outline_review`
+  - revise -> back to `planner`
+  - approve + manual compose enabled -> `layout_compose_prepare`
+  - approve + manual compose disabled -> `coder`
+- after `coder`
+  - if visual smoke suggests structural recovery -> back to `planner`
+  - otherwise -> `webpage_review`
+- after `webpage_review`
+  - approve -> end
+  - revise -> `translator`
 
 Interrupt points are:
 
@@ -381,28 +122,422 @@ Interrupt points are:
 - `layout_compose_review`
 - `webpage_review`
 
-This means the user-facing system is designed around resumable checkpoints, not one uninterrupted batch pass.
+This means the product is explicitly checkpointed and resumable.
 
-## 6. Important Data Models
+## 6. Core Agent and Node Architecture
 
-### 6.1 `StructuredPaper`
+### 6.1 Parser Layer
 
-Main content pack produced by Reader.
+Primary file:
+
+- `src/parser.py`
+
+Responsibilities:
+
+- parse PDF with Docling
+- export `full_paper.md`
+- export `parsed_data.json`
+- export page screenshots
+- export cropped figure/table images
+
+Artifacts:
+
+- `data/output/<paper>/full_paper.md`
+- `data/output/<paper>/parsed_data.json`
+- `data/output/<paper>/assets/...`
+
+The parser is a preprocessing stage, not an LLM agent, but the rest of the pipeline depends on its output shape.
+
+### 6.2 Reader Agent
+
+Primary files:
+
+- `src/agent_reader.py`
+- `src/agent_reader_critic.py`
+
+Input:
+
+- parser markdown
+- extracted asset list
+- optional human directives
+- optional previous `StructuredPaper`
+
+Output:
+
+- `StructuredPaper`
+
+Reader responsibilities:
+
+- convert raw paper text into a landing-page-oriented semantic content pack
+- recover paper identity from front matter
+- preserve title, authors, and affiliations inside human-visible text
+- select only webpage-worthy sections
+- produce dense `rich_web_content` instead of thin summaries
+- attach only high-value visual assets
+
+Reader Critic responsibilities:
+
+- validate asset grounding
+- validate section density and section coverage
+- validate method/evaluation richness
+- run semantic LLM review before downstream planning
+
+The Reader still follows an actor-critic pattern with retry support.
+
+### 6.3 Template Compile Stage
+
+Primary file:
+
+- `src/template_compile.py`
+
+This is now a major architectural layer, not a helper.
+
+Input:
+
+- designated template choice
+- generation constraints
+- user style constraints
+- local AutoPage template resources
+
+Output:
+
+- `TemplateCandidate[]`
+- selected `TemplateCandidate`
+- `TemplateProfile`
+- compile cache path
+- cache-hit flag
+
+`TemplateProfile` is a compiled structural summary of the selected template.
+It contains:
+
+- `archetype`
+- `global_preserve_selectors`
+- `shell_candidates`
+- `optional_widgets`
+- `removable_demo_selectors`
+- `unsafe_selectors`
+- `compile_confidence`
+- `risk_flags`
+- `notes`
+- `source_fingerprint`
+
+What template compilation actually does:
+
+- chooses the designated template or a deterministic fallback
+- inspects the entry HTML
+- discovers stable shell candidates for major sections
+- detects global preserve anchors like header/nav/footer
+- identifies demo content that can be removed later
+- detects risky widgets and runtime dependencies
+- infers an archetype such as `hero_bulma`, `bootstrap_navbar`, `single_column_article`, or `chart_fetch_dashboard`
+- caches the compiled result under the template root
+
+The compile cache lives under the template directory:
+
+- `.paperalchemy/template_compile_cache/`
+
+This stage is important because the Planner no longer works primarily from an ad hoc DOM outline.
+It now plans against a compiled template understanding.
+
+### 6.4 Planner Agent
+
+Primary files:
+
+- `src/agent_planner.py`
+- `src/agent_planner_critic.py`
+
+Input:
+
+- `StructuredPaper`
+- selected `TemplateCandidate`
+- `TemplateProfile`
+- template catalog
+- optional previous `PagePlan`
+- human directives
+
+Output:
+
+- `PagePlan`
+
+The Planner now uses `TemplateProfile` directly.
+
+Current Planner responsibilities:
+
+- keep the selected template fixed
+- plan stable semantic `block_id`s
+- bind each block to a compiled shell candidate
+- preserve global template anchors through compatibility `dom_mapping`
+- decide whether the Coder should use:
+  - `compiled_block_assembly`
+  - or `legacy_fullpage`
+- surface known template/render risks into `coder_handoff.known_risks`
+
+Important current behavior:
+
+- `dom_mapping` is no longer the main rendering interface
+- it is now mainly a compatibility field for preserved global selectors
+- block binding comes from `TemplateProfile.shell_candidates`
+
+#### Planner Critic
+
+The Planner Critic checks:
+
+- stable semantic block IDs
+- source section validity
+- asset-path grounding
+- selected template consistency
+- selector hints must exist in `TemplateProfile.shell_candidates`
+- `dom_mapping` must only reference template-profile global preserve selectors
+- `plan_meta.render_strategy` must match template compile risk
+
+This means planning is now coupled to template compilation quality, not just semantic structure.
+
+### 6.5 Optional Manual Layout Compose
+
+Primary files:
+
+- `src/template_shell_resolver.py`
+- UI handlers in `app.py`
+
+This stage is still optional and only appears if the human enables it during outline approval.
+
+What the user can do here:
+
+- inspect available section-shell candidates
+- reassign a block to a different shell candidate
+- reorder blocks
+- choose which extracted figures belong to a block
+
+This stage now works on top of `TemplateProfile`-derived shell candidates.
+
+So manual layout compose is no longer just "pick selectors from raw HTML."
+It is a human override layer over compiled template structure.
+
+### 6.6 Coder Agent
+
+Primary file:
+
+- `src/agent_coder.py`
+
+Current Coder architecture has two modes.
+
+#### Preferred mode: `compiled_block_assembly`
+
+This is the new main path.
+
+Pipeline inside this mode:
+
+1. Read the selected template and copy it into the output site directory.
+2. Copy selected paper assets into `site/assets/paper`.
+3. Build a `BlockRenderSpec` for each planned block.
+4. Call the Block Renderer prompt once per block.
+5. Validate each rendered block fragment.
+6. Persist block specs and block artifacts to disk.
+7. Assemble the page programmatically by inserting block fragments into template shells.
+8. Preserve global anchors and remove known demo/template garbage.
+9. Extract and save `PageManifest`.
+10. Save `CoderArtifact`.
+
+This is much more structured than the old full-page coder path.
+
+#### Fallback mode: `legacy_fullpage`
+
+This is still present and is used when:
+
+- template compile confidence is too low
+- template widgets are risky
+- or compiled block assembly fails and fallback is triggered
+
+In this mode, the LLM generates the whole page HTML subject to shell contracts and anchor rules.
+
+#### Key Coder outputs
+
+- `CoderArtifact`
+- possibly updated `PagePlan`
+- `BlockRenderSpec[]`
+- `BlockRenderArtifact[]`
+
+#### New compiled-path data objects
+
+`BlockRenderSpec` includes:
+
+- block identity
+- order
+- source sections
+- resolved block binding
+- content contract
+- asset binding
+- interaction
+- responsive rules
+- shell HTML
+- allowed slots
+
+`BlockRenderArtifact` includes:
+
+- rendered fragment HTML
+- output paths
+- validation errors
+- notes
+
+### 6.7 Coder Critic and Visual QA
+
+Primary file:
+
+- `src/agent_coder_critic.py`
+
+Responsibilities:
+
+- validate generated files
+- validate anchors
+- validate manifest synchronization
+- validate copied asset references
+- validate page title/body markers
+- run Playwright screenshot capture
+- run visual smoke QA
+
+Visual QA returns `VisualSmokeReport`:
+
+- `passed`
+- `issue_class`
+- `suggested_recovery`
+- `issues`
+- `selectors_to_remove`
+- `css_rules_to_inject`
+
+Current recovery policy:
+
+- structural visual issue -> route back to Planner
+- cosmetic/local issue -> keep webpage review open for patch loop
+
+### 6.8 Translator Agent
+
+Primary file:
+
+- `src/agent_translator.py`
+
+Responsibilities:
+
+- read human text plus optional screenshots
+- read current HTML and `PageManifest`
+- translate human feedback into structured `RevisionPlan`
+
+This remains the "intent extraction" stage for revisions.
+
+### 6.9 Edit Intent Router
+
+Primary file:
+
+- `src/agent_translator.py`
+  - `edit_intent_router_node`
+
+This is a newer and important node.
+
+Its purpose is to decide whether the revision request is patchable or not.
+
+Current routing classes:
+
+- `patch`
+- `non_patch`
+
+Examples of requests classified as `non_patch`:
+
+- whole-page redesign
+- global theme/style retuning
+- template replacement
+- replan/rebind requests
+- page-wide density/rhythm/style changes
+
+If the request is `non_patch`, the system does not attempt DOM patching.
+Instead it returns a safe message and loops back to webpage review.
+
+This is important because it prevents the patch path from being overloaded with requests that should really go back upstream to planning or template selection.
+
+### 6.10 Patch Agent and Patch Executor
+
+Primary file:
+
+- `src/agent_patch.py`
+
+This part of the architecture is still anchored and deterministic.
+
+The Patch Agent converts `RevisionPlan` into `TargetedReplacementPlan`, containing:
+
+- replacements
+- style changes
+- attribute changes
+- override CSS rules
+- fallback blocks
+
+The Patch Executor then applies those edits with BeautifulSoup while enforcing:
+
+- anchor safety
+- slot/block/global scope correctness
+- asset safety
+- manifest validity
+- shell-contract compatibility
+
+For hard cases, it can regenerate a single block instead of rewriting the whole page.
+
+## 7. Current Core Data Contracts
+
+### 7.1 `StructuredPaper`
+
+Reader output.
+
+Key fields:
 
 - `paper_title`
 - `overall_summary`
 - `sections[]`
-  - `section_title`
-  - `rich_web_content`
-  - `related_figures[]`
 
-### 6.2 `PagePlan`
+Each section includes:
 
-Planner blueprint for webpage generation.
+- `section_title`
+- `rich_web_content`
+- `related_figures[]`
 
-Key parts:
+### 7.2 `TemplateCandidate`
+
+Represents a user-selected or deterministically selected template candidate.
+
+Key fields:
+
+- `template_id`
+- `root_dir`
+- `chosen_entry_html`
+- `score`
+- `reasons`
+
+### 7.3 `TemplateProfile`
+
+Compiled template understanding.
+
+This is now one of the most important contracts in the system.
+
+Key fields:
+
+- `template_id`
+- `template_root_dir`
+- `entry_html`
+- `archetype`
+- `global_preserve_selectors`
+- `shell_candidates`
+- `optional_widgets`
+- `removable_demo_selectors`
+- `unsafe_selectors`
+- `compile_confidence`
+- `risk_flags`
+- `notes`
+- `source_fingerprint`
+
+### 7.4 `PagePlan`
+
+Planner output and Coder blueprint.
+
+Important fields:
 
 - `plan_meta`
+  - now includes `render_strategy`
 - `template_selection`
 - `decision_summary`
 - `adaptation_strategy`
@@ -415,273 +550,256 @@ Key parts:
 - `quality_checks`
 - `open_questions`
 
-Each block is described by `BlockPlan`, which includes:
+### 7.5 `BlockRenderSpec`
 
-- target template region
-- content contract
-- asset binding
-- interaction
-- responsive rules
-- optional shell contract
+Compiled-block Coder input for each block fragment.
 
-### 6.3 `CoderArtifact`
+### 7.6 `BlockRenderArtifact`
 
-Saved output of Coder / patch flow.
+Compiled-block Coder output for each block fragment.
 
-- `site_dir`
-- `entry_html`
-- `selected_template_id`
-- `copied_assets`
-- `edited_files`
-- `notes`
+### 7.7 `CoderArtifact`
 
-### 6.4 `PageManifest`
+Final build artifact.
 
-The manifest that enables safe anchored revision.
+Important fields now include:
 
-It records:
+- `render_mode`
+- `template_profile_path`
+- `page_manifest_path`
+- `block_artifact_dir`
 
-- all blocks and their selectors
-- all slots inside each block
-- all global anchors
-- shell-related structural metadata
+### 7.8 `PageManifest`
 
-### 6.5 `RevisionPlan`
+Stable revision manifest extracted from final HTML.
 
-Translator output: "what the human wants changed".
+This is central to patch safety.
 
-### 6.6 `TargetedReplacementPlan`
+### 7.9 `RevisionPlan`
 
-Patch Agent output: "how to apply the requested change safely".
+Translator output.
 
-### 6.7 `VisualSmokeReport`
+### 7.10 `TargetedReplacementPlan`
 
-Visual QA classification and recovery suggestion.
+Patch Agent output.
 
-### 6.8 `WorkflowState`
+### 7.11 `VisualSmokeReport`
 
-The top-level LangGraph state combines:
+Visual QA output.
 
-- source metadata
-- generation constraints
-- manual layout compose toggle
-- human directives
-- review flags
-- structured paper
-- page plan
-- coder artifact
-- revision and patch data
-- visual smoke report
+## 8. Output Artifacts and Persistence Layout
 
-## 7. Revision Anchoring System
+For each paper, the main output directory is:
 
-This is one of the most important architectural pieces.
+- `data/output/<paper_name>/`
 
-Generated HTML must expose:
+Typical files now include:
 
-- `data-pa-block`
-- `data-pa-slot`
-- `data-pa-global`
+- `full_paper.md`
+- `parsed_data.json`
+- `structured_paper.json`
+- `template_profile.json`
+- `page_plan.json`
+- `coder_artifact.json`
+- `page_manifest.json`
+- `site/index.html`
+- `site/assets/paper/...`
+- `block_specs/<block_id>.json`
+- `block_renders/<block_id>.html`
+- `block_renders/<block_id>.json`
 
-This makes later changes targetable and safe.
+This is important for future tooling because the system now persists both plan-level and block-level generation artifacts.
 
-Allowed global anchors are:
+## 9. Template Compilation Details That Matter for Future Design
 
-- `header_brand`
-- `header_primary_action`
-- `header_nav`
-- `footer_meta`
+The compile layer is deliberately doing more than selector discovery.
 
-Allowed slots are:
+It also tries to answer:
 
-- `title`
-- `summary`
-- `body`
-- `media`
-- `meta`
-- `actions`
+- Which major shells are safe to reuse?
+- Which parts of the template must be preserved globally?
+- Which parts are just demo content and should be removed?
+- Which widgets introduce runtime risk?
+- Is the template safe enough for block assembly, or should the system fall back to fullpage rendering?
 
-If future design changes break these anchors, the revision system will break too.
+Current risk signals include things like:
 
-## 8. Template System
+- `fetch_runtime_dependency`
+- `chart_runtime_dependency`
+- `math_runtime_dependency`
 
-Templates come from AutoPage-style local assets.
+Current practical rule:
 
-Relevant files/modules:
+- if `compile_confidence < 0.70` or risky widget/runtime flags are present, Planner tends to choose `legacy_fullpage`
+- otherwise Planner prefers `compiled_block_assembly`
 
-- `src/template_resources.py`
-- `src/planner_template_catalog.py`
-- `src/deterministic_template_selector.py`
+## 10. Current Prompt Strategy
 
-The system syncs or reuses template assets under:
+The system now has three different LLM generation styles in the rendering layer:
 
-- `data/templates/autopage/`
+1. full semantic extraction
+   - Reader
+2. structured planning
+   - Planner
+3. constrained rendering
+   - Block Renderer or legacy fullpage Coder
 
-The selector uses tagged template metadata and a small weighted scoring model over features such as:
+Most important rendering prompt distinction:
 
-- background color
-- hero presence
-- density
-- image layout
-- title color
-- navigation
+- `BLOCK_RENDER_SYSTEM_PROMPT`
+  - render exactly one block fragment
+  - preserve shell contract
+  - preserve exact `data-pa-block`
+  - use only allowed slots
+- `CODER_SYSTEM_PROMPT`
+  - whole-page fallback path
+  - still shell-constrained and anchor-constrained
 
-The selected template is previewed before the Reader phase starts.
+So the system now prefers fragment-level rendering over page-level rendering whenever the template is safe enough.
 
-## 9. LLM Provider Configuration
+## 11. Current Revision Philosophy
 
-`src/llm.py` currently does this:
+Revision is intentionally conservative.
 
-- first tries Vertex AI if it can auto-discover exactly one valid service account JSON in the project root, or if an explicit path is provided through environment variables
-- otherwise falls back to `GOOGLE_API_KEY`
+The patch path is for:
 
-Current code defaults:
+- local content fixes
+- local layout fixes
+- slot-level or block-level changes
+- global-anchor updates for header/nav/footer/button regions
 
-- smart model: `gemini-3.1-pro-preview`
-- fast model: `gemini-3-flash-preview`
+The patch path is not for:
 
-The project also sets proxy-related environment variables from `.env`.
+- replacing the template
+- redesigning the whole page
+- global theme overhaul
+- major replanning
+- shell rebinding as a casual feedback request
 
-## 10. What Is Actually User-Facing in the Current UI
+That is why `edit_intent_router` exists.
 
-The current Gradio UI is stage-based.
+## 12. Important Architectural Invariants
 
-Main visible flow:
+If ChatGPT is helping design the next step, it should assume these are important unless the goal is an explicit large migration.
 
-1. Choose PDF and style constraints.
-2. Find and preview template candidates.
-3. Run "Step 1: Extract Source Pack".
-4. Review Reader output.
-5. Approve to generate Planner outline.
-6. Review or revise outline.
-7. Optionally enable manual layout compose.
-8. Generate first draft.
-9. Review screenshot preview of generated webpage.
-10. Request webpage revisions or approve final page.
+### 12.1 Staged Contracts Matter
 
-The left control panel only shows the controls relevant to the current stage.
-Layout compose has its own dedicated right-side panel.
+Do not bypass `StructuredPaper -> TemplateProfile -> PagePlan -> CoderArtifact -> PageManifest`.
 
-## 11. Important Architectural Invariants
+### 12.2 `TemplateProfile` Is Now a First-Class Contract
 
-If ChatGPT is helping design the next step, it should treat these as non-negotiable unless a larger migration is explicitly intended.
+Planning and rendering both depend on it.
+Future changes should not treat template understanding as an informal side-input anymore.
 
-### 11.1 Schema Boundaries Matter
+### 12.3 `PagePlan.blocks[*].target_template_region.selector_hint` Must Stay Grounded
 
-Do not casually pass free-form strings between pipeline stages.
-New cross-stage information should normally be added to `schemas.py` and `state.py`.
+In the current design, block selectors should come from compiled shell candidates, not invented selectors.
 
-### 11.2 Stable Block IDs Matter
+### 12.4 `plan_meta.render_strategy` Is Not Cosmetic
 
-`block_id` is part of the revision contract.
-It must remain stable and semantic across replans when the conceptual section still exists.
+It controls which render path the Coder uses.
+Any future design proposal must respect that strategy boundary.
 
-### 11.3 Anchors Matter
+### 12.5 Anchors Must Survive
 
-Do not propose changes that remove or destabilize:
+Do not break:
 
 - `data-pa-block`
 - `data-pa-slot`
 - `data-pa-global`
 - `page_manifest.json`
 
-### 11.4 Template Compatibility Matters
+If those break, the revision path breaks.
 
-The system is not supposed to ignore the chosen template and invent a separate layout language.
-Coder output must stay compatible with the template shell and class system.
+### 12.6 Stable Semantic `block_id` Values Matter
 
-### 11.5 Patch Scope Is Intentionally Local
+They are revision targets.
+They must not drift into positional or template-coupled names.
 
-The Translator/Patch system is built for targeted local corrections, not for arbitrary whole-page redesign.
-Large structural changes should go back to Planner or Outline review.
+### 12.7 Patch Scope Must Stay Local
 
-### 11.6 Downstream Safety Matters
+If a change is page-wide or architectural, it should be routed upstream instead of stuffed into patch execution.
 
-This repository is a staged pipeline.
-Changing Reader output shape, Planner contracts, manifest structure, slot vocabulary, or shell assumptions can silently break later stages.
+## 13. Current Auxiliary or Partially Integrated Parts
 
-## 12. Subtle but Important Implementation Notes
-
-### 12.1 There Are Shell Resolution Utilities Beyond the Main Flow
-
-The repository includes:
+There are still shell-resolution utilities in the codebase:
 
 - `shell_resolver_phase_node()`
 - `binding_review_node()`
 
-But these are not currently wired into the main HITL LangGraph path in `build_hitl_workflow()`.
+But they are not part of the active main HITL workflow.
 
-In practice:
+Current reality:
 
-- shell-related logic is actively used by manual layout compose utilities
-- batch generation helper code also invokes shell resolution
-- the main interactive path relies on Planner output plus Coder-side shell enrichment and validation
+- shell logic is still used by manual layout compose helpers
+- `TemplateProfile` has become the main source of shell understanding
+- the standalone shell-binding review stage is not currently a top-level checkpoint in the user-facing graph
 
-So shell-aware tooling exists, but the standalone shell-binding review stage is not currently a first-class checkpoint in the active UI workflow.
+This is important if future work wants to formalize shell review as a first-class stage again.
 
-### 12.2 There Are Two Runtime Styles
+## 14. Existing Regression Coverage
 
-The repository contains:
+Two important test areas exist right now:
 
-- a checkpointed HITL workflow used by the UI
-- a batch helper (`run_langgraph_batch`) for non-interactive generation
+- `tests/test_patch_mode.py`
+- `tests/test_template_compile_refactor.py`
 
-The HITL path is the primary product path.
+The template compile refactor tests currently cover:
 
-### 12.3 Visual QA Can Send the User Back to Planning
+- template profile cache hit/invalidation
+- archetype detection
+- selector uniqueness and preservation logic
+- planner render-strategy downgrade behavior
+- compiled page assembly preserving globals and outline order
 
-If the visual critic reports a structural issue, the app routes back to outline/planning instead of opening the normal webpage revision loop.
+This suggests the "template compile + block assembly" refactor is not just conceptual; it has dedicated regression coverage.
 
-This is a core distinction:
+## 15. Best Compact Mental Model for ChatGPT
 
-- cosmetic issue -> patch/review loop
-- structural issue -> planner rerun
+Use this if you need to reason quickly:
 
-## 13. Known Strengths
+PaperAlchemy is now a template-compiled, schema-driven, human-in-the-loop academic webpage generation system.
 
-- Strong staged decomposition
-- Good human review checkpoints
-- Anchored revision system is much safer than raw HTML regeneration
-- Template-first workflow gives controllability
-- Rich technical extraction aims to preserve enough detail for serious academic pages
-- Optional manual layout compose gives a controlled bridge between automation and explicit layout editing
+The four most important production layers are:
 
-## 14. Known Limitations / Design Tensions
+1. Reader
+   - turns PDF text into a webpage-oriented semantic paper pack
+2. TemplateCompile + Planner
+   - compiles the chosen template into reusable shell facts and plans blocks against those facts
+3. Coder
+   - preferably renders one block at a time and assembles the page, with fullpage fallback when the template is risky
+4. Translator + EditIntentRouter + Patch
+   - turns human feedback into either safe local DOM patches or an explicit non-patch response
 
-These are not necessarily bugs, but they are real design constraints worth knowing before proposing the next plan.
-
-- The Coder is still LLM-generated full HTML, so quality depends heavily on prompt discipline and validation.
-- Visual QA currently classifies issues more than it automatically repairs them.
-- Shell resolution exists in code, but its dedicated review node is not fully integrated into the main interactive graph.
-- The patch system is intentionally conservative and best for local revisions, not major layout overhauls.
-- Author and affiliation metadata are still embedded inside summary/section text rather than stored in dedicated schema fields.
-- The project contains both interactive and batch logic, which may drift if future features are added to only one path.
-
-## 15. Best Summary for ChatGPT
-
-If you need one compact mental model, use this:
-
-PaperAlchemy is a template-first, schema-driven, multi-agent academic webpage generation system with four major production layers:
-
-1. Reader extracts a landing-page-oriented semantic paper pack.
-2. Planner turns that pack into a template-bound page blueprint.
-3. Coder generates a full anchored HTML page that stays compatible with the chosen template shell.
-4. Translator + Patch convert human feedback into safe targeted revisions over stable HTML anchors.
-
-The most important architectural contracts are:
+The most important current contracts are:
 
 - `StructuredPaper`
+- `TemplateProfile`
 - `PagePlan`
-- `PageManifest`
+- `BlockRenderSpec`
+- `BlockRenderArtifact`
 - `CoderArtifact`
+- `PageManifest`
 - `RevisionPlan`
 - `TargetedReplacementPlan`
-- `data-pa-block / slot / global`
 
-If you propose next-step designs, optimize for:
+The most important current invariants are:
 
-- preserving staged contracts
-- keeping template compatibility
-- preserving revision anchors
-- making human checkpoints stronger instead of bypassing them
-- pushing large structural changes upstream to Planner instead of overloading Patch
+- compiled template understanding is first-class
+- render strategy must be explicit
+- block IDs must stay stable
+- anchors must survive
+- patch scope must remain local
+- large structural changes should go upstream to planning instead of overloading the patch path
+
+## 16. What ChatGPT Should Optimize For in the Next Design Step
+
+If proposing the next architecture step, optimize for:
+
+- preserving `TemplateProfile` as a stable planning/rendering interface
+- strengthening the compiled block assembly path rather than removing it
+- improving render-strategy selection and fallback clarity
+- making unsupported feedback types route more explicitly upstream
+- preserving anchored revision compatibility
+- keeping block-level artifacts useful for debugging and evaluation
+- avoiding any change that makes future revisions depend on fragile free-form HTML matching

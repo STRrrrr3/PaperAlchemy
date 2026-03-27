@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -6,7 +6,7 @@ import re
 
 from bs4 import BeautifulSoup, Tag
 
-from src.preview_utils import (
+from src.services.preview_service import (
     build_layout_compose_section_preview_path,
     build_layout_compose_template_preview_path,
     build_paper_figure_preview_path,
@@ -14,14 +14,14 @@ from src.preview_utils import (
     take_local_screenshot,
     take_selector_screenshot,
 )
-from src.page_manifest import (
+from src.validators.page_manifest import (
     _SHELL_CONTAINER_TAGS,
     _capture_wrapper_chain,
     _tag_classes,
     _tag_ids,
     _tag_tokens,
 )
-from src.schemas import (
+from src.contracts.schemas import (
     BlockPlan,
     BlockShellContract,
     LayoutComposeBlock,
@@ -881,3 +881,4 @@ def apply_layout_compose_session_to_page_plan(
         },
         deep=True,
     )
+

@@ -1,21 +1,21 @@
-import json
+﻿import json
 import re
 from typing import Any
 
-from src.html_utils import read_current_page_html
+from src.utils.html_utils import read_current_page_html
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.human_feedback import (
+from src.services.human_feedback import (
     build_multimodal_message_content,
     extract_human_feedback_images,
     extract_human_feedback_text,
     has_human_feedback,
 )
-from src.llm import get_llm
-from src.page_manifest import build_page_manifest_path, load_page_manifest
+from src.services.llm import get_llm
+from src.validators.page_manifest import build_page_manifest_path, load_page_manifest
 from src.prompts import TRANSLATOR_SYSTEM_PROMPT, TRANSLATOR_USER_PROMPT_TEMPLATE
-from src.schemas import CoderArtifact, RevisionPlan
-from src.state import WorkflowState
+from src.contracts.schemas import CoderArtifact, RevisionPlan
+from src.contracts.state import WorkflowState
 
 NON_PATCH_FEEDBACK_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (
@@ -159,3 +159,4 @@ def edit_intent_router_node(state: WorkflowState) -> dict[str, Any]:
         "edit_intent": intent,
         "edit_intent_reason": reason,
     }
+

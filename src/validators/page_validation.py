@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 from urllib.parse import urlparse
@@ -142,3 +142,4 @@ def is_safe_anchored_selector(selector: str, allowed_anchor_selectors: set[str])
         if suffix[0] in (" ", ">", "+", "~", ":", "[", ".", "#"):
             return True
     return False
+

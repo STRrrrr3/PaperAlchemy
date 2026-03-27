@@ -1,4 +1,4 @@
-import json
+﻿import json
 import os
 import re
 import shutil
@@ -10,14 +10,14 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
-from src.agent_coder_critic import (
+from src.agents.coder_critic import (
     build_coder_critic_router,
     build_vision_qa_router,
     coder_critic_node,
     take_screenshot_action,
     vision_critic_node,
 )
-from src.html_utils import (
+from src.utils.html_utils import (
     extract_html_document,
     extract_html_fragment,
     message_content_to_text,
@@ -25,10 +25,10 @@ from src.html_utils import (
     read_current_page_html,
     read_text_with_fallback,
 )
-from src.human_feedback import extract_human_feedback_text, normalize_human_feedback
-from src.json_utils import to_pretty_json
-from src.llm import get_llm
-from src.page_manifest import (
+from src.services.human_feedback import extract_human_feedback_text, normalize_human_feedback
+from src.utils.json_utils import to_pretty_json
+from src.services.llm import get_llm
+from src.validators.page_manifest import (
     annotate_global_anchors,
     build_expected_global_anchors,
     build_page_manifest_path,
@@ -37,7 +37,7 @@ from src.page_manifest import (
     missing_shell_contract_block_ids,
     save_page_manifest,
 )
-from src.page_validation import (
+from src.validators.page_validation import (
     collect_allowed_asset_web_paths,
     validate_fragment_local_image_sources,
     validate_local_image_references,
@@ -48,7 +48,7 @@ from src.prompts import (
     CODER_SYSTEM_PROMPT,
     CODER_USER_PROMPT_TEMPLATE,
 )
-from src.schemas import (
+from src.contracts.schemas import (
     BlockRenderArtifact,
     BlockRenderSpec,
     BlockShellContract,
@@ -59,7 +59,7 @@ from src.schemas import (
     TemplateProfile,
     VisualSmokeReport,
 )
-from src.state import CoderState
+from src.contracts.state import CoderState
 
 
 def _normalize_page_plan(plan: Any) -> PagePlan | None:
@@ -701,7 +701,7 @@ def _run_compiled_block_assembly(
     human_directives: str,
     coder_instructions: str,
 ) -> tuple[CoderArtifact, PagePlan, list[BlockRenderSpec], list[BlockRenderArtifact]]:
-    project_root = Path(__file__).resolve().parent.parent
+    project_root = Path(__file__).resolve().parents[2]
     template_root = project_root / page_plan.template_selection.selected_root_dir
     template_entry_rel = str(page_plan.template_selection.selected_entry_html or "").strip()
     template_entry_path = template_root / template_entry_rel
@@ -797,7 +797,7 @@ def _run_legacy_fullpage_render(
     template_profile: TemplateProfile | None,
 ) -> tuple[CoderArtifact, PagePlan]:
     previous_generated_html = _read_previous_generated_html(state)
-    project_root = Path(__file__).resolve().parent.parent
+    project_root = Path(__file__).resolve().parents[2]
     template_root = project_root / page_plan.template_selection.selected_root_dir
     template_entry_rel = str(page_plan.template_selection.selected_entry_html or "").strip()
     template_entry_path = template_root / template_entry_rel
@@ -1085,3 +1085,4 @@ def run_coder_agent_with_diagnostics(
 
     print(f"[PaperAlchemy-Coder] build completed: {normalized_artifact.entry_html}")
     return normalized_artifact, visual_smoke_report, resolved_page_plan
+

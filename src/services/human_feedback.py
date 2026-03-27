@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import mimetypes
@@ -151,3 +151,4 @@ def build_multimodal_message_content(
         if data_url:
             message_content.append({"type": "image_url", "image_url": data_url})
     return message_content
+
