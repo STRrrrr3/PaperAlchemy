@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -10,16 +10,16 @@ from typing import Any
 from bs4 import BeautifulSoup, Tag
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.html_utils import (
+from src.utils.html_utils import (
     extract_html_fragment,
     message_content_to_text,
     read_current_page_html,
     read_template_reference_html,
     read_text_with_fallback,
 )
-from src.json_utils import to_pretty_json
-from src.llm import get_llm
-from src.page_manifest import (
+from src.utils.json_utils import to_pretty_json
+from src.services.llm import get_llm
+from src.validators.page_manifest import (
     GLOBAL_ATTR,
     SLOT_ATTR,
     build_block_selector,
@@ -31,7 +31,7 @@ from src.page_manifest import (
     missing_shell_contract_block_ids,
     validate_block_tag_against_shell_contract,
 )
-from src.page_validation import (
+from src.validators.page_validation import (
     REVISION_OVERRIDE_STYLE_TAG_ID,
     collect_allowed_asset_web_paths,
     collect_local_image_sources,
@@ -45,7 +45,7 @@ from src.prompts import (
     PATCH_AGENT_SYSTEM_PROMPT,
     PATCH_AGENT_USER_PROMPT_TEMPLATE,
 )
-from src.schemas import (
+from src.contracts.schemas import (
     AttributeChange,
     CoderArtifact,
     FallbackBlock,
@@ -58,7 +58,7 @@ from src.schemas import (
     TargetedReplacement,
     TargetedReplacementPlan,
 )
-from src.state import WorkflowState
+from src.contracts.state import WorkflowState
 
 LEGACY_PAGE_ERROR = (
     "This page was generated before anchored revisions were enabled. "
@@ -1596,3 +1596,4 @@ def patch_executor_node(state: WorkflowState) -> dict[str, Any]:
         "patch_error": "",
         "patch_agent_output": _summarize_targeted_plan(targeted_plan),
     }
+

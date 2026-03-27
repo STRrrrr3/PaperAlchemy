@@ -5,10 +5,11 @@ from unittest.mock import patch
 
 from bs4 import BeautifulSoup
 
-from src import agent_coder, agent_planner
-from src.human_feedback import empty_human_feedback
-from src.schemas import PagePlan, StructuredPaper, TemplateCandidate
-from src.template_compile import compile_template_profile, hydrate_template_candidate_from_root
+from src.agents import coder as agent_coder
+from src.agents import planner as agent_planner
+from src.contracts.schemas import PagePlan, StructuredPaper, TemplateCandidate
+from src.services.human_feedback import empty_human_feedback
+from src.template.compile import compile_template_profile, hydrate_template_candidate_from_root
 
 
 def _sample_structured_paper() -> StructuredPaper:

@@ -1,4 +1,4 @@
-import json
+﻿import json
 import re
 from pathlib import Path
 from typing import Any
@@ -7,16 +7,16 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
-from src.agent_planner_critic import build_planner_critic_router, planner_critic_node
-from src.human_feedback import extract_human_feedback_text, normalize_human_feedback
-from src.json_utils import to_pretty_json
-from src.llm import get_llm
-from src.planner_template_catalog import build_template_catalog, load_module_index, load_template_link_map
+from src.agents.planner_critic import build_planner_critic_router, planner_critic_node
+from src.services.human_feedback import extract_human_feedback_text, normalize_human_feedback
+from src.utils.json_utils import to_pretty_json
+from src.services.llm import get_llm
+from src.template.catalog import build_template_catalog, load_module_index, load_template_link_map
 from src.prompts import PLANNER_SYSTEM_PROMPT, PLANNER_USER_PROMPT_TEMPLATE
-from src.schemas import BlockShellContract, PagePlan, StructuredPaper, TemplateCandidate, TemplateProfile
-from src.state import PlannerState
-from src.template_compile import prepare_template_compile_bundle
-from src.template_resources import ensure_autopage_template_assets
+from src.contracts.schemas import BlockShellContract, PagePlan, StructuredPaper, TemplateCandidate, TemplateProfile
+from src.contracts.state import PlannerState
+from src.template.compile import prepare_template_compile_bundle
+from src.template.resources import ensure_autopage_template_assets
 
 
 def _normalize_structured_paper(paper: Any) -> StructuredPaper | None:
@@ -361,7 +361,7 @@ def run_planner_agent(
     template_profile: TemplateProfile | None = None,
 ):
     current_file = Path(__file__).resolve()
-    project_root = current_file.parent.parent
+    project_root = current_file.parents[2]
     constraints = dict(generation_constraints or {})
 
     synced_assets = ensure_autopage_template_assets(
@@ -434,3 +434,4 @@ def run_planner_agent(
     else:
         print("[PaperAlchemy-Planner] planner phase completed successfully.")
     return normalized_plan
+

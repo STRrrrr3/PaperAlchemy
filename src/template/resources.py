@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import shutil
@@ -186,3 +186,4 @@ def ensure_autopage_template_assets(
         synced_template_ids=synced_template_ids,
         missing_template_ids=missing_template_ids,
     )
+

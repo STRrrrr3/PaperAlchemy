@@ -1,16 +1,16 @@
-import json
+﻿import json
 import re
 from collections.abc import Callable
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.human_feedback import extract_human_feedback_text
-from src.json_utils import to_pretty_json
-from src.llm import get_llm
+from src.services.human_feedback import extract_human_feedback_text
+from src.utils.json_utils import to_pretty_json
+from src.services.llm import get_llm
 from src.prompts import CRITIC_SYSTEM_PROMPT, READER_CRITIC_USER_PROMPT_TEMPLATE
-from src.schemas import CriticReport, StructuredPaper
-from src.state import ReaderState
+from src.contracts.schemas import CriticReport, StructuredPaper
+from src.contracts.state import ReaderState
 
 MAX_RETRY_DEFAULT = 3
 
@@ -377,3 +377,4 @@ def build_critic_router(max_retry: int = MAX_RETRY_DEFAULT) -> Callable[[ReaderS
         return "retry"
 
     return _router
+

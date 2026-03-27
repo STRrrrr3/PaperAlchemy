@@ -6,22 +6,22 @@ from typing import Any
 from unittest.mock import patch
 from uuid import uuid4
 
-from src.agent_patch import LEGACY_PAGE_ERROR, patch_agent_node, patch_executor_node
-from src.human_feedback import empty_human_feedback
-from src.page_manifest import (
-    annotate_global_anchors,
-    build_page_manifest_path,
-    extract_page_manifest,
-    save_page_manifest,
-)
-from src.page_validation import REVISION_OVERRIDE_STYLE_TAG_ID
-from src.schemas import CoderArtifact, LayoutComposeUpdate, PagePlan, StructuredPaper
-from src.template_shell_resolver import (
+from src.contracts.schemas import CoderArtifact, LayoutComposeUpdate, PagePlan, StructuredPaper
+from src.patching.patch_pipeline import LEGACY_PAGE_ERROR, patch_agent_node, patch_executor_node
+from src.services.human_feedback import empty_human_feedback
+from src.template.shell_resolver import (
     apply_layout_compose_session_to_page_plan,
     apply_layout_compose_update,
     build_layout_compose_session,
     resolve_page_plan_shells,
 )
+from src.validators.page_manifest import (
+    annotate_global_anchors,
+    build_page_manifest_path,
+    extract_page_manifest,
+    save_page_manifest,
+)
+from src.validators.page_validation import REVISION_OVERRIDE_STYLE_TAG_ID
 
 try:
     import app
@@ -882,7 +882,7 @@ class PatchExecutorTests(unittest.TestCase):
                 def invoke(self, _: Any) -> Any:
                     return type("Response", (), {"content": json.dumps(response_payload)})()
 
-            with patch("src.agent_patch.get_llm", return_value=_FakeLLM()):
+            with patch("src.patching.patch_pipeline.get_llm", return_value=_FakeLLM()):
                 result = patch_agent_node(state)
 
             self.assertEqual("", result.get("patch_error"))
@@ -935,7 +935,7 @@ class PatchExecutorTests(unittest.TestCase):
                 '<div data-pa-slot="body"><p>Old hero body</p></div>'
                 "</section>"
             )
-            with patch("src.agent_patch._regenerate_block_html", return_value=regenerated_html):
+            with patch("src.patching.patch_pipeline._regenerate_block_html", return_value=regenerated_html):
                 result = patch_executor_node(state)
 
             self.assertEqual("", result.get("patch_error"))
@@ -1200,7 +1200,7 @@ class PatchExecutorTests(unittest.TestCase):
                 '<div data-pa-slot="body"><p>Broken shell</p></div>'
                 '</div>'
             )
-            with patch("src.agent_patch._regenerate_block_html", return_value=bad_regenerated_html):
+            with patch("src.patching.patch_pipeline._regenerate_block_html", return_value=bad_regenerated_html):
                 result = patch_executor_node(state)
 
             self.assertIn("shell_contract", str(result.get("patch_error") or ""))

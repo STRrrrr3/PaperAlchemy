@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import re
 from pathlib import Path
 from typing import Any
 
-from src.schemas import CoderArtifact, PagePlan
+from src.contracts.schemas import CoderArtifact, PagePlan
 
 
 def _normalize_coder_artifact(artifact: Any) -> CoderArtifact | None:
@@ -70,7 +70,7 @@ def resolve_template_entry_html_path(
     if not selected_root or not selected_entry:
         return None
 
-    effective_project_root = project_root or Path(__file__).resolve().parent.parent
+    effective_project_root = project_root or Path(__file__).resolve().parents[2]
     return effective_project_root / selected_root / selected_entry
 
 
@@ -159,3 +159,4 @@ def extract_html_fragment(text: str) -> str:
 
 def normalize_html_document_whitespace(html_text: str) -> str:
     return str(html_text or "").replace("\r\n", "\n").strip() + "\n"
+

@@ -5,16 +5,16 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
-from src.agent_reader_critic import build_critic_router, critic_node
-from src.human_feedback import extract_human_feedback_text, normalize_human_feedback
-from src.llm import get_llm
+from src.agents.reader_critic import build_critic_router, critic_node
+from src.services.human_feedback import extract_human_feedback_text, normalize_human_feedback
+from src.services.llm import get_llm
 from src.prompts import (
     READER_RETRY_FEEDBACK_APPEND_TEMPLATE,
     READER_SYSTEM_PROMPT,
     READER_USER_PROMPT_TEMPLATE,
 )
-from src.schemas import StructuredPaper
-from src.state import ReaderState
+from src.contracts.schemas import StructuredPaper
+from src.contracts.state import ReaderState
 
 
 def reader_node(state: ReaderState):
@@ -119,7 +119,7 @@ def run_reader_agent(
     max_retry: int = 3,
 ):
     current_file = Path(__file__).resolve()
-    project_root = current_file.parent.parent
+    project_root = current_file.parents[2]
     output_dir = project_root / "data" / "output" / paper_folder_name
 
     print(f"[PaperAlchemy]启动 Reader Agent，读取数据: {output_dir}")
@@ -166,3 +166,4 @@ def run_reader_agent(
 
 if __name__ == "__main__":
     run_reader_agent("All You Need is DAG")
+

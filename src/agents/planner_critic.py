@@ -1,15 +1,15 @@
-import json
+﻿import json
 import re
 from collections.abc import Callable
 from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.json_utils import to_pretty_json
-from src.llm import get_llm
+from src.utils.json_utils import to_pretty_json
+from src.services.llm import get_llm
 from src.prompts import PLANNER_CRITIC_SYSTEM_PROMPT, PLANNER_CRITIC_USER_PROMPT_TEMPLATE
-from src.schemas import PagePlan, PlannerCriticReport, StructuredPaper, TemplateCandidate, TemplateProfile
-from src.state import PlannerState
+from src.contracts.schemas import PagePlan, PlannerCriticReport, StructuredPaper, TemplateCandidate, TemplateProfile
+from src.contracts.state import PlannerState
 
 MAX_PLANNER_RETRY_DEFAULT = 2
 _STABLE_BLOCK_ID_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
@@ -328,3 +328,4 @@ def build_planner_critic_router(max_retry: int = MAX_PLANNER_RETRY_DEFAULT) -> C
         return "retry"
 
     return _router
+

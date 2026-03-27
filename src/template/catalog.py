@@ -1,4 +1,4 @@
-import json
+﻿import json
 from pathlib import Path
 from typing import Any
 
@@ -145,3 +145,4 @@ def load_module_index(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return {}
     return payload
+

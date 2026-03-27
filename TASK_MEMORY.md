@@ -186,3 +186,108 @@
 ## 下一步
 - 如果后续要继续维护这轮架构的稳定性，优先补一条真实论文样本的端到端回归记录，覆盖 `template_compile -> planner -> coder -> patch` 全链路。
 - 如果只是维护 Git 版本描述或阶段里程碑，当前这条补记已经足以作为“模板编译上移 + Block 装配主路径落地”的事实依据。
+
+---
+
+## 任务
+- 在“零功能变更、零流程语义漂移、零输出契约漂移”的前提下，对当前仓库做结构重组：
+  - 给 `src/` 做分层
+  - 缩小 `app.py`
+  - 保留旧导入路径与旧测试兼容
+
+## 当前计划
+- 本轮结构重组实现已完成。
+- 若继续推进，下一步优先做一次宿主机上的真实 Gradio 启动回归，以及一次真实样本的人工端到端检查；这属于后续验证，不属于本轮已完成范围。
+
+## 已确认事实
+- 本轮已新增分层目录：`src/agents/`、`src/contracts/`、`src/parsing/`、`src/patching/`、`src/services/`、`src/template/`、`src/ui/`、`src/utils/`、`src/validators/`、`src/workflows/`。
+- 原先平铺在 `src/` 根目录下的核心实现，已迁移到新目录中的对应模块；旧路径文件仍保留，但已改为兼容 wrapper。
+- 兼容 wrapper 不是简单复制导出，而是桥接到新实现模块；这样旧 import 与测试中的 `patch("src.xxx...")` 仍可命中新实现。
+- `app.py` 已从“大而全”实现文件重构为兼容门面：
+  - 继续保留 `build_hitl_workflow()`、`HITL_WORKFLOW`、`build_app()`、`main()`
+  - 继续保留测试直接引用或 monkeypatch 的关键符号
+  - 实际实现已迁入 `src/workflows/` 与 `src/ui/`
+- 本轮新增的主要实现模块包括：
+  - `src/services/artifact_store.py`
+  - `src/ui/formatters.py`
+  - `src/ui/updates.py`
+  - `src/ui/constraints.py`
+  - `src/workflows/hitl_nodes.py`
+  - `src/workflows/hitl_routes.py`
+  - `src/workflows/hitl_graph.py`
+  - `src/workflows/batch_runtime.py`
+  - `src/ui/review_handlers.py`
+  - `src/ui/layout_compose_handlers.py`
+  - `src/ui/app_builder.py`
+- `app.build_hitl_workflow()` 仍是显式包装层，并从 `app` 命名空间传入节点与路由；这保证了现有测试对 `app.reader_phase_node`、`app.coder_phase_node` 等符号的 monkeypatch 仍然有效。
+- `app.coder_phase_node` 已保留显式兼容包装逻辑，以兼容测试对 `app.run_coder_agent_with_diagnostics`、`app.save_page_plan`、`app.save_coder_artifact` 的 patch 行为。
+- 本轮未改动以下行为层约束：
+  - LangGraph 主节点顺序
+  - 条件路由逻辑
+  - `interrupt_after`
+  - schema 字段名
+  - JSON / artifact 落盘路径约定
+  - prompt 语义
+  - 默认参数与 fallback 策略
+- 本轮还新增了结构重组专用回归测试：`tests/test_refactor_compat.py`。
+
+## 开放假设
+- 本轮已验证 `import app; app.build_app()` 与 `import app; app.build_hitl_workflow()` 能成功装配，但没有实际执行 `app.launch()`，因此未把“真实 UI 服务已成功启动”记录为已确认事实。
+- 本轮没有做真实论文样本的人工端到端点击回归，因此“结构更清晰”已经确认，但“宿主机 UI 交互观感完全无漂移”仍有待人工确认。
+- `TASK_MEMORY.md` 在 shell 中可能仍受终端编码显示影响；本次追加内容依据实际文件追加，不依据 shell 乱码外观判断文件损坏。
+
+## 当前阻塞
+- 当前无新的实现阻塞。
+- 若继续做更高层验证，主要阻塞不是代码缺失，而是是否安排宿主机上的真实 UI / 样本回归时间。
+
+## 最新变更
+- 迁移并分层了以下实现职责：
+  - contracts：`schemas`、`state`
+  - services：`llm`、`human_feedback`、`preview`、artifact 持久化
+  - template：`compile`、selector、catalog、resource、shell resolver
+  - validators：`page_manifest`、`page_validation`
+  - agents：reader / planner / coder / translator
+  - patching：patch pipeline
+  - workflows：节点、路由、图构建、batch runtime
+  - ui：updates、formatters、constraints、review handlers、layout compose handlers、app builder
+- 保留了旧路径兼容文件，例如：
+  - `src/agent_coder.py`
+  - `src/agent_patch.py`
+  - `src/template_compile.py`
+  - `src/schemas.py`
+  这些文件现在作为兼容桥接层存在，不再承载主实现。
+- 重写了 `app.py`，使其只保留兼容门面、工作流装配入口和启动逻辑。
+- 新增 `tests/test_refactor_compat.py`，覆盖：
+  - 旧导入兼容
+  - `app.build_app()` 最小装配
+  - `app.build_hitl_workflow()` 最小装配
+  - `src/**/*.py` 导入图无循环依赖
+- 在迁移过程中修复了两处纯机械性语法问题：
+  - `src/services/llm.py` 中复制后受旧编码文本影响的异常字符串
+  - `src/parsing/parser.py` 中复制后受旧编码文本影响的日志字符串
+  这些修复只涉及日志/报错文本可解析性，不涉及业务逻辑调整。
+
+## 最新验证
+- 实际执行了大范围语法检查，覆盖：
+  - `app.py`
+  - `main.py`
+  - 旧 `src/` 兼容 wrapper
+  - 新分层模块
+  - `tests/test_patch_mode.py`
+  - `tests/test_template_compile_refactor.py`
+  - `tests/test_refactor_compat.py`
+- 实际执行了单元测试：
+  - `& "E:\miniconda3\envs\paper-alchemy\python.exe" -m unittest tests.test_patch_mode tests.test_template_compile_refactor tests.test_refactor_compat`
+  - 结果：`Ran 41 tests ... OK`
+- 实际新增并通过了以下验证目标：
+  - 旧导入兼容 smoke
+  - `import app; app.build_app()`
+  - `import app; app.build_hitl_workflow()`
+  - `src/**/*.py` 导入图无循环依赖
+
+## 下一步
+- 若继续推进，建议优先补一条真实宿主机回归记录：
+  - 启动 Gradio
+  - 手动走一次 Reader -> Outline -> Draft -> Revision 的最小流程
+  - 确认 UI 装配与事件绑定在真实环境中无行为漂移
+- 若继续维护代码结构，可再考虑第二轮小范围整理，但本轮不建议继续拆 `prompts.py`、`patch_pipeline.py`、`agents/coder.py`、`template/shell_resolver.py` 的内部大函数，以避免超出“零行为变更”范围。

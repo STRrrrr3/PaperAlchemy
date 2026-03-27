@@ -1,11 +1,11 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
 
 from bs4 import BeautifulSoup, Tag
 
-from src.schemas import (
+from src.contracts.schemas import (
     BlockPlan,
     BlockShellContract,
     GlobalAnchorId,
@@ -636,3 +636,4 @@ def extract_page_manifest(
         blocks=manifest_blocks,
         globals=manifest_globals,
     )
+

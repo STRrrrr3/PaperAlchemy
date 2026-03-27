@@ -1,4 +1,4 @@
-import hashlib
+﻿import hashlib
 from pathlib import Path
 import re
 
@@ -10,7 +10,7 @@ except ImportError:
     sync_playwright = None
 
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = PROJECT_ROOT / "data" / "output"
 PREVIEW_CACHE_DIR = OUTPUT_DIR / "_preview_cache"
 
@@ -298,3 +298,4 @@ def take_selector_screenshot(html_absolute_path: str, selector: str, output_imag
             f"{html_path} selector={clean_selector}: {exc}."
         )
         return ""
+

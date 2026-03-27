@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Mapping
 
-from src.planner_template_catalog import find_entry_html_candidates
-from src.template_resources import load_template_tags
+from src.template.catalog import find_entry_html_candidates
+from src.template.resources import load_template_tags
 
 
 FEATURE_WEIGHTS: dict[str, float] = {
@@ -267,3 +267,4 @@ def score_and_select_template(
     winner["selected_entry_html_path"] = winner["entry_html_path"]
     winner["ranking"] = decorated
     return winner
+
