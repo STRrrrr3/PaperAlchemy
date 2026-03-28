@@ -23,22 +23,13 @@ env/
 # 忽略敏感信息
 .env
 project-*.json
+AGENTS.md
+PaperAlchemy_System_Architecture_for_ChatGPT.md
+TASK_MEMORY.md
+test_env.py
+tests/
+data/
 
 # 忽略论文原始与中间数据（体积大、不可复现）
 data/input/
 data/output/
-
-# 忽略采集与提取生成物（可通过脚本重建）
-data/collectors(useless)/raw/
-data/collectors(useless)/output/
-data/collectors(useless)/modules/
-
-# 保留采集脚本与文档（用于开源复现）
-!data/collectors(useless)/
-!data/collectors(useless)/*.py
-!data/collectors(useless)/README.md
-
-# 保留可复现锁文件
-!data/collectors(useless)/locks/
-!data/collectors(useless)/locks/*.json
-!data/collectors(useless)/locks/.gitkeep
