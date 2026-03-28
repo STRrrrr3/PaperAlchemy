@@ -1,6 +1,15 @@
-﻿# 忽略 Python 的编译垃圾
+# 忽略 Python 的编译垃圾
 __pycache__/
 *.py[cod]
+
+# 忽略工具缓存与临时目录
+.ruff_cache/
+.pytest_cache/
+.uv-cache/
+.uv-cache-local/
+.uv-python/
+.tmp.driveupload/
+tests/_tmp/
 
 # 忽略虚拟环境
 venv/
@@ -13,6 +22,7 @@ env/
 
 # 忽略敏感信息
 .env
+project-*.json
 
 # 忽略论文原始与中间数据（体积大、不可复现）
 data/input/
@@ -32,4 +42,3 @@ data/collectors(useless)/modules/
 !data/collectors(useless)/locks/
 !data/collectors(useless)/locks/*.json
 !data/collectors(useless)/locks/.gitkeep
-
