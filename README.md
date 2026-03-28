@@ -28,7 +28,7 @@
 | 模块 | 核心技术/框架 | 描述 |
 | --- | --- | --- |
 | **基础编排与调度** | **LangGraph** | 用于构建多智能体的有限迭代状态机、记忆 Checkpointing 与并发流转。 |
-| **大模型（LLM/VLM）** | **Gemini 3 Pro / Flash** | 提供核心的推理、翻译、代码编写及视觉判定能力 (基于 `langchain_google_genai`)。 |
+| **大模型（LLM/VLM）** | **Gemini 3.1 Pro Preview / 3 Flash Preview** | 提供核心的推理、翻译、代码编写及视觉判定能力 (基于 `langchain_google_genai`)。 |
 | **多模态文档解析** | **Docling** <br> **docling-core** | 强大的跨模态 PDF 解析器，负责 OCR、表格逻辑化提取及图像切片。 |
 | **数据校验与防守** | **Pydantic** | 贯彻于全业务生命周期的数据 Schema 严格校验，防止长文解析幻觉。 |
 | **Web交互与可视化** | **Gradio** <br> **Playwright** | Gradio 构建控制流 UI 界面；Playwright 作为服务端无头引擎，实现页面的秒级快照核验。 |
@@ -114,18 +114,26 @@ PaperAlchemy/
   ├─ app.py                 # Gradio Web UI 主应用层，打通全量组件图谱与 HitL 阻断
   ├─ main.py                # 推荐启动入口 (实质为 app.py 执行器层封装)
   ├─ src/
-  │   ├─ parser.py          # PDF 的底层多模态抽取工具链 (基于 Docling)
-  │   ├─ agent_reader*.py   # Reader 阅读推导管线与判决器节点
-  │   ├─ agent_planner*.py  # Planner 排版智能匹配引擎及 DOM 映射判定
-  │   ├─ agent_coder*.py    # Coder 零代码安全无痛编译静态部署引擎 
-  │   ├─ agent_patch.py     # Patch 补丁模块及 Translator 翻译辅佐等边缘智能体
-  │   ├─ template_*.py      # Shell 渲染基类的 HTML 模板调度引擎组件
-  │   ├─ llm.py             # Chat 底座模型分级下发及 API 认证连接池
-  │   └─ schemas.py         # 论文结构/组件页面计划全局 Pydantic 数据抽象强基模型
+  │   ├─ agents/            # Reader / Planner / Coder / Translator 等核心智能体实现
+  │   ├─ contracts/         # Schema 与 Workflow State 等共享契约
+  │   ├─ parsing/           # PDF 解析与中间结构抽取
+  │   ├─ patching/          # Patch / Revision 相关流程
+  │   ├─ services/          # LLM、预览、人工反馈、产物持久化等服务
+  │   ├─ template/          # 模板编译、选择、资源解析与 shell 解析
+  │   ├─ ui/                # Gradio 事件处理、格式化与界面装配
+  │   ├─ validators/        # 页面与产物校验逻辑
+  │   ├─ workflows/         # HITL 工作流节点、路由与图构建
+  │   ├─ parser.py          # 兼容导入包装层
+  │   ├─ llm.py             # 兼容导入包装层
+  │   ├─ schemas.py         # 兼容导入包装层
+  │   └─ state.py           # 兼容导入包装层
   ├─ data/
   │   ├─ input/             # 用户侧置入待解析目标 PDF 靶向槽位
   │   └─ output/            # 工作流处理全生命周期中间物缓存落盘与最终站点产物
-  ├─ workflow_analysis_cn.md# 极其详尽的一份内部系统端到端工作流解析与竞品对比架构报告
+  ├─ tests/                 # 工作流与兼容性回归测试
+  ├─ README.md              # 项目说明与快速开始
+  ├─ AGENTS.md              # 仓库内实现代理协作约定
+  ├─ TASK_MEMORY.md         # 可选任务日志（按需维护）
   └─ requirements.txt       # 项目 Python 依赖库指引列表
 ```
 
@@ -134,7 +142,7 @@ PaperAlchemy/
 ## 🚀 快速上手与部署指南
 
 ### 1. 环境准备与依赖安装
-确保您预先持有 Python Conda 虚拟环境且已被激活。终端直接调用下述指令拉取相关组件支持：
+本项目默认使用现有的 Python Conda 环境，不依赖 `.venv`。激活环境后，终端直接调用下述指令安装依赖：
 ```bash
 pip install -r requirements.txt
 ```
@@ -146,14 +154,33 @@ playwright install chromium
 ```
 
 ### 2. 配置大语言模型凭据 (`.env`)
-请在项目的物理根目录下复制或手动生成一份名为 `.env` 的隐私认证配置文件。将内侧所需要的 Gemini AI 凭据字段填入：
+请在项目根目录下创建一份本地 `.env` 配置文件。`.env` 与 `project-*.json` 凭据文件仅用于本地运行，**不要提交到 GitHub**。
+
+当前支持两种 Gemini 凭据接入方式：
+
+1. **Vertex AI Service Account JSON（推荐）**
+   通过 `VERTEX_SERVICE_ACCOUNT_JSON` 或 `GOOGLE_APPLICATION_CREDENTIALS` 指向本机的 service account JSON 文件路径。
+2. **Google AI Studio API Key（回退路径）**
+   通过 `GOOGLE_API_KEY` 直接接入。
+
+推荐的 `.env` 示例如下：
 ```env
-# 获取你的开发者 Token: Google AI Studio
-GOOGLE_API_KEY=修改为您的真实_gemini_api_key
+# 推荐：使用 Vertex AI Service Account JSON
+VERTEX_SERVICE_ACCOUNT_JSON=C:\path\to\your-service-account.json
+VERTEX_PROJECT=your-gcp-project-id
+VERTEX_LOCATION=global
+
+# 回退：使用 Google AI Studio API Key
+# GOOGLE_API_KEY=your_gemini_api_key
 
 # 代理配置（根据宿主机网络环境选填，如果不处于敏感环境亦可留空或注释）
 HTTPS_PROXY=http://127.0.0.1:7890
 ```
+
+说明：
+
+- 当根目录下仅存在一个可用的 service account JSON 时，系统会自动识别并优先走 Vertex AI。
+- 更推荐将 JSON 放在仓库外部目录，并通过环境变量指向它，避免误提交。
 
 ### 3. 点火启动可视化控制台
 在一切就绪后，在当前目录路径敲击入口指令拉起系统引擎服务：
