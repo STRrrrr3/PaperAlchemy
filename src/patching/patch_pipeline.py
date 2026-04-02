@@ -900,6 +900,13 @@ def _load_current_manifest(artifact: CoderArtifact | None):
     return load_page_manifest(build_page_manifest_path(artifact.entry_html))
 
 
+def _load_style_context_json(artifact: CoderArtifact | None) -> str:
+    if not artifact:
+        return "{}"
+    from src.services.preview_service import load_style_context_json
+    return load_style_context_json(Path(artifact.entry_html).resolve())
+
+
 def _available_asset_manifest_from_artifact(artifact: CoderArtifact) -> list[dict[str, str]]:
     site_dir = Path(artifact.site_dir)
     entry_html_parent = Path(artifact.entry_html).parent
@@ -1029,6 +1036,7 @@ def patch_agent_node(state: WorkflowState) -> dict[str, Any]:
     current_html = read_current_page_html(artifact, missing_value="")
     template_reference_html = read_template_reference_html(page_plan, missing_value="")
     manifest = _load_current_manifest(artifact)
+    style_context_json = _load_style_context_json(artifact)
 
     if not artifact or not page_plan or not structured_paper or not current_html or not template_reference_html:
         message = "Patch Agent could not run because artifact, page plan, structured paper, or current HTML is missing."
@@ -1095,6 +1103,7 @@ def patch_agent_node(state: WorkflowState) -> dict[str, Any]:
                             indent=2,
                             ensure_ascii=False,
                         ),
+                        template_style_context_json=style_context_json,
                     )
                 ),
             ]

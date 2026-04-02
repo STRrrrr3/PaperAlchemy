@@ -1,6 +1,8 @@
 ﻿import hashlib
+import json
 from pathlib import Path
 import re
+from typing import Any
 
 try:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
@@ -298,4 +300,133 @@ def take_selector_screenshot(html_absolute_path: str, selector: str, output_imag
             f"{html_path} selector={clean_selector}: {exc}."
         )
         return ""
+
+
+def build_style_context_path(entry_html_path: Path) -> Path:
+    site_dir = entry_html_path.parent
+    site_dir.mkdir(parents=True, exist_ok=True)
+    return site_dir / "style_context.json"
+
+
+_EXTRACT_STYLES_JS = """
+() => {
+  const KEY_PROPS = [
+    'padding','margin','display','color','backgroundColor','fontSize',
+    'fontFamily','lineHeight','gap','border','borderRadius','width',
+    'maxWidth','textAlign','position'
+  ];
+  const PROP_MAP = {
+    backgroundColor:'background-color',fontSize:'font-size',
+    fontFamily:'font-family',lineHeight:'line-height',
+    borderRadius:'border-radius',maxWidth:'max-width',
+    textAlign:'text-align'
+  };
+  function grab(el) {
+    const cs = window.getComputedStyle(el);
+    const o = {};
+    KEY_PROPS.forEach(p => { o[PROP_MAP[p]||p] = cs[p]; });
+    return o;
+  }
+  function childSnap(el, max) {
+    return Array.from(el.children).slice(0, max).map(c => ({
+      tag: c.tagName.toLowerCase(),
+      classes: Array.from(c.classList),
+      key_styles: grab(c)
+    }));
+  }
+
+  const anchors = [];
+  document.querySelectorAll('[data-pa-block]').forEach(el => {
+    anchors.push({
+      anchor_type:'block',
+      anchor_id: el.getAttribute('data-pa-block'),
+      selector: '[data-pa-block=\"'+el.getAttribute('data-pa-block')+'\"]',
+      applied_classes: Array.from(el.classList),
+      key_styles: grab(el),
+      children: childSnap(el, 8)
+    });
+  });
+  document.querySelectorAll('[data-pa-global]').forEach(el => {
+    anchors.push({
+      anchor_type:'global',
+      anchor_id: el.getAttribute('data-pa-global'),
+      selector: '[data-pa-global=\"'+el.getAttribute('data-pa-global')+'\"]',
+      applied_classes: Array.from(el.classList),
+      key_styles: grab(el),
+      children: childSnap(el, 8)
+    });
+  });
+
+  // CSS custom properties from :root
+  const rootStyle = window.getComputedStyle(document.documentElement);
+  const customProps = {};
+  for (const sheet of document.styleSheets) {
+    try {
+      for (const rule of sheet.cssRules) {
+        if (rule.selectorText === ':root') {
+          for (let i = 0; i < rule.style.length; i++) {
+            const name = rule.style[i];
+            if (name.startsWith('--')) {
+              customProps[name] = rootStyle.getPropertyValue(name).trim();
+            }
+          }
+        }
+      }
+    } catch(e) {}
+  }
+
+  // Framework detection from <link> hrefs
+  let framework = 'custom';
+  document.querySelectorAll('link[rel=stylesheet]').forEach(link => {
+    const h = (link.getAttribute('href')||'').toLowerCase();
+    if (h.includes('bulma')) framework = 'bulma';
+    else if (h.includes('bootstrap')) framework = framework === 'custom' ? 'bootstrap' : framework;
+    else if (h.includes('tailwind')) framework = framework === 'custom' ? 'tailwind' : framework;
+  });
+
+  return { anchor_snapshots: anchors, css_custom_properties: customProps, framework_hint: framework };
+}
+"""
+
+
+def extract_anchor_styles(html_absolute_path: str) -> dict[str, Any] | None:
+    html_path = Path(html_absolute_path).absolute()
+    if not html_path.exists():
+        return None
+    if sync_playwright is None:
+        print("[StyleContext] Skipped: playwright is not installed.")
+        return None
+
+    target_uri = html_path.as_uri()
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(headless=True)
+            context = browser.new_context(viewport={"width": 1920, "height": 1080})
+            page = context.new_page()
+
+            try:
+                page.goto(target_uri, wait_until="networkidle", timeout=45000)
+            except PlaywrightTimeoutError:
+                try:
+                    page.wait_for_timeout(1500)
+                except Exception:
+                    pass
+
+            result = page.evaluate(_EXTRACT_STYLES_JS)
+            context.close()
+            browser.close()
+            return result
+    except Exception as exc:
+        print(f"[StyleContext] Extraction failed for {html_path}: {exc}")
+        return None
+
+
+def load_style_context_json(entry_html_path: Path) -> str:
+    ctx_path = build_style_context_path(entry_html_path)
+    if not ctx_path.exists():
+        return "{}"
+    try:
+        return ctx_path.read_text(encoding="utf-8")
+    except Exception:
+        return "{}"
 

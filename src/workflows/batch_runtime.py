@@ -19,7 +19,12 @@ from src.services.artifact_store import (
     save_template_profile,
 )
 from src.services.human_feedback import empty_human_feedback
-from src.services.preview_service import build_final_preview_path, take_local_screenshot
+from src.services.preview_service import (
+    build_final_preview_path,
+    build_style_context_path,
+    extract_anchor_styles,
+    take_local_screenshot,
+)
 from src.ui.constraints import (
     INPUT_DIR,
     OUTPUT_DIR,
@@ -28,7 +33,7 @@ from src.ui.constraints import (
     ensure_template_assets,
     get_default_pdf,
 )
-from src.ui.formatters import _visual_smoke_feedback_text
+from src.ui.formatters import _visual_smoke_feedback_text, resolve_selected_candidate
 from src.workflows.hitl_nodes import normalize_coder_artifact
 from src.template.compile import prepare_template_compile_bundle
 
@@ -155,6 +160,19 @@ def render_current_workflow_preview(state_values: dict[str, Any]) -> tuple[str, 
     )
     if not preview_image_path:
         raise RuntimeError(f"Failed to render workflow preview for {entry_html_path}")
+
+    # Extract and persist anchor computed styles for the patch pipeline
+    style_data = extract_anchor_styles(str(entry_html_path))
+    if style_data:
+        try:
+            ctx_path = build_style_context_path(entry_html_path)
+            ctx_path.write_text(
+                json.dumps(style_data, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            print(f"[StyleContext] Failed to persist style context: {exc}")
+
     return preview_image_path, str(entry_html_path)
 
 def confirm_and_start_generation(

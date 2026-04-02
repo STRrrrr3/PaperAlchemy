@@ -90,6 +90,14 @@ def _read_current_page_manifest(artifact: CoderArtifact | None) -> str:
     return json.dumps(manifest.model_dump(), indent=2, ensure_ascii=False)
 
 
+def _read_style_context(artifact: CoderArtifact | None) -> str:
+    if not artifact:
+        return "{}"
+    from pathlib import Path
+    from src.services.preview_service import load_style_context_json
+    return load_style_context_json(Path(artifact.entry_html).resolve())
+
+
 def _classify_edit_intent(feedback: Any, revision_plan: RevisionPlan | None) -> tuple[str, str]:
     feedback_text = str(extract_human_feedback_text(feedback) or "").strip()
     lowered_feedback = feedback_text.lower()
@@ -119,6 +127,7 @@ def translator_node(state: WorkflowState) -> dict[str, Any]:
     human_feedback_images = extract_human_feedback_images(feedback)
     current_html = _read_current_html(artifact)
     current_page_manifest_json = _read_current_page_manifest(artifact)
+    style_context_json = _read_style_context(artifact)
 
     user_prompt = TRANSLATOR_USER_PROMPT_TEMPLATE.format(
         human_feedback=human_feedback,
@@ -126,6 +135,7 @@ def translator_node(state: WorkflowState) -> dict[str, Any]:
         current_template_id=artifact.selected_template_id,
         current_page_manifest_json=current_page_manifest_json,
         current_html=current_html,
+        template_style_context_json=style_context_json,
     )
 
     print("[Translator] Translating multimodal feedback into a structured revision plan...")

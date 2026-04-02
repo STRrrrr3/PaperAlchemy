@@ -432,7 +432,7 @@ def build_app() -> gr.Blocks:
             api_name="approve_outline_and_generate_draft",
         )
 
-        layout_compose_block_radio.change(
+        layout_compose_block_radio.input(
             fn=select_layout_compose_block,
             inputs=[
                 layout_compose_block_radio,

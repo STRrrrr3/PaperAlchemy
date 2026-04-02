@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import re
 from typing import Any
 
 from src.contracts.schemas import PagePlan, VisualSmokeReport

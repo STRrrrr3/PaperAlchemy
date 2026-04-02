@@ -9,10 +9,13 @@ import gradio as gr
 
 from src.contracts.schemas import PagePlan, StructuredPaper
 from src.contracts.state import WorkflowState
+from src.services.artifact_store import get_output_paths
 from src.services.human_feedback import build_human_feedback_payload, empty_human_feedback, extract_human_feedback_text
 from src.services.preview_service import build_template_preview_path, take_local_screenshot
 from src.template.deterministic_selector import score_and_select_templates
 from src.ui.constraints import (
+    INPUT_DIR,
+    TEMPLATE_TOP_K,
     build_generation_constraints,
     build_user_constraints,
     ensure_parsed_output,
@@ -299,6 +302,7 @@ def run_extraction(
             "",
             *_review_accordion_updates("webpage"),
             "",
+            "",
             *_stage_action_updates("none"),
             *_layout_compose_ui_hidden(),
         )
@@ -516,6 +520,10 @@ def revise_outline(
                 "human_directives": feedback_payload,
                 "is_outline_approved": False,
                 "approved_page_plan": None,
+                "patch_agent_output": "",
+                "revision_plan": None,
+                "targeted_replacement_plan": None,
+                "patch_error": "",
                 "shell_binding_review": None,
                 "shell_manual_selection": None,
                 "layout_compose_session": None,

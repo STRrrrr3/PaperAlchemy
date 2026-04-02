@@ -29,7 +29,14 @@ TASK_MEMORY.md
 test_env.py
 tests/
 data/
+CLAUDE.md
+settings.local.json
 
 # 忽略论文原始与中间数据（体积大、不可复现）
 data/input/
 data/output/
+
+# Local Google / Vertex service-account credentials
+service-account*.json
+google-service-account*.json
+vertex-service-account*.json

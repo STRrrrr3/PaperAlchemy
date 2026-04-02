@@ -319,7 +319,8 @@ Rules:
     }
   ]
 }
-9. If the request is unsupported or already satisfied, return {"edits": []}.
+9. Use TEMPLATE_STYLE_CONTEXT_JSON to understand the current computed styles of anchored elements when classifying edit scope and writing change_request descriptions.
+10. If the request is unsupported or already satisfied, return {"edits": []}.
 """
 
 TRANSLATOR_USER_PROMPT_TEMPLATE = """Translate the human's multimodal feedback into a strict anchored RevisionPlan for webpage revision.
@@ -338,6 +339,9 @@ TRANSLATOR_USER_PROMPT_TEMPLATE = """Translate the human's multimodal feedback i
 
 ### CURRENT_HTML
 {current_html}
+
+### TEMPLATE_STYLE_CONTEXT_JSON
+{template_style_context_json}
 """
 
 PATCH_AGENT_SYSTEM_PROMPT = """You are the Patch Agent in PaperAlchemy.
@@ -350,6 +354,7 @@ You will receive:
 4. STRUCTURED_PAPER_JSON
 5. TEMPLATE_REFERENCE_HTML
 6. AVAILABLE_PAPER_ASSETS_JSON
+7. TEMPLATE_STYLE_CONTEXT_JSON
 
 Rules:
 1. Return strict JSON only with this schema:
@@ -370,16 +375,7 @@ Rules:
       "global_id": "header_brand | header_primary_action | header_nav | footer_meta | null",
       "scope": "slot | block | global",
       "declarations": {
-        "font-size": "string",
-        "line-height": "string",
-        "margin": "string",
-        "margin-top": "string",
-        "margin-bottom": "string",
-        "padding": "string",
-        "gap": "string",
-        "text-align": "string",
-        "max-width": "string",
-        "width": "string"
+        "<any-css-property>": "string"
       }
     }
   ],
@@ -403,7 +399,7 @@ Rules:
     {
       "selector": "string",
       "declarations": {
-        "font-size": "string"
+        "<any-css-property>": "string"
       }
     }
   ],
@@ -420,27 +416,18 @@ Rules:
 5. Use `style_changes` for font size, spacing, width, alignment, or other small layout adjustments when HTML replacement is unnecessary.
 6. Use `attribute_changes` for safe root-node attribute edits such as button href, target, aria-label, class, inline style updates, or stable in-page anchor ids.
 7. Use `override_css_rules` only for small anchored descendant selectors such as `[data-pa-block="hero"] p` or `[data-pa-global="header_nav"] a`.
-8. Only use these CSS properties in `style_changes` and `override_css_rules`:
-   - font-size
-   - line-height
-   - margin
-   - margin-top
-   - margin-bottom
-   - padding
-   - gap
-   - text-align
-   - max-width
-   - width
-9. If a requested block-level change needs larger restructuring, a missing slot, or uncertain local surgery, put that block into `fallback_blocks` instead of guessing.
-10. Every referenced block_id or global_id must already exist in CURRENT_PAGE_MANIFEST_JSON.
-11. If you emit local paper images, use only the exact `web_path` values from AVAILABLE_PAPER_ASSETS_JSON.
-12. Prefer the fewest safe changes necessary to satisfy the revision plan.
-13. If one clean replacement already solves the request, do not add redundant `style_changes`, `attribute_changes`, or `override_css_rules`.
-14. Never output empty `declarations`.
-15. Never output empty `attributes`.
-16. If you cannot provide concrete style declarations, omit the style change entirely instead of guessing.
-17. Prioritize a minimal, clean, executable patch plan over a more complicated one.
-18. Do not output explanations, commentary, markdown fences, or extra text.
+8. Any valid CSS property is allowed in `style_changes` and `override_css_rules`. Common ones: font-size, line-height, margin, padding, gap, text-align, max-width, width, display, color, background-color, border, border-radius, padding-left, padding-right, etc.
+9. Consult TEMPLATE_STYLE_CONTEXT_JSON for actual computed styles of anchored elements and their children. Use it to understand the current visual state and choose the correct fix approach (class change, inline style, or override rule).
+10. If a requested block-level change needs larger restructuring, a missing slot, or uncertain local surgery, put that block into `fallback_blocks` instead of guessing.
+11. Every referenced block_id or global_id must already exist in CURRENT_PAGE_MANIFEST_JSON.
+12. If you emit local paper images, use only the exact `web_path` values from AVAILABLE_PAPER_ASSETS_JSON.
+13. Prefer the fewest safe changes necessary to satisfy the revision plan.
+14. If one clean replacement already solves the request, do not add redundant `style_changes`, `attribute_changes`, or `override_css_rules`.
+15. Never output empty `declarations`.
+16. Never output empty `attributes`.
+17. If you cannot provide concrete style declarations, omit the style change entirely instead of guessing.
+18. Prioritize a minimal, clean, executable patch plan over a more complicated one.
+19. Do not output explanations, commentary, markdown fences, or extra text.
 """
 
 PATCH_AGENT_USER_PROMPT_TEMPLATE = """Generate grounded webpage patch output now.
@@ -462,6 +449,9 @@ PATCH_AGENT_USER_PROMPT_TEMPLATE = """Generate grounded webpage patch output now
 
 ### AVAILABLE_PAPER_ASSETS_JSON
 {available_paper_assets_json}
+
+### TEMPLATE_STYLE_CONTEXT_JSON
+{template_style_context_json}
 """
 
 # ---------------------------------------------------------------------------

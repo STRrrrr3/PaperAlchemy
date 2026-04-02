@@ -322,17 +322,9 @@ class CoderCriticReport(BaseModel):
 
 GlobalAnchorId = Literal["header_brand", "header_primary_action", "header_nav", "footer_meta"]
 SlotId = Literal["title", "summary", "body", "media", "meta", "actions"]
-StylePropertyName = Literal[
-    "font-size",
-    "line-height",
-    "margin",
-    "margin-top",
-    "margin-bottom",
-    "padding",
-    "gap",
-    "text-align",
-    "max-width",
-    "width",
+_SUGGESTED_STYLE_PROPERTIES = [
+    "font-size", "line-height", "margin", "margin-top", "margin-bottom",
+    "padding", "gap", "text-align", "max-width", "width",
 ]
 AttributeName = Literal["class", "href", "target", "aria-label", "style", "id"]
 
@@ -490,6 +482,28 @@ class VisualSmokeReport(BaseModel):
     screenshot_path: str = ""
 
 
+class AnchorChildStyle(BaseModel):
+    tag: str
+    classes: List[str] = Field(default_factory=list)
+    key_styles: Dict[str, str] = Field(default_factory=dict)
+
+
+class AnchorStyleSnapshot(BaseModel):
+    anchor_type: Literal["block", "global"]
+    anchor_id: str
+    selector: str
+    applied_classes: List[str] = Field(default_factory=list)
+    key_styles: Dict[str, str] = Field(default_factory=dict)
+    children: List[AnchorChildStyle] = Field(default_factory=list)
+
+
+class TemplateStyleContext(BaseModel):
+    template_id: str = ""
+    framework_hint: str = "custom"
+    css_custom_properties: Dict[str, str] = Field(default_factory=dict)
+    anchor_snapshots: List[AnchorStyleSnapshot] = Field(default_factory=list)
+
+
 class RevisionEdit(BaseModel):
     block_id: Optional[str] = None
     slot_id: Optional[SlotId] = None
@@ -529,7 +543,7 @@ class StyleChange(BaseModel):
     slot_id: Optional[SlotId] = None
     global_id: Optional[GlobalAnchorId] = None
     scope: Literal["slot", "block", "global"]
-    declarations: Dict[StylePropertyName, str] = Field(default_factory=dict)
+    declarations: Dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_scope(self) -> "StyleChange":
@@ -614,7 +628,7 @@ class TargetedReplacement(BaseModel):
 
 class OverrideCssRule(BaseModel):
     selector: str
-    declarations: Dict[StylePropertyName, str] = Field(default_factory=dict)
+    declarations: Dict[str, str] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def validate_rule(self) -> "OverrideCssRule":
