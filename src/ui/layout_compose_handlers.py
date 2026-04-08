@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from src.contracts.schemas import LayoutComposeSession, LayoutComposeUpdate, PagePlan, StructuredPaper
-from src.services.artifact_store import get_output_paths, save_page_plan
+from src.services.artifact_store import get_output_paths, load_cached_structured_data, load_page_plan, save_page_plan
 from src.template.shell_resolver import apply_layout_compose_session_to_page_plan, apply_layout_compose_update
 from src.ui.formatters import _visual_smoke_feedback_text, format_page_plan_to_markdown
 from src.ui.updates import (
@@ -23,6 +23,34 @@ from src.workflows.hitl_nodes import (
     normalize_layout_compose_session,
     normalize_visual_smoke_report,
 )
+
+
+def _load_snapshot_page_plan(snapshot_values: dict[str, Any]) -> PagePlan:
+    for candidate in (snapshot_values.get("approved_page_plan"), snapshot_values.get("page_plan")):
+        if candidate:
+            return PagePlan.model_validate(candidate)
+    paper_folder_name = str(snapshot_values.get("paper_folder_name") or "").strip()
+    if not paper_folder_name:
+        raise ValueError("The paused workflow state is missing page_plan and paper metadata.")
+    _, _, planner_json_path, _ = get_output_paths(paper_folder_name)
+    page_plan = load_page_plan(planner_json_path)
+    if page_plan is None:
+        raise ValueError("The paused workflow state is missing page_plan and no disk cache was found.")
+    return page_plan
+
+
+def _load_snapshot_structured_paper(snapshot_values: dict[str, Any]) -> StructuredPaper:
+    current = snapshot_values.get("structured_paper")
+    if current:
+        return StructuredPaper.model_validate(current)
+    paper_folder_name = str(snapshot_values.get("paper_folder_name") or "").strip()
+    if not paper_folder_name:
+        raise ValueError("The paused workflow state is missing structured_paper and paper metadata.")
+    _, structured_json_path, _, _ = get_output_paths(paper_folder_name)
+    structured_data = load_cached_structured_data(structured_json_path)
+    if structured_data is None:
+        raise ValueError("The paused workflow state is missing structured_paper and no disk cache was found.")
+    return structured_data
 
 def _require_layout_compose_snapshot(
     workflow_thread_id: str,
@@ -250,7 +278,7 @@ def continue_layout_compose_to_draft(
                 *_layout_compose_ui_active(updated_session),
             )
 
-        approved_page_plan = PagePlan.model_validate(snapshot_values.get("approved_page_plan") or snapshot_values.get("page_plan"))
+        approved_page_plan = _load_snapshot_page_plan(snapshot_values)
         template_entry_path = _get_template_entry_path(approved_page_plan)
         composed_page_plan = apply_layout_compose_session_to_page_plan(
             approved_page_plan,
@@ -265,8 +293,8 @@ def continue_layout_compose_to_draft(
         get_default_hitl_workflow().update_state(
             config,
             {
-                "page_plan": composed_page_plan,
-                "approved_page_plan": composed_page_plan,
+                "page_plan": None,
+                "approved_page_plan": None,
                 "layout_compose_session": updated_session,
                 "layout_compose_update": update,
                 "visual_smoke_report": None,
@@ -287,8 +315,8 @@ def continue_layout_compose_to_draft(
         if review_stage == "outline":
             outline_overview = str(paused_values.get("outline_overview") or "").strip()
             if not outline_overview:
-                page_plan = PagePlan.model_validate(paused_values.get("page_plan"))
-                structured_data = StructuredPaper.model_validate(paused_values.get("structured_paper"))
+                page_plan = _load_snapshot_page_plan(paused_values)
+                structured_data = _load_snapshot_structured_paper(paused_values)
                 outline_overview = format_page_plan_to_markdown(
                     page_plan.model_dump(),
                     structured_data.model_dump(),
@@ -365,6 +393,7 @@ def return_to_outline_review_from_layout_compose(
         get_default_hitl_workflow().update_state(
             config,
             {
+                "page_plan": None,
                 "approved_page_plan": None,
                 "is_outline_approved": False,
                 "layout_compose_session": None,

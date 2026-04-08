@@ -9,7 +9,7 @@ import gradio as gr
 
 from src.contracts.schemas import PagePlan, StructuredPaper
 from src.contracts.state import WorkflowState
-from src.services.artifact_store import get_output_paths
+from src.services.artifact_store import get_output_paths, load_cached_structured_data, load_page_plan
 from src.services.human_feedback import build_human_feedback_payload, empty_human_feedback, extract_human_feedback_text
 from src.services.preview_service import build_template_preview_path, take_local_screenshot
 from src.template.deterministic_selector import score_and_select_templates
@@ -42,6 +42,36 @@ from src.ui.updates import (
 from src.workflows.batch_runtime import render_current_workflow_preview
 from src.workflows.hitl_graph import get_default_hitl_workflow
 from src.workflows.hitl_nodes import normalize_layout_compose_session, normalize_visual_smoke_report
+
+
+def _load_snapshot_structured_paper(snapshot_values: dict[str, Any]) -> StructuredPaper:
+    current = snapshot_values.get("structured_paper")
+    if current:
+        return StructuredPaper.model_validate(current)
+
+    paper_folder_name = str(snapshot_values.get("paper_folder_name") or "").strip()
+    if not paper_folder_name:
+        raise ValueError("The paused workflow state is missing structured_paper and paper metadata.")
+    _, structured_json_path, _, _ = get_output_paths(paper_folder_name)
+    structured_data = load_cached_structured_data(structured_json_path)
+    if structured_data is None:
+        raise ValueError("The paused workflow state is missing structured_paper and no disk cache was found.")
+    return structured_data
+
+
+def _load_snapshot_page_plan(snapshot_values: dict[str, Any]) -> PagePlan:
+    for candidate in (snapshot_values.get("page_plan"), snapshot_values.get("approved_page_plan")):
+        if candidate:
+            return PagePlan.model_validate(candidate)
+
+    paper_folder_name = str(snapshot_values.get("paper_folder_name") or "").strip()
+    if not paper_folder_name:
+        raise ValueError("The paused workflow state is missing page_plan and paper metadata.")
+    _, _, planner_json_path, _ = get_output_paths(paper_folder_name)
+    page_plan = load_page_plan(planner_json_path)
+    if page_plan is None:
+        raise ValueError("The paused workflow state is missing page_plan and no disk cache was found.")
+    return page_plan
 
 def find_templates(
     background_color: str,
@@ -281,7 +311,7 @@ def run_extraction(
         paused_values = dict(paused_state.values or {})
         paper_overview = str(paused_values.get("paper_overview") or "").strip()
         if not paper_overview:
-            structured_data = StructuredPaper.model_validate(paused_values.get("structured_paper"))
+            structured_data = _load_snapshot_structured_paper(paused_values)
             paper_overview = format_paper_to_markdown(structured_data.model_dump())
         log("[Overview] Reader extraction complete. Review the source pack, revise if needed, or approve it to plan the webpage outline.")
         return (
@@ -354,6 +384,9 @@ def revise_extraction(
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
                 "patch_error": "",
+                "page_plan": None,
+                "approved_page_plan": None,
+                "coder_artifact": None,
                 "is_approved": False,
                 "shell_binding_review": None,
                 "shell_manual_selection": None,
@@ -370,7 +403,7 @@ def revise_extraction(
         paused_values = dict(paused_state.values or {})
         paper_overview = str(paused_values.get("paper_overview") or "").strip()
         if not paper_overview:
-            structured_data = StructuredPaper.model_validate(paused_values.get("structured_paper"))
+            structured_data = _load_snapshot_structured_paper(paused_values)
             paper_overview = format_paper_to_markdown(structured_data.model_dump())
         log("[Overview] Revised extraction complete. Review the updated source pack or approve it to plan the webpage outline.")
         return (
@@ -428,6 +461,9 @@ def approve_extraction_and_plan_outline(
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
                 "patch_error": "",
+                "page_plan": None,
+                "approved_page_plan": None,
+                "coder_artifact": None,
                 "is_approved": True,
                 "is_outline_approved": False,
                 "is_webpage_approved": False,
@@ -448,8 +484,8 @@ def approve_extraction_and_plan_outline(
             raise RuntimeError("Workflow did not pause at the outline review stage.")
         outline_overview = str(paused_values.get("outline_overview") or "").strip()
         if not outline_overview:
-            page_plan = PagePlan.model_validate(paused_values.get("page_plan"))
-            structured_data = StructuredPaper.model_validate(paused_values.get("structured_paper"))
+            page_plan = _load_snapshot_page_plan(paused_values)
+            structured_data = _load_snapshot_structured_paper(paused_values)
             outline_overview = format_page_plan_to_markdown(
                 page_plan.model_dump(),
                 structured_data.model_dump(),
@@ -519,7 +555,9 @@ def revise_outline(
             {
                 "human_directives": feedback_payload,
                 "is_outline_approved": False,
+                "page_plan": None,
                 "approved_page_plan": None,
+                "coder_artifact": None,
                 "patch_agent_output": "",
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
@@ -539,8 +577,8 @@ def revise_outline(
         paused_values = dict(paused_state.values or {})
         outline_overview = str(paused_values.get("outline_overview") or "").strip()
         if not outline_overview:
-            page_plan = PagePlan.model_validate(paused_values.get("page_plan"))
-            structured_data = StructuredPaper.model_validate(paused_values.get("structured_paper"))
+            page_plan = _load_snapshot_page_plan(paused_values)
+            structured_data = _load_snapshot_structured_paper(paused_values)
             outline_overview = format_page_plan_to_markdown(
                 page_plan.model_dump(),
                 structured_data.model_dump(),
@@ -597,7 +635,7 @@ def approve_outline_and_generate_draft(
         if str(snapshot_values.get("review_stage") or "") != "outline":
             raise ValueError("The first draft can only be generated from the outline review stage.")
 
-        approved_page_plan = PagePlan.model_validate(snapshot_values.get("page_plan"))
+        approved_page_plan = _load_snapshot_page_plan(snapshot_values)
         manual_layout_compose_enabled = _normalize_manual_layout_compose_enabled(manual_layout_compose_enabled)
         get_default_hitl_workflow().update_state(
             config,
@@ -608,7 +646,9 @@ def approve_outline_and_generate_draft(
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
                 "patch_error": "",
-                "approved_page_plan": approved_page_plan,
+                "page_plan": None,
+                "approved_page_plan": None,
+                "coder_artifact": None,
                 "manual_layout_compose_enabled": manual_layout_compose_enabled,
                 "is_outline_approved": True,
                 "is_webpage_approved": False,
@@ -653,8 +693,8 @@ def approve_outline_and_generate_draft(
         if review_stage == "outline":
             outline_overview = str(paused_values.get("outline_overview") or "").strip()
             if not outline_overview:
-                page_plan = PagePlan.model_validate(paused_values.get("page_plan"))
-                structured_data = StructuredPaper.model_validate(paused_values.get("structured_paper"))
+                page_plan = _load_snapshot_page_plan(paused_values)
+                structured_data = _load_snapshot_structured_paper(paused_values)
                 outline_overview = format_page_plan_to_markdown(
                     page_plan.model_dump(),
                     structured_data.model_dump(),
@@ -751,6 +791,7 @@ def request_webpage_revision(
             {
                 "human_directives": feedback_payload,
                 "coder_instructions": "",
+                "coder_artifact": None,
                 "patch_agent_output": "",
                 "revision_plan": None,
                 "targeted_replacement_plan": None,

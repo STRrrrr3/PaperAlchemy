@@ -5,6 +5,7 @@ from typing import Any
 from src.utils.html_utils import read_current_page_html
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from src.services.artifact_store import get_output_paths, load_coder_artifact
 from src.services.human_feedback import (
     build_multimodal_message_content,
     extract_human_feedback_images,
@@ -114,6 +115,11 @@ def _classify_edit_intent(feedback: Any, revision_plan: RevisionPlan | None) -> 
 
 def translator_node(state: WorkflowState) -> dict[str, Any]:
     artifact = _normalize_coder_artifact(state.get("coder_artifact"))
+    if artifact is None:
+        paper_folder_name = str(state.get("paper_folder_name") or "").strip()
+        if paper_folder_name:
+            _, _, _, coder_json_path = get_output_paths(paper_folder_name)
+            artifact = load_coder_artifact(coder_json_path)
     if not artifact:
         print("[Translator] missing coder artifact, skipping translation.")
         return {"revision_plan": RevisionPlan()}

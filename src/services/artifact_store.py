@@ -24,6 +24,19 @@ def load_cached_structured_data(path: Path) -> StructuredPaper | None:
         print(f"[PaperAlchemy] Structured cache is invalid, rerunning Reader: {exc}")
         return None
 
+
+def _load_model_artifact(path: Path, model_type: type[Any], label: str) -> Any | None:
+    if not path.exists():
+        return None
+
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            payload = json.load(file)
+        return model_type.model_validate(payload)
+    except Exception as exc:
+        print(f"[PaperAlchemy] Failed to load cached {label} from {path}: {exc}")
+        return None
+
 def save_structured_data(path: Path, structured_data: StructuredPaper) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as file:
@@ -54,6 +67,18 @@ def get_output_paths(paper_folder_name: str) -> tuple[Path, Path, Path, Path]:
 def get_template_profile_output_path(paper_folder_name: str) -> Path:
     output_dir = OUTPUT_DIR / paper_folder_name
     return output_dir / "template_profile.json"
+
+
+def load_page_plan(path: Path) -> PagePlan | None:
+    return _load_model_artifact(path, PagePlan, "page plan")
+
+
+def load_coder_artifact(path: Path) -> CoderArtifact | None:
+    return _load_model_artifact(path, CoderArtifact, "coder artifact")
+
+
+def load_template_profile(path: Path) -> TemplateProfile | None:
+    return _load_model_artifact(path, TemplateProfile, "template profile")
 
 def load_block_render_artifacts_from_disk(paper_folder_name: str) -> list[BlockRenderArtifact]:
     output_dir = OUTPUT_DIR / paper_folder_name

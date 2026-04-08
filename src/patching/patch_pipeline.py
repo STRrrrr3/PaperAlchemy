@@ -18,6 +18,12 @@ from src.utils.html_utils import (
     read_text_with_fallback,
 )
 from src.utils.json_utils import to_pretty_json
+from src.services.artifact_store import (
+    get_output_paths,
+    load_cached_structured_data,
+    load_coder_artifact,
+    load_page_plan,
+)
 from src.services.llm import get_llm
 from src.validators.page_manifest import (
     GLOBAL_ATTR,
@@ -124,6 +130,42 @@ def _normalize_targeted_replacement_plan(plan: Any) -> TargetedReplacementPlan |
         return TargetedReplacementPlan.model_validate(plan)
     except Exception:
         return None
+
+
+def _load_workflow_coder_artifact(state: WorkflowState) -> CoderArtifact | None:
+    artifact = _normalize_coder_artifact(state.get("coder_artifact"))
+    if artifact is not None:
+        return artifact
+    paper_folder_name = str(state.get("paper_folder_name") or "").strip()
+    if not paper_folder_name:
+        return None
+    _, _, _, coder_json_path = get_output_paths(paper_folder_name)
+    return load_coder_artifact(coder_json_path)
+
+
+def _load_workflow_page_plan(state: WorkflowState) -> PagePlan | None:
+    page_plan = _normalize_page_plan(state.get("page_plan"))
+    if page_plan is not None:
+        return page_plan
+    page_plan = _normalize_page_plan(state.get("approved_page_plan"))
+    if page_plan is not None:
+        return page_plan
+    paper_folder_name = str(state.get("paper_folder_name") or "").strip()
+    if not paper_folder_name:
+        return None
+    _, _, planner_json_path, _ = get_output_paths(paper_folder_name)
+    return load_page_plan(planner_json_path)
+
+
+def _load_workflow_structured_paper(state: WorkflowState) -> StructuredPaper | None:
+    structured_paper = _normalize_structured_paper(state.get("structured_paper"))
+    if structured_paper is not None:
+        return structured_paper
+    paper_folder_name = str(state.get("paper_folder_name") or "").strip()
+    if not paper_folder_name:
+        return None
+    _, structured_json_path, _, _ = get_output_paths(paper_folder_name)
+    return load_cached_structured_data(structured_json_path)
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -1029,9 +1071,9 @@ def _strict_revision_validation_enabled(manifest: PageManifest) -> bool:
 
 
 def patch_agent_node(state: WorkflowState) -> dict[str, Any]:
-    artifact = _normalize_coder_artifact(state.get("coder_artifact"))
-    page_plan = _normalize_page_plan(state.get("page_plan"))
-    structured_paper = _normalize_structured_paper(state.get("structured_paper"))
+    artifact = _load_workflow_coder_artifact(state)
+    page_plan = _load_workflow_page_plan(state)
+    structured_paper = _load_workflow_structured_paper(state)
     revision_plan = _normalize_revision_plan(state.get("revision_plan"))
     current_html = read_current_page_html(artifact, missing_value="")
     template_reference_html = read_template_reference_html(page_plan, missing_value="")
@@ -1301,9 +1343,9 @@ def patch_executor_node(state: WorkflowState) -> dict[str, Any]:
         print(f"[PatchExecutor] upstream safe fail: {existing_error}")
         return {"patch_error": existing_error}
 
-    artifact = _normalize_coder_artifact(state.get("coder_artifact"))
-    page_plan = _normalize_page_plan(state.get("page_plan"))
-    structured_paper = _normalize_structured_paper(state.get("structured_paper"))
+    artifact = _load_workflow_coder_artifact(state)
+    page_plan = _load_workflow_page_plan(state)
+    structured_paper = _load_workflow_structured_paper(state)
     revision_plan = _normalize_revision_plan(state.get("revision_plan"))
     targeted_plan = _normalize_targeted_replacement_plan(state.get("targeted_replacement_plan"))
 
@@ -1601,7 +1643,6 @@ def patch_executor_node(state: WorkflowState) -> dict[str, Any]:
         f"{regenerated_count} regenerated block(s)."
     )
     return {
-        "coder_artifact": updated_artifact,
         "patch_error": "",
         "patch_agent_output": _summarize_targeted_plan(targeted_plan),
     }

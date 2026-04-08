@@ -11,8 +11,10 @@ from src.agents.planner import run_planner_agent
 from src.agents.reader import run_reader_agent
 from src.contracts.schemas import CoderArtifact
 from src.services.artifact_store import (
+    get_output_paths,
     get_template_profile_output_path,
     load_cached_structured_data,
+    load_coder_artifact,
     save_coder_artifact,
     save_page_plan,
     save_structured_data,
@@ -151,6 +153,11 @@ def run_langgraph_batch(
 
 def render_current_workflow_preview(state_values: dict[str, Any]) -> tuple[str, str]:
     coder_artifact = normalize_coder_artifact(state_values.get("coder_artifact"))
+    if not coder_artifact:
+        paper_folder_name = str(state_values.get("paper_folder_name") or "").strip()
+        if paper_folder_name:
+            _, _, _, coder_json_path = get_output_paths(paper_folder_name)
+            coder_artifact = load_coder_artifact(coder_json_path)
     if not coder_artifact:
         raise RuntimeError("Workflow preview is unavailable because coder_artifact is missing.")
     entry_html_path = Path(coder_artifact.entry_html).resolve()
