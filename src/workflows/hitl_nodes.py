@@ -20,6 +20,7 @@ from src.agents.reader import _load_reader_inputs, reader_node, run_reader_agent
 from src.agents.reader_critic import build_critic_router, critic_node
 from src.contracts.schemas import (
     CoderArtifact,
+    CssRevisionPlan,
     LayoutComposeSession,
     LayoutComposeUpdate,
     PagePlan,
@@ -86,6 +87,8 @@ class CoderPhaseState(CoderState, total=False):
     patch_error: str
     revision_plan: Any
     targeted_replacement_plan: Any
+    css_revision_plan: CssRevisionPlan | None
+    css_revision_summary: str
     patch_agent_output: str
     shell_binding_review: ShellBindingReview | None
     shell_manual_selection: ShellManualSelection | None
@@ -507,6 +510,8 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
         "patch_error": "",
         "revision_plan": None,
         "targeted_replacement_plan": None,
+        "css_revision_plan": None,
+        "css_revision_summary": "",
         "patch_agent_output": "",
         "shell_binding_review": None,
         "shell_manual_selection": None,
@@ -841,6 +846,8 @@ def _coder_phase_finalize_node(state: CoderPhaseState) -> dict[str, Any]:
         "patch_error": "",
         "revision_plan": None,
         "targeted_replacement_plan": None,
+        "css_revision_plan": None,
+        "css_revision_summary": "",
         "patch_agent_output": "",
         "shell_binding_review": None,
         "shell_manual_selection": None,

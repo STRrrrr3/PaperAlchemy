@@ -172,7 +172,7 @@ def build_app() -> gr.Blocks:
                         "approve the extraction to plan the webpage outline. Revise the outline until it matches the "
                         "sections you want on the final page, optionally enable Layout Compose before generating the "
                         "first draft, then attach "
-                        "screenshots and request webpage revisions through the Translator loop until the draft is ready to approve."
+                        "screenshots and request webpage revisions through the CSS Revision Agent loop until the draft is ready to approve."
                     ),
                     lines=24,
                     interactive=False,
@@ -357,6 +357,7 @@ def build_app() -> gr.Blocks:
                 paper_review_accordion,
                 outline_review_accordion,
                 workflow_thread_state,
+                preview_image,
                 current_render_html_state,
                 *stage_action_outputs,
                 *compose_outputs,

@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.agents.translator import edit_intent_router_node, translator_node
-from src.patching.patch_pipeline import patch_agent_node, patch_executor_node
+from src.revision.css_revision import css_revision_agent_node, css_revision_executor_node
 from src.services.preview_service import PREVIEW_CACHE_DIR
 from src.template.resources import ensure_autopage_template_assets
 from src.ui.app_builder import APP_CSS, build_app as _build_app
@@ -94,7 +93,6 @@ from src.workflows.hitl_nodes import (
     build_reader_phase_graph,
     layout_compose_prepare_node,
     layout_compose_review_node,
-    non_patch_feedback_node,
     normalize_coder_artifact,
     normalize_layout_compose_session,
     normalize_layout_compose_update,
@@ -111,7 +109,6 @@ from src.workflows.hitl_nodes import (
 )
 from src.workflows.hitl_routes import (
     draft_recovery_router,
-    edit_intent_route_router,
     human_review_router,
     outline_review_router,
     webpage_review_router,
@@ -130,17 +127,13 @@ def build_hitl_workflow():
         layout_compose_prepare_node=layout_compose_prepare_node,
         layout_compose_review_node=layout_compose_review_node,
         webpage_review_node=webpage_review_node,
-        translator_node=translator_node,
-        edit_intent_router_node=edit_intent_router_node,
-        non_patch_feedback_node=non_patch_feedback_node,
-        patch_agent_node=patch_agent_node,
-        patch_executor_node=patch_executor_node,
+        css_revision_agent_node=css_revision_agent_node,
+        css_revision_executor_node=css_revision_executor_node,
         coder_phase_node=build_coder_phase_graph(),
         human_review_router=human_review_router,
         outline_review_router=outline_review_router,
         draft_recovery_router=draft_recovery_router,
         webpage_review_router=webpage_review_router,
-        edit_intent_route_router=edit_intent_route_router,
     )
 
 

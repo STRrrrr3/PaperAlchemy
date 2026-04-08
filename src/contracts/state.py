@@ -5,6 +5,7 @@ from src.services.human_feedback import HumanFeedbackPayload
 from src.contracts.schemas import (
     BlockRenderArtifact,
     BlockRenderSpec,
+    CssRevisionPlan,
     CoderArtifact,
     LayoutComposeSession,
     LayoutComposeUpdate,
@@ -81,6 +82,8 @@ class WorkflowState(TypedDict):
     patch_agent_output: str
     revision_plan: RevisionPlan | None
     targeted_replacement_plan: TargetedReplacementPlan | None
+    css_revision_plan: CssRevisionPlan | None
+    css_revision_summary: str
     patch_error: str
     paper_overview: str
     outline_overview: str

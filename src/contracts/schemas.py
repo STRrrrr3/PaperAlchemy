@@ -639,6 +639,57 @@ class OverrideCssRule(BaseModel):
         return self
 
 
+class CssRevisionRule(BaseModel):
+    selector: str
+    declarations: Dict[str, str] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_rule(self) -> "CssRevisionRule":
+        clean = str(self.selector or "").strip()
+        if not clean:
+            raise ValueError("CSS revision rules must provide a selector.")
+        if not self.declarations:
+            raise ValueError("CSS revision rules must include at least one declaration.")
+        if any(char in clean for char in ("{", "}", "@", ";", "\n", "\r")):
+            raise ValueError(f"Selector contains forbidden characters: '{clean}'")
+        return self
+
+
+class ContentReplacement(BaseModel):
+    block_id: Optional[str] = None
+    slot_id: Optional[SlotId] = None
+    global_id: Optional[GlobalAnchorId] = None
+    scope: Literal["slot", "block", "global"]
+    html: str
+
+    @model_validator(mode="after")
+    def validate_scope(self) -> "ContentReplacement":
+        if self.scope == "slot":
+            if not self.block_id or not self.slot_id:
+                raise ValueError("slot scope replacements must provide block_id and slot_id.")
+            self.global_id = None
+        elif self.scope == "block":
+            if not self.block_id:
+                raise ValueError("block scope replacements must provide block_id.")
+            self.slot_id = None
+            self.global_id = None
+        elif self.scope == "global":
+            if not self.global_id:
+                raise ValueError("global scope replacements must provide global_id.")
+            self.block_id = None
+            self.slot_id = None
+        else:
+            raise ValueError(f"Unsupported replacement scope '{self.scope}'.")
+        return self
+
+
+class CssRevisionPlan(BaseModel):
+    css_rules: List[CssRevisionRule] = Field(default_factory=list)
+    content_replacements: List[ContentReplacement] = Field(default_factory=list)
+    revision_summary: str = ""
+    not_possible_explanation: str = ""
+
+
 class FallbackBlock(BaseModel):
     block_id: str
     reason: str

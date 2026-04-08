@@ -20,17 +20,13 @@ def build_hitl_workflow(
     layout_compose_prepare_node: Callable[[WorkflowState], dict[str, Any]],
     layout_compose_review_node: Callable[[WorkflowState], dict[str, Any]],
     webpage_review_node: Callable[[WorkflowState], dict[str, Any]],
-    translator_node: Callable[[WorkflowState], dict[str, Any]],
-    edit_intent_router_node: Callable[[WorkflowState], dict[str, Any]],
-    non_patch_feedback_node: Callable[[WorkflowState], dict[str, Any]],
-    patch_agent_node: Callable[[WorkflowState], dict[str, Any]],
-    patch_executor_node: Callable[[WorkflowState], dict[str, Any]],
+    css_revision_agent_node: Callable[[WorkflowState], dict[str, Any]],
+    css_revision_executor_node: Callable[[WorkflowState], dict[str, Any]],
     coder_phase_node: Callable[[WorkflowState], dict[str, Any]],
     human_review_router: Callable[[WorkflowState], str],
     outline_review_router: Callable[[WorkflowState], str],
     draft_recovery_router: Callable[[WorkflowState], str],
     webpage_review_router: Callable[[WorkflowState], str],
-    edit_intent_route_router: Callable[[WorkflowState], str],
 ):
     workflow = StateGraph(WorkflowState)
     workflow.add_node("reader", reader_phase_node)
@@ -41,11 +37,8 @@ def build_hitl_workflow(
     workflow.add_node("layout_compose_prepare", layout_compose_prepare_node)
     workflow.add_node("layout_compose_review", layout_compose_review_node)
     workflow.add_node("webpage_review", webpage_review_node)
-    workflow.add_node("translator", translator_node)
-    workflow.add_node("edit_intent_router", edit_intent_router_node)
-    workflow.add_node("non_patch_feedback", non_patch_feedback_node)
-    workflow.add_node("patch_agent", patch_agent_node)
-    workflow.add_node("patch_executor", patch_executor_node)
+    workflow.add_node("css_revision_agent", css_revision_agent_node)
+    workflow.add_node("css_revision_executor", css_revision_executor_node)
     workflow.add_node("coder", coder_phase_node)
 
     workflow.set_entry_point("reader")
@@ -83,22 +76,12 @@ def build_hitl_workflow(
         "webpage_review",
         webpage_review_router,
         {
-            "translator": "translator",
+            "css_revision_agent": "css_revision_agent",
             "end": END,
         },
     )
-    workflow.add_edge("translator", "edit_intent_router")
-    workflow.add_conditional_edges(
-        "edit_intent_router",
-        edit_intent_route_router,
-        {
-            "patch_agent": "patch_agent",
-            "non_patch_feedback": "non_patch_feedback",
-        },
-    )
-    workflow.add_edge("non_patch_feedback", "webpage_review")
-    workflow.add_edge("patch_agent", "patch_executor")
-    workflow.add_edge("patch_executor", "webpage_review")
+    workflow.add_edge("css_revision_agent", "css_revision_executor")
+    workflow.add_edge("css_revision_executor", "webpage_review")
 
     memory = MemorySaver()
     return workflow.compile(

@@ -25,9 +25,4 @@ def draft_recovery_router(state: WorkflowState) -> str:
 def webpage_review_router(state: WorkflowState) -> str:
     if bool(state.get("is_webpage_approved")):
         return "end"
-    return "translator"
-
-def edit_intent_route_router(state: WorkflowState) -> str:
-    if str(state.get("edit_intent") or "").strip().lower() == "non_patch":
-        return "non_patch_feedback"
-    return "patch_agent"
+    return "css_revision_agent"

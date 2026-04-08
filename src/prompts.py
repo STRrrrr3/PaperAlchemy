@@ -455,6 +455,63 @@ PATCH_AGENT_USER_PROMPT_TEMPLATE = """Generate grounded webpage patch output now
 """
 
 # ---------------------------------------------------------------------------
+# CSS-first webpage revision
+# ---------------------------------------------------------------------------
+
+CSS_REVISION_AGENT_SYSTEM_PROMPT = """You are the CSS Revision Agent in PaperAlchemy.
+Your job is to turn multimodal webpage revision feedback into a strict CssRevisionPlan.
+
+You will receive:
+1. HUMAN_FEEDBACK text
+2. The current page screenshot as an image
+3. Optional user-provided reference screenshots as images
+4. CURRENT_PAGE_MANIFEST_JSON
+5. CURRENT_HTML
+6. TEMPLATE_STYLE_CONTEXT_JSON
+7. AVAILABLE_PAPER_ASSETS_JSON
+
+Rules:
+1. Treat the current page screenshot as ground truth for what the user is seeing right now.
+2. Prefer CSS rules for any visual, spacing, alignment, sizing, navigation, wrapper, or template-structure fix.
+3. CSS selectors may target any existing element in CURRENT_HTML, including classes, ids, descendants, pseudo-classes, and data-pa-* anchors.
+4. Use content_replacements only when the request changes grounded text, links, media, or other HTML content.
+5. Content replacements must target existing manifest anchors only:
+   - slot: existing block_id + slot_id
+   - block: existing block_id
+   - global: existing global_id
+6. Never use content_replacements to redesign the whole page or replace arbitrary wrappers outside anchored targets.
+7. If the request is truly impossible without replanning or regenerating structure, set not_possible_explanation and leave css_rules/content_replacements empty.
+8. Use AVAILABLE_PAPER_ASSETS_JSON for local paper images. Never invent local asset paths.
+9. Use TEMPLATE_STYLE_CONTEXT_JSON to understand current computed styles before writing CSS.
+10. Keep the plan minimal and concrete. Avoid redundant rules.
+11. Return only data that matches the structured CssRevisionPlan schema.
+"""
+
+CSS_REVISION_AGENT_USER_PROMPT_TEMPLATE = """Generate a CssRevisionPlan for the current webpage revision request.
+
+### HUMAN_FEEDBACK
+{human_feedback}
+
+### CURRENT_ENTRY_HTML_PATH
+{current_entry_html_path}
+
+### CURRENT_TEMPLATE_ID
+{current_template_id}
+
+### CURRENT_PAGE_MANIFEST_JSON
+{current_page_manifest_json}
+
+### CURRENT_HTML
+{current_html}
+
+### TEMPLATE_STYLE_CONTEXT_JSON
+{template_style_context_json}
+
+### AVAILABLE_PAPER_ASSETS_JSON
+{available_paper_assets_json}
+"""
+
+# ---------------------------------------------------------------------------
 # First-draft webpage generation
 # ---------------------------------------------------------------------------
 
@@ -1159,6 +1216,8 @@ __all__ = [
     "BLOCK_RENDER_USER_PROMPT_TEMPLATE",
     "BLOCK_REGEN_SYSTEM_PROMPT",
     "BLOCK_REGEN_USER_PROMPT_TEMPLATE",
+    "CSS_REVISION_AGENT_SYSTEM_PROMPT",
+    "CSS_REVISION_AGENT_USER_PROMPT_TEMPLATE",
     "CODER_SYSTEM_PROMPT",
     "CODER_USER_PROMPT_TEMPLATE",
     "CRITIC_SYSTEM_PROMPT",

@@ -9,7 +9,13 @@ import gradio as gr
 
 from src.contracts.schemas import PagePlan, StructuredPaper
 from src.contracts.state import WorkflowState
-from src.services.artifact_store import get_output_paths, load_cached_structured_data, load_page_plan
+from src.services.artifact_store import (
+    get_output_paths,
+    get_template_profile_output_path,
+    load_cached_structured_data,
+    load_coder_artifact,
+    load_page_plan,
+)
 from src.services.human_feedback import build_human_feedback_payload, empty_human_feedback, extract_human_feedback_text
 from src.services.preview_service import build_template_preview_path, take_local_screenshot
 from src.template.deterministic_selector import score_and_select_templates
@@ -72,6 +78,137 @@ def _load_snapshot_page_plan(snapshot_values: dict[str, Any]) -> PagePlan:
     if page_plan is None:
         raise ValueError("The paused workflow state is missing page_plan and no disk cache was found.")
     return page_plan
+
+
+def _build_cached_resume_state(
+    *,
+    paper_folder_name: str,
+    user_constraints: dict[str, Any],
+    generation_constraints: dict[str, Any],
+    selected_candidate: dict[str, Any],
+) -> tuple[str, dict[str, Any], list[str]] | None:
+    _, structured_json_path, planner_json_path, coder_json_path = get_output_paths(paper_folder_name)
+    structured_data = load_cached_structured_data(structured_json_path)
+    if structured_data is None:
+        return None
+
+    page_plan = load_page_plan(planner_json_path)
+    coder_artifact = load_coder_artifact(coder_json_path)
+    selected_template_id = str(selected_candidate.get("template_id") or "").strip()
+    planned_template_id = (
+        str(page_plan.template_selection.selected_template_id or "").strip()
+        if page_plan is not None
+        else ""
+    )
+    rendered_template_id = (
+        str(coder_artifact.selected_template_id or "").strip()
+        if coder_artifact is not None
+        else ""
+    )
+    template_profile_path = get_template_profile_output_path(paper_folder_name)
+    paper_overview = format_paper_to_markdown(structured_data.model_dump())
+    outline_overview = ""
+    if page_plan is not None:
+        outline_overview = format_page_plan_to_markdown(
+            page_plan.model_dump(),
+            structured_data.model_dump(),
+        )
+
+    base_state: dict[str, Any] = {
+        "paper_folder_name": paper_folder_name,
+        "user_constraints": user_constraints,
+        "generation_constraints": generation_constraints,
+        "manual_layout_compose_enabled": False,
+        "human_directives": empty_human_feedback(),
+        "coder_instructions": "",
+        "edit_intent": None,
+        "edit_intent_reason": "",
+        "patch_agent_output": "",
+        "revision_plan": None,
+        "targeted_replacement_plan": None,
+        "css_revision_plan": None,
+        "css_revision_summary": "",
+        "patch_error": "",
+        "paper_overview": paper_overview,
+        "outline_overview": outline_overview,
+        "is_approved": False,
+        "is_outline_approved": False,
+        "is_webpage_approved": False,
+        "review_stage": "overview",
+        "template_candidates": [],
+        "selected_template": None,
+        "template_profile": None,
+        "template_profile_path": str(template_profile_path) if template_profile_path.exists() else "",
+        "template_compile_cache_hit": template_profile_path.exists(),
+        "block_render_artifacts": [],
+        "structured_paper": structured_data,
+        "page_plan": None,
+        "approved_page_plan": None,
+        "coder_artifact": None,
+        "shell_binding_review": None,
+        "shell_manual_selection": None,
+        "layout_compose_session": None,
+        "layout_compose_update": None,
+        "visual_smoke_report": None,
+    }
+
+    if (
+        page_plan is not None
+        and coder_artifact is not None
+        and Path(str(coder_artifact.entry_html or "")).exists()
+        and selected_template_id
+        and planned_template_id == selected_template_id
+        and rendered_template_id == selected_template_id
+    ):
+        return (
+            "webpage",
+            {
+                **base_state,
+                "review_stage": "webpage",
+                "is_approved": True,
+                "is_outline_approved": True,
+                "page_plan": page_plan,
+                "approved_page_plan": page_plan,
+                "coder_artifact": coder_artifact,
+            },
+            [
+                f"[Resume] Found cached webpage draft for {paper_folder_name} using template {selected_template_id}.",
+            ],
+        )
+
+    if page_plan is not None and selected_template_id and planned_template_id == selected_template_id:
+        return (
+            "outline",
+            {
+                **base_state,
+                "review_stage": "outline",
+                "is_approved": True,
+                "page_plan": page_plan,
+            },
+            [
+                f"[Resume] Found cached webpage outline for {paper_folder_name} using template {selected_template_id}.",
+            ],
+        )
+
+    resume_logs: list[str] = []
+    if page_plan is not None and selected_template_id and planned_template_id and planned_template_id != selected_template_id:
+        resume_logs.append(
+            "[Resume] Cached outline uses template "
+            f"{planned_template_id}, which does not match the current selection {selected_template_id}. "
+            "Falling back to extraction review."
+        )
+    if coder_artifact is not None and selected_template_id and rendered_template_id and rendered_template_id != selected_template_id:
+        resume_logs.append(
+            "[Resume] Cached webpage draft uses template "
+            f"{rendered_template_id}, which does not match the current selection {selected_template_id}. "
+            "Falling back to extraction review."
+        )
+    resume_logs.append(f"[Resume] Found cached structured paper for {paper_folder_name}.")
+    return (
+        "overview",
+        base_state,
+        resume_logs,
+    )
 
 def find_templates(
     background_color: str,
@@ -259,14 +396,76 @@ def run_extraction(
         log(f"[UI] User constraints: {json.dumps(user_constraints, ensure_ascii=False)}")
         log(f"[Assets] Template resources ready at {synced_assets.templates_dir}")
 
-        if not ensure_parsed_output(safe_pdf_filename, output_dir):
-            raise RuntimeError("PDF parsing failed. Please inspect the parser output logs.")
-
         generation_constraints = build_generation_constraints(
             synced_assets=synced_assets,
             selected_candidate=selected_candidate,
             ranked_candidates=ranked_candidates,
         )
+        cached_resume = _build_cached_resume_state(
+            paper_folder_name=paper_folder_name,
+            user_constraints=user_constraints,
+            generation_constraints=generation_constraints,
+            selected_candidate=selected_candidate,
+        )
+        if cached_resume is not None:
+            review_stage, resume_state, resume_logs = cached_resume
+            thread_id = f"hitl::{paper_folder_name}::{uuid4().hex}"
+            config = {"configurable": {"thread_id": thread_id}}
+            as_node = {
+                "overview": "overview",
+                "outline": "outline_review",
+                "webpage": "webpage_review",
+            }[review_stage]
+            get_default_hitl_workflow().update_state(config, resume_state, as_node=as_node)
+            for message in resume_logs:
+                log(message)
+
+            if review_stage == "webpage":
+                preview_image_path, entry_html_path = render_current_workflow_preview(resume_state)
+                log(f"[Preview] Rendered cached webpage screenshot from {entry_html_path}")
+                log("[Webpage] Resumed the cached draft from disk. Review it, then approve it or request a revision.")
+                return (
+                    "\n".join(run_log_lines),
+                    str(resume_state.get("paper_overview") or ""),
+                    str(resume_state.get("outline_overview") or ""),
+                    *_review_accordion_updates("webpage"),
+                    thread_id,
+                    _visible_preview_update(preview_image_path),
+                    entry_html_path,
+                    *_stage_action_updates("webpage"),
+                    *_layout_compose_ui_hidden(),
+                )
+
+            if review_stage == "outline":
+                log("[Outline] Resumed the cached outline review from disk.")
+                return (
+                    "\n".join(run_log_lines),
+                    str(resume_state.get("paper_overview") or ""),
+                    str(resume_state.get("outline_overview") or ""),
+                    *_review_accordion_updates("outline"),
+                    thread_id,
+                    gr.update(),
+                    "",
+                    *_stage_action_updates("outline"),
+                    *_layout_compose_ui_hidden(),
+                )
+
+            log("[Overview] Resumed the cached extraction review from disk.")
+            return (
+                "\n".join(run_log_lines),
+                str(resume_state.get("paper_overview") or ""),
+                "",
+                *_review_accordion_updates("overview"),
+                thread_id,
+                gr.update(),
+                "",
+                *_stage_action_updates("overview"),
+                *_layout_compose_ui_hidden(),
+            )
+
+        if not ensure_parsed_output(safe_pdf_filename, output_dir):
+            raise RuntimeError("PDF parsing failed. Please inspect the parser output logs.")
+
         thread_id = f"hitl::{paper_folder_name}::{uuid4().hex}"
         config = {"configurable": {"thread_id": thread_id}}
         initial_state: WorkflowState = {
@@ -281,6 +480,8 @@ def run_extraction(
             "patch_agent_output": "",
             "revision_plan": None,
             "targeted_replacement_plan": None,
+            "css_revision_plan": None,
+            "css_revision_summary": "",
             "patch_error": "",
             "paper_overview": "",
             "outline_overview": "",
@@ -320,6 +521,7 @@ def run_extraction(
             "",
             *_review_accordion_updates("overview"),
             thread_id,
+            gr.update(),
             "",
             *_stage_action_updates("overview"),
             *_layout_compose_ui_hidden(),
@@ -332,6 +534,7 @@ def run_extraction(
             "",
             *_review_accordion_updates("webpage"),
             "",
+            gr.update(),
             "",
             *_stage_action_updates("none"),
             *_layout_compose_ui_hidden(),
@@ -383,6 +586,8 @@ def revise_extraction(
                 "patch_agent_output": "",
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
+                "css_revision_plan": None,
+                "css_revision_summary": "",
                 "patch_error": "",
                 "page_plan": None,
                 "approved_page_plan": None,
@@ -460,6 +665,8 @@ def approve_extraction_and_plan_outline(
                 "patch_agent_output": "",
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
+                "css_revision_plan": None,
+                "css_revision_summary": "",
                 "patch_error": "",
                 "page_plan": None,
                 "approved_page_plan": None,
@@ -561,6 +768,8 @@ def revise_outline(
                 "patch_agent_output": "",
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
+                "css_revision_plan": None,
+                "css_revision_summary": "",
                 "patch_error": "",
                 "shell_binding_review": None,
                 "shell_manual_selection": None,
@@ -645,6 +854,8 @@ def approve_outline_and_generate_draft(
                 "patch_agent_output": "",
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
+                "css_revision_plan": None,
+                "css_revision_summary": "",
                 "patch_error": "",
                 "page_plan": None,
                 "approved_page_plan": None,
@@ -795,6 +1006,8 @@ def request_webpage_revision(
                 "patch_agent_output": "",
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
+                "css_revision_plan": None,
+                "css_revision_summary": "",
                 "patch_error": "",
                 "is_webpage_approved": False,
                 "visual_smoke_report": None,
@@ -802,50 +1015,38 @@ def request_webpage_revision(
             as_node="webpage_review",
         )
 
-        log("[Translator] Resuming workflow through Translator -> EditIntentRouter -> Patch pipeline...")
+        log("[CSSRevision] Resuming workflow through CSS Revision Agent -> CSS Revision Executor...")
         get_default_hitl_workflow().invoke(None, config=config)
         paused_state = get_default_hitl_workflow().get_state(config)
         paused_values = dict(paused_state.values or {})
-        edit_intent = str(paused_values.get("edit_intent") or "").strip().lower()
-        edit_intent_reason = str(paused_values.get("edit_intent_reason") or "").strip()
         patch_error = str(paused_values.get("patch_error") or "").strip()
-        patch_agent_output = str(paused_values.get("patch_agent_output") or "").strip()
-        targeted_replacement_plan = paused_values.get("targeted_replacement_plan") or {}
-        if hasattr(targeted_replacement_plan, "model_dump"):
-            targeted_replacement_plan = targeted_replacement_plan.model_dump()
-        if isinstance(targeted_replacement_plan, dict):
-            replacements_count = len(targeted_replacement_plan.get("replacements") or [])
-            style_change_count = len(targeted_replacement_plan.get("style_changes") or [])
-            attribute_change_count = len(targeted_replacement_plan.get("attribute_changes") or [])
-            override_rule_count = len(targeted_replacement_plan.get("override_css_rules") or [])
-            fallback_count = len(targeted_replacement_plan.get("fallback_blocks") or [])
+        css_revision_summary = str(paused_values.get("css_revision_summary") or "").strip()
+        css_revision_plan = paused_values.get("css_revision_plan")
+        if hasattr(css_revision_plan, "model_dump"):
+            css_revision_plan = css_revision_plan.model_dump()
+        if isinstance(css_revision_plan, dict):
+            css_rule_count = len(css_revision_plan.get("css_rules") or [])
+            replacement_count = len(css_revision_plan.get("content_replacements") or [])
         else:
-            replacements_count = 0
-            style_change_count = 0
-            attribute_change_count = 0
-            override_rule_count = 0
-            fallback_count = 0
-        if edit_intent == "non_patch":
-            if edit_intent_reason:
-                log(f"[EditIntentRouter] Routed revision to non_patch: {edit_intent_reason}")
-            if patch_error:
-                log(f"[Patch] Skipped patch flow: {patch_error}")
-        elif patch_error:
-            log(f"[Patch] Safe fail: {patch_error}")
-        elif replacements_count or style_change_count or attribute_change_count or override_rule_count or fallback_count:
+            css_rule_count = 0
+            replacement_count = 0
+
+        if patch_error:
+            log(f"[CSSRevision] Safe fail: {patch_error}")
+        elif css_rule_count or replacement_count:
             log(
-                "[Patch] Anchored DOM revision applied: "
-                f"{replacements_count} targeted replacement(s), "
-                f"{style_change_count} style change(s), "
-                f"{attribute_change_count} attribute change(s), "
-                f"{override_rule_count} override css rule(s), "
-                f"{fallback_count} regenerated block(s)."
+                "[CSSRevision] Applied: "
+                f"{css_rule_count} css rule(s), "
+                f"{replacement_count} content replacement(s)."
             )
-        elif patch_agent_output:
-            log(f"[Patch] Anchored DOM revision applied: {patch_agent_output}")
+        elif css_revision_summary:
+            log(f"[CSSRevision] Applied: {css_revision_summary}")
         preview_image_path, entry_html_path = render_current_workflow_preview(paused_values)
         log(f"[Preview] Rendered revised webpage screenshot from {entry_html_path}")
-        log("[Webpage] Revised draft ready. Review it, then approve it or request another revision.")
+        if patch_error:
+            log("[Webpage] The current draft was not modified. Review it, then approve it or request another revision.")
+        else:
+            log("[Webpage] Revised draft ready. Review it, then approve it or request another revision.")
         return (
             "\n".join(run_log_lines),
             *_review_accordion_updates("webpage"),
@@ -900,6 +1101,8 @@ def approve_webpage(
                 "patch_agent_output": "",
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
+                "css_revision_plan": None,
+                "css_revision_summary": "",
                 "patch_error": "",
                 "is_webpage_approved": True,
                 "visual_smoke_report": None,
