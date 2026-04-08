@@ -21,6 +21,8 @@ from src.ui.review_handlers import (
     revise_extraction,
     revise_outline,
     run_extraction,
+    show_next_webpage_version,
+    show_previous_webpage_version,
 )
 from src.ui.updates import _layout_compose_ui_hidden, _review_accordion_updates, _stage_action_updates
 
@@ -54,6 +56,7 @@ def build_app() -> gr.Blocks:
         selected_candidate_state = gr.State(None)
         workflow_thread_state = gr.State("")
         current_render_html_state = gr.State("")
+        revision_history_state = gr.State({})
 
         gr.Markdown("# PaperAlchemy")
 
@@ -164,6 +167,19 @@ def build_app() -> gr.Blocks:
                         interactive=False,
                         visible=False,
                     )
+                    with gr.Row():
+                        previous_version_button = gr.Button(
+                            "Previous Version",
+                            variant="secondary",
+                            interactive=False,
+                            visible=False,
+                        )
+                        next_version_button = gr.Button(
+                            "Next Version",
+                            variant="secondary",
+                            interactive=False,
+                            visible=False,
+                        )
                 system_logs = gr.Textbox(
                     label="System Logs",
                     value=(
@@ -171,8 +187,8 @@ def build_app() -> gr.Blocks:
                         "a reviewable source pack. Use Human Feedback plus Revise Extraction until satisfied, then "
                         "approve the extraction to plan the webpage outline. Revise the outline until it matches the "
                         "sections you want on the final page, optionally enable Layout Compose before generating the "
-                        "first draft, then attach "
-                        "screenshots and request webpage revisions through the CSS Revision Agent loop until the draft is ready to approve."
+                        "first draft, then attach screenshots, request webpage revisions, and use Previous/Next Version "
+                        "to restore saved webpage states until the draft is ready to approve."
                     ),
                     lines=24,
                     interactive=False,
@@ -286,6 +302,8 @@ def build_app() -> gr.Blocks:
             approve_outline_button,
             request_revision_button,
             approve_webpage_button,
+            previous_version_button,
+            next_version_button,
         ]
 
         compose_outputs = [
@@ -323,6 +341,7 @@ def build_app() -> gr.Blocks:
                 current_render_html_state,
                 *stage_action_outputs,
                 *compose_outputs,
+                revision_history_state,
             ],
             api_name="find_templates",
         )
@@ -343,6 +362,7 @@ def build_app() -> gr.Blocks:
                 current_render_html_state,
                 *stage_action_outputs,
                 *compose_outputs,
+                revision_history_state,
             ],
             api_name="preview_template",
         )
@@ -361,6 +381,7 @@ def build_app() -> gr.Blocks:
                 current_render_html_state,
                 *stage_action_outputs,
                 *compose_outputs,
+                revision_history_state,
             ],
             api_name="extract_and_review",
         )
@@ -376,6 +397,7 @@ def build_app() -> gr.Blocks:
                 outline_review_accordion,
                 *stage_action_outputs,
                 *compose_outputs,
+                revision_history_state,
             ],
             api_name="revise_extraction",
         )
@@ -392,6 +414,7 @@ def build_app() -> gr.Blocks:
                 current_render_html_state,
                 *stage_action_outputs,
                 *compose_outputs,
+                revision_history_state,
             ],
             api_name="approve_extraction_and_plan_outline",
         )
@@ -406,6 +429,7 @@ def build_app() -> gr.Blocks:
                 outline_review_accordion,
                 *stage_action_outputs,
                 *compose_outputs,
+                revision_history_state,
             ],
             api_name="revise_outline",
         )
@@ -419,6 +443,7 @@ def build_app() -> gr.Blocks:
                 manual_layout_compose_checkbox,
                 preview_image,
                 current_render_html_state,
+                revision_history_state,
             ],
             outputs=[
                 system_logs,
@@ -429,6 +454,7 @@ def build_app() -> gr.Blocks:
                 current_render_html_state,
                 *stage_action_outputs,
                 *compose_outputs,
+                revision_history_state,
             ],
             api_name="approve_outline_and_generate_draft",
         )
@@ -506,6 +532,7 @@ def build_app() -> gr.Blocks:
                 outline_markdown,
                 preview_image,
                 current_render_html_state,
+                revision_history_state,
             ],
             outputs=[
                 system_logs,
@@ -516,6 +543,7 @@ def build_app() -> gr.Blocks:
                 current_render_html_state,
                 *stage_action_outputs,
                 *compose_outputs,
+                revision_history_state,
             ],
             api_name="continue_layout_compose_to_draft",
         )
@@ -528,6 +556,7 @@ def build_app() -> gr.Blocks:
                 outline_markdown,
                 preview_image,
                 current_render_html_state,
+                revision_history_state,
             ],
             outputs=[
                 system_logs,
@@ -538,13 +567,14 @@ def build_app() -> gr.Blocks:
                 current_render_html_state,
                 *stage_action_outputs,
                 *compose_outputs,
+                revision_history_state,
             ],
             api_name="return_to_outline_review_from_layout_compose",
         )
 
         request_revision_button.click(
             fn=request_webpage_revision,
-            inputs=[feedback_text, feedback_images, workflow_thread_state, system_logs, preview_image, current_render_html_state],
+            inputs=[feedback_text, feedback_images, workflow_thread_state, system_logs, preview_image, current_render_html_state, revision_history_state],
             outputs=[
                 system_logs,
                 paper_review_accordion,
@@ -553,13 +583,14 @@ def build_app() -> gr.Blocks:
                 current_render_html_state,
                 *stage_action_outputs,
                 *compose_outputs,
+                revision_history_state,
             ],
             api_name="request_webpage_revision",
         )
 
         approve_webpage_button.click(
             fn=approve_webpage,
-            inputs=[workflow_thread_state, system_logs, preview_image, current_render_html_state],
+            inputs=[workflow_thread_state, system_logs, preview_image, current_render_html_state, revision_history_state],
             outputs=[
                 system_logs,
                 paper_review_accordion,
@@ -568,8 +599,37 @@ def build_app() -> gr.Blocks:
                 current_render_html_state,
                 *stage_action_outputs,
                 *compose_outputs,
+                revision_history_state,
             ],
             api_name="approve_webpage",
+        )
+
+        previous_version_button.click(
+            fn=show_previous_webpage_version,
+            inputs=[workflow_thread_state, system_logs, preview_image, current_render_html_state, revision_history_state],
+            outputs=[
+                system_logs,
+                preview_image,
+                current_render_html_state,
+                previous_version_button,
+                next_version_button,
+                revision_history_state,
+            ],
+            api_name="show_previous_webpage_version",
+        )
+
+        next_version_button.click(
+            fn=show_next_webpage_version,
+            inputs=[workflow_thread_state, system_logs, preview_image, current_render_html_state, revision_history_state],
+            outputs=[
+                system_logs,
+                preview_image,
+                current_render_html_state,
+                previous_version_button,
+                next_version_button,
+                revision_history_state,
+            ],
+            api_name="show_next_webpage_version",
         )
 
     return demo

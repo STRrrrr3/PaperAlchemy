@@ -100,12 +100,30 @@ def _normalize_manual_layout_compose_enabled(value: Any) -> bool:
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
 
+
+def _revision_history_button_updates(revision_history_state: Any, *, visible: bool) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not visible or not isinstance(revision_history_state, dict):
+        return (
+            gr.update(interactive=False, visible=visible),
+            gr.update(interactive=False, visible=visible),
+        )
+
+    current_index = int(revision_history_state.get("current_index", -1))
+    total_versions = int(revision_history_state.get("total_versions", 0))
+    has_prev = current_index > 0
+    has_next = current_index != -1 and current_index < total_versions - 1
+    return (
+        gr.update(interactive=has_prev, visible=visible),
+        gr.update(interactive=has_next, visible=visible),
+    )
+
 def _stage_action_updates(
     stage: str,
     *,
     feedback_text_value: str = "",
     feedback_images_value: Any = None,
     manual_layout_compose_enabled: bool = False,
+    revision_history_state: Any = None,
 ) -> tuple[dict[str, Any], ...]:
     normalized_stage = str(stage or "").strip().lower()
     is_overview = normalized_stage == "overview"
@@ -121,6 +139,11 @@ def _stage_action_updates(
         placeholder = "Describe the visual issue or requested frontend change. Attach screenshots below if helpful."
     else:
         placeholder = ""
+
+    previous_version_update, next_version_update = _revision_history_button_updates(
+        revision_history_state,
+        visible=is_webpage,
+    )
 
     return (
         gr.update(visible=group_visible),
@@ -146,6 +169,8 @@ def _stage_action_updates(
         gr.update(interactive=is_outline, visible=is_outline),
         gr.update(interactive=is_webpage, visible=is_webpage),
         gr.update(interactive=is_webpage, visible=is_webpage),
+        previous_version_update,
+        next_version_update,
     )
 
 def _ordered_layout_compose_blocks(session: LayoutComposeSession) -> list[Any]:

@@ -472,25 +472,38 @@ You will receive:
 
 Rules:
 1. Treat the current page screenshot as ground truth for what the user is seeing right now.
-2. Prefer CSS rules for any visual, spacing, alignment, sizing, navigation, wrapper, or template-structure fix.
-3. CSS selectors may target any existing element in CURRENT_HTML, including classes, ids, descendants, pseudo-classes, and data-pa-* anchors.
-4. Use content_replacements only when the request changes grounded text, links, media, or other HTML content.
+2. Prefer content_replacements first for grounded content edits such as titles, labels, wording, links, media swaps, or other anchored HTML/content changes.
+3. Prefer CSS rules first for visual, spacing, alignment, sizing, navigation, wrapper, typography, color, or template-structure fixes.
+4. CSS selectors may target any existing element in CURRENT_HTML, including classes, ids, descendants, pseudo-classes, and data-pa-* anchors.
 5. Content replacements must target existing manifest anchors only:
    - slot: existing block_id + slot_id
    - block: existing block_id
    - global: existing global_id
 6. Never use content_replacements to redesign the whole page or replace arbitrary wrappers outside anchored targets.
-7. If the request is truly impossible without replanning or regenerating structure, set not_possible_explanation and leave css_rules/content_replacements empty.
-8. Use AVAILABLE_PAPER_ASSETS_JSON for local paper images. Never invent local asset paths.
-9. Use TEMPLATE_STYLE_CONTEXT_JSON to understand current computed styles before writing CSS.
-10. Keep the plan minimal and concrete. Avoid redundant rules.
-11. Return only data that matches the structured CssRevisionPlan schema.
+7. Mixed requests may include both css_rules and content_replacements in the same plan.
+8. If REQUEST_INTENT_CATEGORY is "content", the plan should normally contain content_replacements and avoid CSS-only answers.
+9. If REQUEST_INTENT_CATEGORY is "visual", the plan should normally contain css_rules and avoid replacement-only answers.
+10. If REQUEST_INTENT_CATEGORY is "mixed", satisfy explicit content edits with content_replacements first, then use CSS for the remaining visual/layout adjustments.
+11. If the request is truly impossible without replanning or regenerating structure, set not_possible_explanation and leave css_rules/content_replacements empty.
+12. Use AVAILABLE_PAPER_ASSETS_JSON for local paper images. Never invent local asset paths.
+13. Use TEMPLATE_STYLE_CONTEXT_JSON to understand current computed styles before writing CSS.
+14. Keep the plan minimal and concrete. Avoid redundant rules.
+15. Return only data that matches the structured CssRevisionPlan schema.
 """
 
 CSS_REVISION_AGENT_USER_PROMPT_TEMPLATE = """Generate a CssRevisionPlan for the current webpage revision request.
 
 ### HUMAN_FEEDBACK
 {human_feedback}
+
+### REQUEST_INTENT_CATEGORY
+{request_intent_category}
+
+### HAS_EXPLICIT_CONTENT_CHANGE
+{has_explicit_content_change}
+
+### RETRY_GUIDANCE
+{retry_guidance}
 
 ### CURRENT_ENTRY_HTML_PATH
 {current_entry_html_path}

@@ -3,7 +3,8 @@ from __future__ import annotations
 from typing import Any
 
 from src.contracts.schemas import LayoutComposeSession, LayoutComposeUpdate, PagePlan, StructuredPaper
-from src.services.artifact_store import get_output_paths, load_cached_structured_data, load_page_plan, save_page_plan
+from src.services.artifact_store import get_output_paths, load_cached_structured_data, load_coder_artifact, load_page_plan, save_page_plan
+from src.services.revision_history import build_revision_history_state, empty_revision_history_state, reset_revision_history_for_draft
 from src.template.shell_resolver import apply_layout_compose_session_to_page_plan, apply_layout_compose_update
 from src.ui.formatters import _visual_smoke_feedback_text, format_page_plan_to_markdown
 from src.ui.updates import (
@@ -20,6 +21,7 @@ from src.workflows.batch_runtime import render_current_workflow_preview
 from src.workflows.hitl_graph import get_default_hitl_workflow
 from src.workflows.hitl_nodes import (
     _get_template_entry_path,
+    normalize_coder_artifact,
     normalize_layout_compose_session,
     normalize_visual_smoke_report,
 )
@@ -51,6 +53,21 @@ def _load_snapshot_structured_paper(snapshot_values: dict[str, Any]) -> Structur
     if structured_data is None:
         raise ValueError("The paused workflow state is missing structured_paper and no disk cache was found.")
     return structured_data
+
+
+def _resolve_live_webpage_artifacts(snapshot_values: dict[str, Any]) -> tuple[str, PagePlan, Any]:
+    paper_folder_name = str(snapshot_values.get("paper_folder_name") or "").strip()
+    if not paper_folder_name:
+        raise ValueError("The paused workflow state is missing paper metadata.")
+
+    page_plan = _load_snapshot_page_plan(snapshot_values)
+    coder_artifact = normalize_coder_artifact(snapshot_values.get("coder_artifact"))
+    if coder_artifact is None:
+        _, _, _, coder_json_path = get_output_paths(paper_folder_name)
+        coder_artifact = load_coder_artifact(coder_json_path)
+    if coder_artifact is None:
+        raise ValueError("The current webpage draft is missing coder_artifact.")
+    return paper_folder_name, page_plan, coder_artifact
 
 def _require_layout_compose_snapshot(
     workflow_thread_id: str,
@@ -246,6 +263,7 @@ def continue_layout_compose_to_draft(
     current_outline_overview: str,
     current_preview: str | None,
     current_html_path: str,
+    current_revision_history_state: dict[str, Any] | None = None,
 ) -> tuple[Any, ...]:
     run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
 
@@ -276,6 +294,7 @@ def continue_layout_compose_to_draft(
                 "",
                 *_stage_action_updates("none"),
                 *_layout_compose_ui_active(updated_session),
+                empty_revision_history_state(),
             )
 
         approved_page_plan = _load_snapshot_page_plan(snapshot_values)
@@ -336,6 +355,7 @@ def continue_layout_compose_to_draft(
                     manual_layout_compose_enabled=manual_layout_compose_enabled,
                 ),
                 *_layout_compose_ui_hidden(),
+                empty_revision_history_state(),
             )
 
         if review_stage != "webpage":
@@ -343,6 +363,14 @@ def continue_layout_compose_to_draft(
                 f"Workflow paused at unexpected stage '{review_stage or '(empty)'}' after layout compose."
             )
 
+        paper_folder_name, live_page_plan, coder_artifact = _resolve_live_webpage_artifacts(paused_values)
+        revision_history = reset_revision_history_for_draft(
+            paper_folder_name=paper_folder_name,
+            artifact=coder_artifact,
+            page_plan=live_page_plan,
+            summary=feedback_text or "Initial draft generated from layout compose.",
+        )
+        revision_history_state = build_revision_history_state(paper_folder_name, revision_history)
         preview_image_path, entry_html_path = render_current_workflow_preview(paused_values)
         log(f"[Preview] Rendered webpage draft screenshot from {entry_html_path}")
         log("[Webpage] First draft ready. Review the preview, then approve it or request a revision.")
@@ -355,8 +383,10 @@ def continue_layout_compose_to_draft(
             *_stage_action_updates(
                 "webpage",
                 feedback_text_value=feedback_text,
+                revision_history_state=revision_history_state,
             ),
             *_layout_compose_ui_hidden(),
+            revision_history_state,
         )
     except Exception as exc:
         log(f"[Error] {exc}")
@@ -373,6 +403,7 @@ def continue_layout_compose_to_draft(
             str(current_html_path or ""),
             *_stage_action_updates("none"),
             *compose_ui,
+            current_revision_history_state or empty_revision_history_state(),
         )
 
 def return_to_outline_review_from_layout_compose(
@@ -381,6 +412,7 @@ def return_to_outline_review_from_layout_compose(
     current_outline_overview: str,
     current_preview: str | None,
     current_html_path: str,
+    current_revision_history_state: dict[str, Any] | None = None,
 ) -> tuple[Any, ...]:
     run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
 
@@ -422,6 +454,7 @@ def return_to_outline_review_from_layout_compose(
                 manual_layout_compose_enabled=manual_layout_compose_enabled,
             ),
             *_layout_compose_ui_hidden(),
+            empty_revision_history_state(),
         )
     except Exception as exc:
         log(f"[Error] {exc}")
@@ -438,4 +471,5 @@ def return_to_outline_review_from_layout_compose(
             str(current_html_path or ""),
             *_stage_action_updates("none"),
             *compose_ui,
+            current_revision_history_state or empty_revision_history_state(),
         )

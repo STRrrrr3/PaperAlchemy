@@ -690,6 +690,29 @@ class CssRevisionPlan(BaseModel):
     not_possible_explanation: str = ""
 
 
+class RevisionHistoryEntry(BaseModel):
+    version_id: str
+    created_at: str
+    source: Literal["initial_draft", "webpage_revision"]
+    summary: str = ""
+    html_files: List[str] = Field(default_factory=list)
+
+
+class RevisionHistory(BaseModel):
+    current_version_id: str = ""
+    versions: List[RevisionHistoryEntry] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_current_version(self) -> "RevisionHistory":
+        current = str(self.current_version_id or "").strip()
+        if not current:
+            return self
+        version_ids = {entry.version_id for entry in self.versions}
+        if current not in version_ids:
+            raise ValueError(f"Unknown current_version_id '{current}'.")
+        return self
+
+
 class FallbackBlock(BaseModel):
     block_id: str
     reason: str

@@ -17,6 +17,15 @@ from src.services.artifact_store import (
     load_page_plan,
 )
 from src.services.human_feedback import build_human_feedback_payload, empty_human_feedback, extract_human_feedback_text
+from src.services.revision_history import (
+    append_revision_version,
+    build_revision_history_state,
+    empty_revision_history_state,
+    ensure_revision_history_bootstrapped,
+    load_revision_history,
+    reset_revision_history_for_draft,
+    restore_revision_version,
+)
 from src.services.preview_service import build_template_preview_path, take_local_screenshot
 from src.template.deterministic_selector import score_and_select_templates
 from src.ui.constraints import (
@@ -47,7 +56,7 @@ from src.ui.updates import (
 )
 from src.workflows.batch_runtime import render_current_workflow_preview
 from src.workflows.hitl_graph import get_default_hitl_workflow
-from src.workflows.hitl_nodes import normalize_layout_compose_session, normalize_visual_smoke_report
+from src.workflows.hitl_nodes import normalize_coder_artifact, normalize_layout_compose_session, normalize_visual_smoke_report
 
 
 def _load_snapshot_structured_paper(snapshot_values: dict[str, Any]) -> StructuredPaper:
@@ -210,6 +219,29 @@ def _build_cached_resume_state(
         resume_logs,
     )
 
+
+def _resolve_live_webpage_artifacts(snapshot_values: dict[str, Any]) -> tuple[str, PagePlan, Any]:
+    paper_folder_name = str(snapshot_values.get("paper_folder_name") or "").strip()
+    if not paper_folder_name:
+        raise ValueError("The paused workflow state is missing paper metadata.")
+
+    page_plan = _load_snapshot_page_plan(snapshot_values)
+    coder_artifact = normalize_coder_artifact(snapshot_values.get("coder_artifact"))
+    if coder_artifact is None:
+        _, _, _, coder_json_path = get_output_paths(paper_folder_name)
+        coder_artifact = load_coder_artifact(coder_json_path)
+    if coder_artifact is None:
+        raise ValueError("The current webpage draft is missing coder_artifact.")
+    return paper_folder_name, page_plan, coder_artifact
+
+
+def _refresh_revision_history_state(
+    paper_folder_name: str,
+    revision_history: Any = None,
+) -> dict[str, Any]:
+    history = revision_history if revision_history is not None else load_revision_history(paper_folder_name)
+    return build_revision_history_state(paper_folder_name, history)
+
 def find_templates(
     background_color: str,
     density: str,
@@ -265,6 +297,7 @@ def find_templates(
             "",
             *_stage_action_updates("none"),
             *_layout_compose_ui_hidden(),
+            empty_revision_history_state(),
         )
     except Exception as exc:
         log_lines.append(f"[Error] {exc}")
@@ -282,6 +315,7 @@ def find_templates(
             "",
             *_stage_action_updates("none"),
             *_layout_compose_ui_hidden(),
+            empty_revision_history_state(),
         )
 
 def preview_selected_template(
@@ -304,6 +338,7 @@ def preview_selected_template(
             "",
             *_stage_action_updates("none"),
             *_layout_compose_ui_hidden(),
+            empty_revision_history_state(),
         )
 
     try:
@@ -333,6 +368,7 @@ def preview_selected_template(
             "",
             *_stage_action_updates("none"),
             *_layout_compose_ui_hidden(),
+            empty_revision_history_state(),
         )
     except Exception as exc:
         updated_logs = append_log_lines(current_logs, [f"[Error] Failed to render template preview: {exc}"])
@@ -348,6 +384,7 @@ def preview_selected_template(
             "",
             *_stage_action_updates("none"),
             *_layout_compose_ui_hidden(),
+            empty_revision_history_state(),
         )
 
 def run_extraction(
@@ -421,6 +458,14 @@ def run_extraction(
                 log(message)
 
             if review_stage == "webpage":
+                _, page_plan, coder_artifact = _resolve_live_webpage_artifacts(resume_state)
+                revision_history = ensure_revision_history_bootstrapped(
+                    paper_folder_name=paper_folder_name,
+                    artifact=coder_artifact,
+                    page_plan=page_plan,
+                    summary="Bootstrapped from the cached webpage draft.",
+                )
+                revision_history_state = _refresh_revision_history_state(paper_folder_name, revision_history)
                 preview_image_path, entry_html_path = render_current_workflow_preview(resume_state)
                 log(f"[Preview] Rendered cached webpage screenshot from {entry_html_path}")
                 log("[Webpage] Resumed the cached draft from disk. Review it, then approve it or request a revision.")
@@ -432,8 +477,9 @@ def run_extraction(
                     thread_id,
                     _visible_preview_update(preview_image_path),
                     entry_html_path,
-                    *_stage_action_updates("webpage"),
+                    *_stage_action_updates("webpage", revision_history_state=revision_history_state),
                     *_layout_compose_ui_hidden(),
+                    revision_history_state,
                 )
 
             if review_stage == "outline":
@@ -448,6 +494,7 @@ def run_extraction(
                     "",
                     *_stage_action_updates("outline"),
                     *_layout_compose_ui_hidden(),
+                    empty_revision_history_state(),
                 )
 
             log("[Overview] Resumed the cached extraction review from disk.")
@@ -461,6 +508,7 @@ def run_extraction(
                 "",
                 *_stage_action_updates("overview"),
                 *_layout_compose_ui_hidden(),
+                empty_revision_history_state(),
             )
 
         if not ensure_parsed_output(safe_pdf_filename, output_dir):
@@ -525,6 +573,7 @@ def run_extraction(
             "",
             *_stage_action_updates("overview"),
             *_layout_compose_ui_hidden(),
+            empty_revision_history_state(),
         )
     except Exception as exc:
         log(f"[Error] {exc}")
@@ -538,6 +587,7 @@ def run_extraction(
             "",
             *_stage_action_updates("none"),
             *_layout_compose_ui_hidden(),
+            empty_revision_history_state(),
         )
 
 def revise_extraction(
@@ -618,6 +668,7 @@ def revise_extraction(
             *_review_accordion_updates("overview"),
             *_stage_action_updates("overview"),
             *_layout_compose_ui_hidden(),
+            empty_revision_history_state(),
         )
     except Exception as exc:
         log(f"[Error] {exc}")
@@ -628,6 +679,7 @@ def revise_extraction(
             *_review_accordion_updates("overview"),
             *_stage_action_updates("overview", feedback_text_value=feedback_text),
             *_layout_compose_ui_hidden(),
+            empty_revision_history_state(),
         )
 
 def approve_extraction_and_plan_outline(
@@ -713,6 +765,7 @@ def approve_extraction_and_plan_outline(
                 manual_layout_compose_enabled=manual_layout_compose_enabled,
             ),
             *_layout_compose_ui_hidden(),
+            empty_revision_history_state(),
         )
     except Exception as exc:
         log(f"[Error] {exc}")
@@ -724,6 +777,7 @@ def approve_extraction_and_plan_outline(
             "",
             *_stage_action_updates("overview"),
             *_layout_compose_ui_hidden(),
+            empty_revision_history_state(),
         )
 
 def revise_outline(
@@ -805,6 +859,7 @@ def revise_outline(
                 manual_layout_compose_enabled=manual_layout_compose_enabled,
             ),
             *_layout_compose_ui_hidden(),
+            empty_revision_history_state(),
         )
     except Exception as exc:
         log(f"[Error] {exc}")
@@ -817,6 +872,7 @@ def revise_outline(
                 feedback_text_value=feedback_text,
             ),
             *_layout_compose_ui_hidden(),
+            empty_revision_history_state(),
         )
 
 def approve_outline_and_generate_draft(
@@ -826,6 +882,7 @@ def approve_outline_and_generate_draft(
     manual_layout_compose_enabled: bool,
     current_preview: str | None,
     current_html_path: str,
+    current_revision_history_state: dict[str, Any] | None = None,
 ) -> tuple[Any, ...]:
     run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
 
@@ -894,6 +951,7 @@ def approve_outline_and_generate_draft(
                 "",
                 *_stage_action_updates("none"),
                 *_layout_compose_ui_active(compose_session),
+                empty_revision_history_state(),
             )
 
         smoke_report = normalize_visual_smoke_report(paused_values.get("visual_smoke_report"))
@@ -925,6 +983,7 @@ def approve_outline_and_generate_draft(
                     manual_layout_compose_enabled=restored_manual_layout_compose_enabled,
                 ),
                 *_layout_compose_ui_hidden(),
+                empty_revision_history_state(),
             )
 
         if review_stage != "webpage":
@@ -932,6 +991,14 @@ def approve_outline_and_generate_draft(
                 f"Workflow paused at unexpected stage '{review_stage or '(empty)'}' after outline approval."
             )
 
+        paper_folder_name, page_plan, coder_artifact = _resolve_live_webpage_artifacts(paused_values)
+        revision_history = reset_revision_history_for_draft(
+            paper_folder_name=paper_folder_name,
+            artifact=coder_artifact,
+            page_plan=page_plan,
+            summary=feedback_text or "Initial draft generated.",
+        )
+        revision_history_state = _refresh_revision_history_state(paper_folder_name, revision_history)
         preview_image_path, entry_html_path = render_current_workflow_preview(paused_values)
         log(f"[Preview] Rendered webpage draft screenshot from {entry_html_path}")
         log("[Webpage] First draft ready. Review the preview, then approve it or request a revision.")
@@ -944,8 +1011,10 @@ def approve_outline_and_generate_draft(
             *_stage_action_updates(
                 "webpage",
                 feedback_text_value=feedback_text,
+                revision_history_state=revision_history_state,
             ),
             *_layout_compose_ui_hidden(),
+            revision_history_state,
         )
     except Exception as exc:
         log(f"[Error] {exc}")
@@ -960,6 +1029,7 @@ def approve_outline_and_generate_draft(
                 manual_layout_compose_enabled=manual_layout_compose_enabled,
             ),
             *_layout_compose_ui_hidden(),
+            current_revision_history_state or empty_revision_history_state(),
         )
 
 def request_webpage_revision(
@@ -969,6 +1039,7 @@ def request_webpage_revision(
     current_logs: str,
     current_preview: str | None,
     current_html_path: str,
+    current_revision_history_state: dict[str, Any] | None = None,
 ) -> tuple[Any, ...]:
     run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
 
@@ -1033,14 +1104,36 @@ def request_webpage_revision(
 
         if patch_error:
             log(f"[CSSRevision] Safe fail: {patch_error}")
+            revision_history_state = current_revision_history_state or empty_revision_history_state()
         elif css_rule_count or replacement_count:
             log(
                 "[CSSRevision] Applied: "
                 f"{css_rule_count} css rule(s), "
                 f"{replacement_count} content replacement(s)."
             )
+            paper_folder_name, page_plan, coder_artifact = _resolve_live_webpage_artifacts(paused_values)
+            revision_history = append_revision_version(
+                paper_folder_name=paper_folder_name,
+                artifact=coder_artifact,
+                page_plan=page_plan,
+                source="webpage_revision",
+                summary=css_revision_summary
+                or f"Applied {css_rule_count} css rule(s) and {replacement_count} content replacement(s).",
+            )
+            revision_history_state = _refresh_revision_history_state(paper_folder_name, revision_history)
         elif css_revision_summary:
             log(f"[CSSRevision] Applied: {css_revision_summary}")
+            paper_folder_name, page_plan, coder_artifact = _resolve_live_webpage_artifacts(paused_values)
+            revision_history = append_revision_version(
+                paper_folder_name=paper_folder_name,
+                artifact=coder_artifact,
+                page_plan=page_plan,
+                source="webpage_revision",
+                summary=css_revision_summary,
+            )
+            revision_history_state = _refresh_revision_history_state(paper_folder_name, revision_history)
+        else:
+            revision_history_state = current_revision_history_state or empty_revision_history_state()
         preview_image_path, entry_html_path = render_current_workflow_preview(paused_values)
         log(f"[Preview] Rendered revised webpage screenshot from {entry_html_path}")
         if patch_error:
@@ -1052,8 +1145,9 @@ def request_webpage_revision(
             *_review_accordion_updates("webpage"),
             _visible_preview_update(preview_image_path),
             entry_html_path,
-            *_stage_action_updates("webpage"),
+            *_stage_action_updates("webpage", revision_history_state=revision_history_state),
             *_layout_compose_ui_hidden(),
+            revision_history_state,
         )
     except Exception as exc:
         log(f"[Error] {exc}")
@@ -1066,15 +1160,134 @@ def request_webpage_revision(
                 "webpage",
                 feedback_text_value=feedback_text,
                 feedback_images_value=feedback_images,
+                revision_history_state=current_revision_history_state,
             ),
             *_layout_compose_ui_hidden(),
+            current_revision_history_state or empty_revision_history_state(),
         )
+
+def _switch_webpage_version(
+    direction: int,
+    workflow_thread_id: str,
+    current_logs: str,
+    current_preview: str | None,
+    current_html_path: str,
+    current_revision_history_state: dict[str, Any] | None,
+) -> tuple[Any, ...]:
+    run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
+
+    def log(message: str) -> None:
+        print(message)
+        run_log_lines.append(message)
+
+    history_state = current_revision_history_state or empty_revision_history_state()
+    try:
+        thread_id = str(workflow_thread_id or "").strip()
+        if not thread_id:
+            raise ValueError("No paused workflow was found. Generate the first draft before switching webpage versions.")
+
+        config = {"configurable": {"thread_id": thread_id}}
+        snapshot = get_default_hitl_workflow().get_state(config)
+        snapshot_values = dict(snapshot.values or {})
+        if str(snapshot_values.get("review_stage") or "") != "webpage":
+            raise ValueError("Webpage version switching is only available during webpage review.")
+
+        version_ids = list(history_state.get("version_ids") or [])
+        current_index = int(history_state.get("current_index", -1))
+        target_index = current_index + int(direction)
+        if current_index == -1 or target_index < 0 or target_index >= len(version_ids):
+            raise ValueError("No saved webpage version exists in that direction.")
+
+        paper_folder_name = str(history_state.get("paper_folder_name") or snapshot_values.get("paper_folder_name") or "").strip()
+        if not paper_folder_name:
+            raise ValueError("The current workflow is missing paper metadata for webpage version switching.")
+
+        target_version_id = str(version_ids[target_index]).strip()
+        revision_history, restored_artifact = restore_revision_version(
+            paper_folder_name=paper_folder_name,
+            version_id=target_version_id,
+        )
+        get_default_hitl_workflow().update_state(
+            config,
+            {
+                "coder_artifact": restored_artifact,
+                "css_revision_plan": None,
+                "css_revision_summary": "",
+                "patch_error": "",
+                "is_webpage_approved": False,
+                "visual_smoke_report": None,
+            },
+            as_node="webpage_review",
+        )
+        restored_state = {
+            **snapshot_values,
+            "paper_folder_name": paper_folder_name,
+            "coder_artifact": restored_artifact,
+        }
+        preview_image_path, entry_html_path = render_current_workflow_preview(restored_state)
+        revision_history_state = _refresh_revision_history_state(paper_folder_name, revision_history)
+        log(
+            "[Version] Restored webpage version "
+            f"{target_version_id} ({revision_history_state['current_index'] + 1}/{revision_history_state['total_versions']}) as the live draft."
+        )
+        return (
+            "\n".join(run_log_lines),
+            _visible_preview_update(preview_image_path),
+            entry_html_path,
+            *_stage_action_updates("webpage", revision_history_state=revision_history_state)[-2:],
+            revision_history_state,
+        )
+    except Exception as exc:
+        log(f"[Error] {exc}")
+        return (
+            "\n".join(run_log_lines),
+            _visible_preview_update(current_preview),
+            str(current_html_path or ""),
+            *_stage_action_updates("webpage", revision_history_state=history_state)[-2:],
+            history_state,
+        )
+
+
+def show_previous_webpage_version(
+    workflow_thread_id: str,
+    current_logs: str,
+    current_preview: str | None,
+    current_html_path: str,
+    current_revision_history_state: dict[str, Any] | None,
+) -> tuple[Any, ...]:
+    return _switch_webpage_version(
+        -1,
+        workflow_thread_id,
+        current_logs,
+        current_preview,
+        current_html_path,
+        current_revision_history_state,
+    )
+
+
+def show_next_webpage_version(
+    workflow_thread_id: str,
+    current_logs: str,
+    current_preview: str | None,
+    current_html_path: str,
+    current_revision_history_state: dict[str, Any] | None,
+) -> tuple[Any, ...]:
+    return _switch_webpage_version(
+        1,
+        workflow_thread_id,
+        current_logs,
+        current_preview,
+        current_html_path,
+        current_revision_history_state,
+    )
+
 
 def approve_webpage(
     workflow_thread_id: str,
     current_logs: str,
     current_preview: str | None,
     current_html_path: str,
+    current_revision_history_state: dict[str, Any] | None = None,
 ) -> tuple[Any, ...]:
     run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
 
@@ -1120,6 +1333,7 @@ def approve_webpage(
             str(current_html_path or ""),
             *_stage_action_updates("none"),
             *_layout_compose_ui_hidden(),
+            current_revision_history_state or empty_revision_history_state(),
         )
     except Exception as exc:
         log(f"[Error] {exc}")
@@ -1128,6 +1342,7 @@ def approve_webpage(
             *_review_accordion_updates("webpage"),
             _visible_preview_update(current_preview),
             str(current_html_path or ""),
-            *_stage_action_updates("webpage"),
+            *_stage_action_updates("webpage", revision_history_state=current_revision_history_state),
             *_layout_compose_ui_hidden(),
+            current_revision_history_state or empty_revision_history_state(),
         )
