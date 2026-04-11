@@ -329,7 +329,10 @@ def _apply_shell_manual_selection_to_plan(
             updated_blocks.append(block)
             continue
         updated_region = block.target_template_region.model_copy(
-            update={"selector_hint": str(manual_selection.selector_hint or "").strip()},
+            update={
+                "shell_id": str(manual_selection.shell_id or "").strip(),
+                "selector_hint": str(manual_selection.selector_hint or "").strip(),
+            },
             deep=True,
         )
         updated_blocks.append(

@@ -27,7 +27,7 @@ from src.patching.patch_pipeline import (
     _write_files_transaction,
 )
 from src.prompts import CSS_REVISION_AGENT_SYSTEM_PROMPT, CSS_REVISION_AGENT_USER_PROMPT_TEMPLATE
-from src.services.artifact_store import get_output_paths, load_coder_artifact, load_page_plan
+from src.services.artifact_store import get_output_paths, load_coder_artifact, load_page_plan, load_template_profile
 from src.services.human_feedback import (
     build_multimodal_message_content,
     extract_human_feedback_images,
@@ -86,6 +86,15 @@ def _load_workflow_page_plan(state: WorkflowState) -> PagePlan | None:
         return None
     _, _, planner_json_path, _ = get_output_paths(paper_folder_name)
     return load_page_plan(planner_json_path)
+
+
+def _load_template_profile_from_artifact(artifact: CoderArtifact | None):
+    if artifact is None:
+        return None
+    template_profile_path = str(artifact.template_profile_path or "").strip()
+    if not template_profile_path:
+        return None
+    return load_template_profile(Path(template_profile_path))
 
 
 def _available_assets_json(artifact: CoderArtifact | None) -> str:
@@ -572,12 +581,14 @@ def css_revision_executor_node(state: WorkflowState) -> dict[str, Any]:
             return {"patch_error": message}
 
     try:
+        template_profile = _load_template_profile_from_artifact(artifact)
         updated_manifest = extract_page_manifest(
             html_text=updated_html,
             entry_html=entry_html_path,
             selected_template_id=artifact.selected_template_id,
             page_plan=page_plan,
             require_expected_globals=strict_validation,
+            template_profile=template_profile,
         )
     except Exception as exc:
         message = f"CSS revision validation failed after applying updates: {exc}"

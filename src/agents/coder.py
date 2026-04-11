@@ -51,7 +51,6 @@ from src.prompts import (
 from src.contracts.schemas import (
     BlockRenderArtifact,
     BlockRenderSpec,
-    BlockShellContract,
     CoderArtifact,
     PagePlan,
     ResolvedBlockBinding,
@@ -60,6 +59,7 @@ from src.contracts.schemas import (
     VisualSmokeReport,
 )
 from src.contracts.state import CoderState
+from src.template.template_ir import resolve_shell_node
 
 
 def _normalize_page_plan(plan: Any) -> PagePlan | None:
@@ -281,8 +281,8 @@ def _sanitized_page_plan_for_prompt(page_plan: PagePlan) -> dict[str, Any]:
     return payload
 
 
-def _with_shell_enriched_page_plan(page_plan: PagePlan, template_reference_html: str) -> PagePlan:
-    enriched_plan = enrich_page_plan_shell_contracts(page_plan, template_reference_html)
+def _with_shell_enriched_page_plan(page_plan: PagePlan, template_profile: TemplateProfile | None) -> PagePlan:
+    enriched_plan = enrich_page_plan_shell_contracts(page_plan, template_profile)
     missing_blocks = missing_shell_contract_block_ids(enriched_plan)
     if missing_blocks:
         raise ValueError("Template shell extraction failed for block(s): " + ", ".join(missing_blocks))
@@ -343,11 +343,6 @@ def _build_render_specs(
     template_reference_html: str,
 ) -> tuple[list[BlockRenderSpec], PagePlan]:
     template_soup = BeautifulSoup(str(template_reference_html or ""), "html.parser")
-    candidate_by_selector = {
-        str(candidate.selector or "").strip(): candidate
-        for candidate in template_profile.shell_candidates
-        if str(candidate.selector or "").strip()
-    }
     outline_lookup = {item.block_id: item for item in page_plan.page_outline}
     updated_blocks = []
     specs: list[BlockRenderSpec] = []
@@ -358,16 +353,12 @@ def _build_render_specs(
             raise ValueError(f"Block '{block.block_id}' is missing selector_hint for block assembly.")
 
         shell_tag = _selector_tag(template_soup, selector)
-        candidate = candidate_by_selector.get(selector)
+        candidate = resolve_shell_node(
+            template_profile,
+            shell_id=str(block.target_template_region.shell_id or "").strip(),
+            selector=selector,
+        )
         shell_contract = block.shell_contract
-        if shell_contract is None and candidate is not None:
-            shell_contract = BlockShellContract(
-                root_tag=candidate.root_tag,
-                required_classes=list(candidate.required_classes),
-                preserve_ids=list(candidate.preserve_ids),
-                wrapper_chain=list(candidate.wrapper_chain),
-                actionable_root_selector=candidate.selector,
-            )
         if shell_contract is None:
             raise ValueError(f"Block '{block.block_id}' is missing shell_contract for block assembly.")
 
@@ -390,6 +381,7 @@ def _build_render_specs(
                 source_sections=source_sections,
                 binding=ResolvedBlockBinding(
                     block_id=updated_block.block_id,
+                    shell_id=str(updated_block.target_template_region.shell_id or shell_contract.shell_id or "").strip(),
                     selector=selector,
                     region_role=updated_block.target_template_region.region_role,
                     root_tag=shell_contract.root_tag,
@@ -629,7 +621,7 @@ def _assemble_page(
 
     html_text = _ensure_doctype(str(soup))
     html_text = _ensure_body_markers(html_text)
-    html_text = annotate_global_anchors(html_text, page_plan)
+    html_text = annotate_global_anchors(html_text, page_plan, template_profile=template_profile)
     return normalize_html_document_whitespace(html_text)
 
 
@@ -763,6 +755,7 @@ def _run_compiled_block_assembly(
         entry_html=generated_entry_html_path,
         selected_template_id=page_plan.template_selection.selected_template_id,
         page_plan=updated_page_plan,
+        template_profile=template_profile,
     )
     template_profile_path, page_manifest_path = _persist_generated_page(
         output_dir=output_dir,
@@ -813,7 +806,7 @@ def _run_legacy_fullpage_render(
         raise FileNotFoundError(f"Template entry html not found: {template_entry_path}")
 
     template_reference_html = read_text_with_fallback(template_entry_path)
-    page_plan = _with_shell_enriched_page_plan(page_plan, template_reference_html)
+    page_plan = _with_shell_enriched_page_plan(page_plan, template_profile)
     shutil.copytree(template_root, site_dir)
 
     figure_paths = _collect_figure_paths(page_plan, structured_paper)
@@ -845,6 +838,7 @@ def _run_legacy_fullpage_render(
                     global_anchor_requirements_json=json.dumps(
                         build_expected_global_anchors(
                             page_plan,
+                            template_profile=template_profile,
                             reference_html_text=template_reference_html,
                         ),
                         indent=2,
@@ -863,7 +857,7 @@ def _run_legacy_fullpage_render(
         raise ValueError("Legacy fullpage coder did not return a valid HTML document.")
     generated_html = _ensure_body_markers(generated_html)
     generated_html = normalize_html_document_whitespace(generated_html)
-    generated_html = annotate_global_anchors(generated_html, page_plan)
+    generated_html = annotate_global_anchors(generated_html, page_plan, template_profile=template_profile)
 
     asset_critiques = validate_local_image_references(
         html_text=generated_html,
@@ -880,6 +874,7 @@ def _run_legacy_fullpage_render(
         entry_html=generated_entry_html_path,
         selected_template_id=page_plan.template_selection.selected_template_id,
         page_plan=page_plan,
+        template_profile=template_profile,
     )
     template_profile_path, page_manifest_path = _persist_generated_page(
         output_dir=output_dir,

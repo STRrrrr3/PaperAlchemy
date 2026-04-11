@@ -2,6 +2,9 @@
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+GlobalAnchorId = Literal["header_brand", "header_primary_action", "header_nav", "footer_meta"]
+SlotId = Literal["title", "summary", "body", "media", "meta", "actions"]
+
 
 class FigureInfo(BaseModel):
     image_path: str = Field(description="Relative path in assets folder, e.g., 'assets/element_1.png'.")
@@ -91,6 +94,39 @@ class TemplateShellCandidate(BaseModel):
     signals: List[str] = Field(default_factory=list)
 
 
+class CanonicalShellNode(BaseModel):
+    shell_id: str
+    selector: str
+    root_tag: str
+    required_classes: List[str] = Field(default_factory=list)
+    preserve_ids: List[str] = Field(default_factory=list)
+    wrapper_chain: List["ShellWrapperSignature"] = Field(default_factory=list)
+    actionable_root_selector: str
+    region_role: Literal["hero", "section", "gallery", "table", "footer", "nav"]
+    dom_index: int = 0
+    confidence: float = 0.0
+    bindable: bool = True
+    signals: List[str] = Field(default_factory=list)
+    risk_flags: List[str] = Field(default_factory=list)
+
+
+class CanonicalGlobalAnchor(BaseModel):
+    global_id: GlobalAnchorId
+    selector: str
+    target_tag: str
+    required_classes: List[str] = Field(default_factory=list)
+    preserve_ids: List[str] = Field(default_factory=list)
+    actionable_selector: str
+    confidence: float = 0.0
+    risk_flags: List[str] = Field(default_factory=list)
+
+
+class TemplateIR(BaseModel):
+    schema_version: str = "1.0"
+    shell_nodes: List[CanonicalShellNode] = Field(default_factory=list)
+    global_anchors: List[CanonicalGlobalAnchor] = Field(default_factory=list)
+
+
 class TemplateWidget(BaseModel):
     selector: str
     widget_type: str
@@ -105,6 +141,7 @@ class TemplateProfile(BaseModel):
     template_root_dir: str
     entry_html: str
     archetype: str
+    template_ir: TemplateIR = Field(default_factory=TemplateIR)
     global_preserve_selectors: List[str] = Field(default_factory=list)
     shell_candidates: List[TemplateShellCandidate] = Field(default_factory=list)
     optional_widgets: List[TemplateWidget] = Field(default_factory=list)
@@ -114,6 +151,22 @@ class TemplateProfile(BaseModel):
     risk_flags: List[str] = Field(default_factory=list)
     notes: List[str] = Field(default_factory=list)
     source_fingerprint: str
+
+    @model_validator(mode="after")
+    def sync_template_ir(self) -> "TemplateProfile":
+        if not self.template_ir.shell_nodes and self.shell_candidates:
+            self.template_ir = _template_ir_from_compat_fields(self.shell_candidates, self.global_preserve_selectors)
+        elif not self.template_ir.global_anchors and self.global_preserve_selectors:
+            self.template_ir = self.template_ir.model_copy(
+                update={
+                    "global_anchors": _compat_global_anchors_from_selectors(self.global_preserve_selectors),
+                },
+                deep=True,
+            )
+
+        self.shell_candidates = _compat_shell_candidates_from_template_ir(self.template_ir)
+        self.global_preserve_selectors = _compat_global_preserve_selectors_from_template_ir(self.template_ir)
+        return self
 
 
 class PlanMeta(BaseModel):
@@ -177,6 +230,7 @@ class PageOutlineItem(BaseModel):
 
 
 class TargetTemplateRegion(BaseModel):
+    shell_id: str = Field(default="", description="Canonical TemplateIR shell identifier.")
     selector_hint: str = Field(description="CSS selector hint or DOM region description.")
     region_role: Literal["hero", "section", "gallery", "table", "footer", "nav"]
     operation: Literal["replace_text", "replace_media", "insert_after", "append_child"]
@@ -219,6 +273,7 @@ class ShellWrapperSignature(BaseModel):
 
 
 class BlockShellContract(BaseModel):
+    shell_id: str = ""
     root_tag: str
     required_classes: List[str] = Field(default_factory=list)
     preserve_ids: List[str] = Field(default_factory=list)
@@ -320,8 +375,6 @@ class CoderCriticReport(BaseModel):
     build_feedback: str = Field(description="Actionable feedback when build fails.")
 
 
-GlobalAnchorId = Literal["header_brand", "header_primary_action", "header_nav", "footer_meta"]
-SlotId = Literal["title", "summary", "body", "media", "meta", "actions"]
 _SUGGESTED_STYLE_PROPERTIES = [
     "font-size", "line-height", "margin", "margin-top", "margin-bottom",
     "padding", "gap", "text-align", "max-width", "width",
@@ -331,6 +384,7 @@ AttributeName = Literal["class", "href", "target", "aria-label", "style", "id"]
 
 class ResolvedBlockBinding(BaseModel):
     block_id: str
+    shell_id: str = ""
     selector: str
     region_role: Literal["hero", "section", "gallery", "table", "footer", "nav"]
     root_tag: str
@@ -378,6 +432,7 @@ class PageManifestSlot(BaseModel):
 
 class PageManifestBlock(BaseModel):
     block_id: str
+    shell_id: str = ""
     source_sections: List[str]
     selector: str
     slots: List[PageManifestSlot]
@@ -405,6 +460,7 @@ class PageManifest(BaseModel):
 
 
 class ShellResolutionCandidate(BaseModel):
+    shell_id: str = ""
     selector_hint: str
     region_role: Literal["hero", "section", "gallery", "table", "footer", "nav"]
     score: float
@@ -424,10 +480,12 @@ class ShellBindingReview(BaseModel):
 
 class ShellManualSelection(BaseModel):
     block_id: str
+    shell_id: str = ""
     selector_hint: str
 
 
 class LayoutSectionOption(BaseModel):
+    shell_id: str = ""
     selector_hint: str
     region_role: Literal["hero", "section", "gallery", "table", "footer", "nav"]
     dom_index: int
@@ -724,4 +782,112 @@ class TargetedReplacementPlan(BaseModel):
     attribute_changes: List[AttributeChange] = Field(default_factory=list)
     override_css_rules: List[OverrideCssRule] = Field(default_factory=list)
     fallback_blocks: List[FallbackBlock] = Field(default_factory=list)
+
+
+def _guess_global_anchor_id_from_selector(selector: str) -> GlobalAnchorId | None:
+    lowered = str(selector or "").strip().lower()
+    if not lowered:
+        return None
+    if "footer" in lowered:
+        return "footer_meta"
+    if any(token in lowered for token in ("button-group", "button", "cta", "action")):
+        return "header_primary_action"
+    if "header" in lowered and any(token in lowered for token in ("h1", "logo", "brand")):
+        return "header_brand"
+    if "nav" in lowered or "navbar" in lowered:
+        return "header_nav"
+    if "header" in lowered:
+        return "header_nav"
+    if "menu" in lowered and any(token in lowered for token in ("a", "title", "brand")):
+        return "header_brand"
+    return None
+
+
+def _compat_global_anchors_from_selectors(selectors: List[str]) -> List[CanonicalGlobalAnchor]:
+    anchors: List[CanonicalGlobalAnchor] = []
+    seen: set[str] = set()
+    for selector in selectors:
+        clean = str(selector or "").strip()
+        global_id = _guess_global_anchor_id_from_selector(clean)
+        if not clean or not global_id or global_id in seen:
+            continue
+        seen.add(global_id)
+        anchors.append(
+            CanonicalGlobalAnchor(
+                global_id=global_id,
+                selector=clean,
+                target_tag="",
+                required_classes=[],
+                preserve_ids=[],
+                actionable_selector=clean,
+                confidence=0.0,
+                risk_flags=[],
+            )
+        )
+    return anchors
+
+
+def _compat_shell_candidates_from_template_ir(template_ir: TemplateIR) -> List[TemplateShellCandidate]:
+    shell_candidates: List[TemplateShellCandidate] = []
+    for shell_node in sorted(template_ir.shell_nodes, key=lambda item: (item.dom_index, item.selector)):
+        if not shell_node.bindable:
+            continue
+        shell_candidates.append(
+            TemplateShellCandidate(
+                selector=str(shell_node.selector or "").strip(),
+                role=shell_node.region_role,
+                root_tag=shell_node.root_tag,
+                required_classes=list(shell_node.required_classes),
+                preserve_ids=list(shell_node.preserve_ids),
+                wrapper_chain=list(shell_node.wrapper_chain),
+                dom_index=int(shell_node.dom_index),
+                confidence=float(shell_node.confidence or 0.0),
+                signals=list(shell_node.signals),
+            )
+        )
+    return shell_candidates
+
+
+def _compat_global_preserve_selectors_from_template_ir(template_ir: TemplateIR) -> List[str]:
+    selectors: List[str] = []
+    seen: set[str] = set()
+    for anchor in template_ir.global_anchors:
+        selector = str(anchor.selector or "").strip()
+        if selector and selector not in seen:
+            seen.add(selector)
+            selectors.append(selector)
+    return selectors
+
+
+def _template_ir_from_compat_fields(
+    shell_candidates: List[TemplateShellCandidate],
+    global_preserve_selectors: List[str],
+) -> TemplateIR:
+    shell_nodes: List[CanonicalShellNode] = []
+    for candidate in shell_candidates:
+        selector = str(candidate.selector or "").strip()
+        if not selector:
+            continue
+        shell_nodes.append(
+            CanonicalShellNode(
+                shell_id=f"compat_shell_{len(shell_nodes) + 1:02d}",
+                selector=selector,
+                root_tag=candidate.root_tag,
+                required_classes=list(candidate.required_classes),
+                preserve_ids=list(candidate.preserve_ids),
+                wrapper_chain=list(candidate.wrapper_chain),
+                actionable_root_selector=selector,
+                region_role=candidate.role,
+                dom_index=int(candidate.dom_index),
+                confidence=float(candidate.confidence or 0.0),
+                bindable=True,
+                signals=list(candidate.signals),
+                risk_flags=[],
+            )
+        )
+
+    return TemplateIR(
+        shell_nodes=shell_nodes,
+        global_anchors=_compat_global_anchors_from_selectors(global_preserve_selectors),
+    )
 

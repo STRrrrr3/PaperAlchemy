@@ -14,16 +14,9 @@ from src.services.preview_service import (
     take_local_screenshot,
     take_selector_screenshot,
 )
-from src.validators.page_manifest import (
-    _SHELL_CONTAINER_TAGS,
-    _capture_wrapper_chain,
-    _tag_classes,
-    _tag_ids,
-    _tag_tokens,
-)
 from src.contracts.schemas import (
     BlockPlan,
-    BlockShellContract,
+    CanonicalShellNode,
     LayoutComposeBlock,
     LayoutComposeSession,
     LayoutComposeUpdate,
@@ -35,6 +28,8 @@ from src.contracts.schemas import (
     StructuredPaper,
     TemplateProfile,
 )
+from src.template.structural_core import select_unique_tag, selector_tokens, tag_tokens
+from src.template.template_ir import bind_block_to_shell, canonical_shell_nodes, resolve_shell_node
 
 AUTO_ACCEPT_MIN_SCORE = 8.0
 AUTO_ACCEPT_MARGIN = 1.5
@@ -44,6 +39,8 @@ MAX_COMPOSE_SECTION_GALLERY = 6
 
 @dataclass
 class _CandidateRoot:
+    shell_id: str
+    shell_node: CanonicalShellNode
     tag: Tag
     selector_hint: str
     dom_index: int
@@ -52,138 +49,24 @@ class _CandidateRoot:
     stable_score: float
 
 
-def _selector_tokens(selector_hint: str) -> set[str]:
-    return {
-        token
-        for token in re.split(r"[^a-z0-9]+", str(selector_hint or "").lower())
-        if token
-    }
-
-
-def _is_meaningful_candidate(tag: Tag) -> bool:
-    tag_name = str(tag.name or "")
-    if tag_name not in _SHELL_CONTAINER_TAGS:
-        return False
-    classes = _tag_classes(tag)
-    ids = _tag_ids(tag)
-    if ids or classes:
-        return True
-    return any(isinstance(child, Tag) for child in tag.children)
-
-
-def _selector_segment(tag: Tag) -> str:
-    tag_name = str(tag.name or "div")
-    tag_id = str(tag.get("id") or "").strip()
-    if tag_id:
-        return f"{tag_name}#{tag_id}"
-
-    classes = [name for name in _tag_classes(tag)[:2] if name]
-    if classes:
-        return tag_name + "".join(f".{name}" for name in classes)
-
-    siblings = [
-        sibling
-        for sibling in tag.find_previous_siblings(tag_name)
-        if isinstance(sibling, Tag)
-    ]
-    if siblings:
-        return f"{tag_name}:nth-of-type({len(siblings) + 1})"
-    return tag_name
-
-
-def _build_unique_selector(tag: Tag, soup: BeautifulSoup) -> str:
-    segments: list[str] = []
-    current: Tag | None = tag
-    while current is not None and isinstance(current, Tag):
-        if str(current.name or "") in {"html", "body"}:
-            break
-        segments.insert(0, _selector_segment(current))
-        selector = " > ".join(segments)
-        try:
-            matches = [match for match in soup.select(selector) if isinstance(match, Tag)]
-        except Exception:
-            matches = []
-        if len(matches) == 1 and matches[0] is tag:
-            return selector
-        parent = current.parent
-        current = parent if isinstance(parent, Tag) else None
-
-    return " > ".join(segments) or str(tag.name or "div")
-
-
-def _build_shell_contract_from_root(
-    block: BlockPlan,
-    root: Tag,
-    selector_hint: str,
-) -> BlockShellContract:
-    return BlockShellContract(
-        root_tag=str(root.name or "div"),
-        required_classes=_tag_classes(root),
-        preserve_ids=_tag_ids(root),
-        wrapper_chain=_capture_wrapper_chain(root),
-        actionable_root_selector=selector_hint,
-    )
-
-
-def _dom_index_for_tag(template_soup: BeautifulSoup, target: Tag) -> int:
-    root = template_soup.body or template_soup
-    for dom_index, tag in enumerate(root.find_all(True)):
-        if tag is target:
-            return dom_index
-    return 10_000
-
-
-def _iter_candidate_roots(template_soup: BeautifulSoup) -> list[_CandidateRoot]:
-    root = template_soup.body or template_soup
-    candidates: list[_CandidateRoot] = []
-    seen: set[str] = set()
-
-    for dom_index, tag in enumerate(root.find_all(True)):
-        if not _is_meaningful_candidate(tag):
-            continue
-        selector_hint = _build_unique_selector(tag, template_soup)
-        if not selector_hint or selector_hint in seen:
-            continue
-        seen.add(selector_hint)
-        selector_tokens = _selector_tokens(selector_hint)
-        candidates.append(
-            _CandidateRoot(
-                tag=tag,
-                selector_hint=selector_hint,
-                dom_index=dom_index,
-                has_media=tag.find(["img", "video", "figure", "canvas", "svg", "table"]) is not None,
-                has_heading=tag.find(re.compile(r"^h[1-6]$")) is not None,
-                stable_score=(
-                    2.0
-                    if "#" in selector_hint
-                    else 1.0 if "." in selector_hint else 0.0
-                )
-                + (0.5 if ":nth-of-type" not in selector_hint and selector_tokens else 0.0),
-            )
-        )
-    return candidates
-
-
 def _profile_candidate_roots(
     template_soup: BeautifulSoup,
     template_profile: TemplateProfile,
 ) -> list[_CandidateRoot]:
     roots: list[_CandidateRoot] = []
     seen: set[str] = set()
-    for candidate in template_profile.shell_candidates:
+    for candidate in canonical_shell_nodes(template_profile, bindable_only=True):
         selector_hint = str(candidate.selector or "").strip()
         if not selector_hint or selector_hint in seen:
             continue
-        try:
-            matches = [match for match in template_soup.select(selector_hint) if isinstance(match, Tag)]
-        except Exception:
-            matches = []
-        if len(matches) != 1:
+        tag = select_unique_tag(template_soup, selector_hint)
+        if tag is None:
             continue
-        tag = matches[0]
         seen.add(selector_hint)
         roots.append(
             _CandidateRoot(
+                shell_id=str(candidate.shell_id or "").strip(),
+                shell_node=candidate,
                 tag=tag,
                 selector_hint=selector_hint,
                 dom_index=int(candidate.dom_index),
@@ -199,25 +82,8 @@ def _profile_candidate_roots(
 def _candidate_role_for_block(block_role: str, candidate: _CandidateRoot) -> tuple[str, float] | None:
     tag = candidate.tag
     tag_name = str(tag.name or "")
-    tokens = _tag_tokens(tag)
-    inferred_role = "section"
-    if tag_name == "footer" or "footer" in tokens:
-        inferred_role = "footer"
-    elif tag_name == "nav" or tokens & {"nav", "navbar", "menu"}:
-        inferred_role = "nav"
-    elif tag_name == "header" or tokens & {"hero", "lead", "intro", "banner", "masthead"}:
-        inferred_role = "hero"
-    elif tag.find("table") is not None or tokens & {"table", "metric", "metrics", "results", "benchmark"}:
-        inferred_role = "table"
-    elif tag.find(["img", "video", "figure", "canvas", "svg"]) is not None or tokens & {
-        "gallery",
-        "carousel",
-        "media",
-        "video",
-        "image",
-        "figure",
-    }:
-        inferred_role = "gallery"
+    tokens = tag_tokens(tag)
+    inferred_role = str(candidate.shell_node.region_role or "section")
 
     if block_role == "hero":
         if inferred_role == "hero":
@@ -288,8 +154,8 @@ def _order_score(candidate: _CandidateRoot, last_dom_index: int) -> float:
 
 
 def _selector_similarity_score(block: BlockPlan, candidate: _CandidateRoot) -> float:
-    original_tokens = _selector_tokens(block.target_template_region.selector_hint)
-    candidate_tokens = _selector_tokens(candidate.selector_hint)
+    original_tokens = selector_tokens(block.target_template_region.selector_hint)
+    candidate_tokens = selector_tokens(candidate.selector_hint)
     if not original_tokens or not candidate_tokens:
         return 0.0
     return min(3.0, float(len(original_tokens & candidate_tokens)))
@@ -331,82 +197,56 @@ def _score_candidates_for_block(
     return scored
 
 
-def _resolve_root_for_selector(block: BlockPlan, template_soup: BeautifulSoup) -> tuple[Tag, str] | None:
-    try:
-        matches = [match for match in template_soup.select(str(block.target_template_region.selector_hint or "")) if isinstance(match, Tag)]
-    except Exception:
-        matches = []
-    if not matches:
+def _candidate_root_from_shell_node(
+    template_soup: BeautifulSoup,
+    shell_node: CanonicalShellNode,
+) -> _CandidateRoot | None:
+    tag = select_unique_tag(template_soup, str(shell_node.selector or "").strip())
+    if tag is None:
         return None
+    return _CandidateRoot(
+        shell_id=str(shell_node.shell_id or "").strip(),
+        shell_node=shell_node,
+        tag=tag,
+        selector_hint=str(shell_node.selector or "").strip(),
+        dom_index=int(shell_node.dom_index),
+        has_media=tag.find(["img", "video", "figure", "canvas", "svg", "table"]) is not None,
+        has_heading=tag.find(re.compile(r"^h[1-6]$")) is not None,
+        stable_score=max(0.0, float(shell_node.confidence or 0.0) * 3.0),
+    )
 
-    candidate_roots: list[tuple[int, Tag]] = []
-    for match in matches:
-        candidate_roots.append((0, match))
-        for depth, ancestor in enumerate(match.parents, start=1):
-            if not isinstance(ancestor, Tag):
-                continue
-            if str(ancestor.name or "") in {"html", "body"}:
-                break
-            if not _is_meaningful_candidate(ancestor):
-                continue
-            candidate_roots.append((depth, ancestor))
-            if depth >= 4:
-                break
 
-    if not candidate_roots:
+def _resolve_root_for_selector(
+    block: BlockPlan,
+    template_soup: BeautifulSoup,
+    template_profile: TemplateProfile,
+) -> _CandidateRoot | None:
+    shell_node = resolve_shell_node(
+        template_profile,
+        shell_id=str(block.target_template_region.shell_id or "").strip(),
+        selector=str(block.target_template_region.selector_hint or "").strip(),
+        bindable_only=True,
+    )
+    if shell_node is None:
         return None
-
-    block_role = str(block.target_template_region.region_role or "")
-    scored: list[tuple[float, int, Tag]] = []
-    for depth, root in candidate_roots:
-        candidate = _CandidateRoot(
-            tag=root,
-            selector_hint=_build_unique_selector(root, template_soup),
-            dom_index=0,
-            has_media=root.find(["img", "video", "figure", "canvas", "svg", "table"]) is not None,
-            has_heading=root.find(re.compile(r"^h[1-6]$")) is not None,
-            stable_score=0.0,
-        )
-        role_result = _candidate_role_for_block(block_role, candidate)
-        if role_result is None:
-            continue
-        role_score = role_result[1]
-        scored.append((role_score - float(depth), -depth, root))
-
-    if not scored:
-        return None
-
-    scored.sort(key=lambda item: (item[0], item[1]), reverse=True)
-    root = scored[0][2]
-    return root, _build_unique_selector(root, template_soup)
+    return _candidate_root_from_shell_node(template_soup, shell_node)
 
 
 def _apply_selector_hint(
     block: BlockPlan,
-    selector_hint: str,
-    template_soup: BeautifulSoup,
+    candidate_root: _CandidateRoot,
     *,
     rewrite_selector_hint: bool,
 ) -> tuple[BlockPlan, int] | None:
-    updated_region = block.target_template_region.model_copy(
-        update={"selector_hint": selector_hint},
-        deep=True,
-    )
-    updated_block = block.model_copy(update={"target_template_region": updated_region}, deep=True)
-    resolved = _resolve_root_for_selector(updated_block, template_soup)
-    if resolved is None:
-        return None
-    root, canonical_selector = resolved
-    stored_selector = canonical_selector if rewrite_selector_hint else str(selector_hint or "").strip()
-    canonical_region = updated_region.model_copy(update={"selector_hint": stored_selector}, deep=True)
-    updated_block = updated_block.model_copy(
-        update={
-            "target_template_region": canonical_region,
-            "shell_contract": _build_shell_contract_from_root(updated_block, root, canonical_selector),
-        },
-        deep=True,
-    )
-    return updated_block, _dom_index_for_tag(template_soup, root)
+    updated_block = bind_block_to_shell(block, candidate_root.shell_node)
+    if not rewrite_selector_hint:
+        preserved_selector = str(block.target_template_region.selector_hint or candidate_root.selector_hint).strip()
+        target_region = updated_block.target_template_region.model_copy(
+            update={"selector_hint": preserved_selector},
+            deep=True,
+        )
+        updated_block = updated_block.model_copy(update={"target_template_region": target_region}, deep=True)
+    return updated_block, candidate_root.dom_index
 
 
 def resolve_page_plan_shells(
@@ -415,16 +255,28 @@ def resolve_page_plan_shells(
     template_entry_html_path: str | Path,
     template_profile: TemplateProfile | None = None,
 ) -> tuple[PagePlan, ShellBindingReview | None]:
-    template_soup = BeautifulSoup(str(template_reference_html or ""), "html.parser")
-    candidate_roots = (
-        _profile_candidate_roots(template_soup, template_profile)
-        if template_profile is not None
-        else _iter_candidate_roots(template_soup)
-    )
     outline_lookup = {item.block_id: item for item in page_plan.page_outline}
     block_lookup = {block.block_id: block for block in page_plan.blocks}
+    if template_profile is None:
+        first_block = next(iter(sorted(page_plan.page_outline, key=lambda item: item.order)), None)
+        block_id = str(first_block.block_id if first_block is not None else "")
+        block = block_lookup.get(block_id) if block_id else None
+        return (
+            page_plan,
+            ShellBindingReview(
+                block_id=block_id,
+                block_title=str(first_block.title if first_block is not None else block_id),
+                original_selector_hint=str(block.target_template_region.selector_hint if block is not None else ""),
+                failure_reason="TemplateIR is required for shell binding review.",
+                template_entry_html=str(template_entry_html_path),
+                candidates=[],
+            ),
+        )
 
-    used_selectors: set[str] = set()
+    template_soup = BeautifulSoup(str(template_reference_html or ""), "html.parser")
+    candidate_roots = _profile_candidate_roots(template_soup, template_profile)
+
+    used_shell_ids: set[str] = set()
     last_dom_index = -1
     resolved_blocks: dict[str, BlockPlan] = {}
 
@@ -433,22 +285,13 @@ def resolve_page_plan_shells(
         if block is None:
             continue
 
-        current_result = _apply_selector_hint(
-            block,
-            str(block.target_template_region.selector_hint or "").strip(),
-            template_soup,
-            rewrite_selector_hint=False,
-        )
+        current_candidate = _resolve_root_for_selector(block, template_soup, template_profile)
+        current_result = _apply_selector_hint(block, current_candidate, rewrite_selector_hint=False) if current_candidate else None
         if current_result is not None:
             updated_block, current_dom_index = current_result
-            current_selector = str(
-                updated_block.shell_contract.actionable_root_selector
-                if updated_block.shell_contract is not None
-                else updated_block.target_template_region.selector_hint
-                or ""
-            ).strip()
-            if current_selector not in used_selectors:
-                used_selectors.add(current_selector)
+            current_shell_id = str(updated_block.target_template_region.shell_id or "").strip()
+            if current_shell_id and current_shell_id not in used_shell_ids:
+                used_shell_ids.add(current_shell_id)
                 last_dom_index = max(last_dom_index, current_dom_index)
                 resolved_blocks[updated_block.block_id] = updated_block
                 continue
@@ -456,7 +299,7 @@ def resolve_page_plan_shells(
         scored_candidates = _score_candidates_for_block(
             block=block,
             candidates=candidate_roots,
-            used_selectors=used_selectors,
+            used_selectors={item.selector_hint for item in candidate_roots if item.shell_id in used_shell_ids},
             last_dom_index=last_dom_index,
         )
 
@@ -464,27 +307,17 @@ def resolve_page_plan_shells(
             top_candidate, _, top_score, _ = scored_candidates[0]
             second_score = scored_candidates[1][2] if len(scored_candidates) > 1 else float("-inf")
             if top_score >= AUTO_ACCEPT_MIN_SCORE and (top_score - second_score) >= AUTO_ACCEPT_MARGIN:
-                rebound = _apply_selector_hint(
-                    block,
-                    top_candidate.selector_hint,
-                    template_soup,
-                    rewrite_selector_hint=True,
-                )
+                rebound = _apply_selector_hint(block, top_candidate, rewrite_selector_hint=True)
                 if rebound is not None:
                     updated_block, rebound_dom_index = rebound
-                    selector_hint = str(
-                        updated_block.shell_contract.actionable_root_selector
-                        if updated_block.shell_contract is not None
-                        else updated_block.target_template_region.selector_hint
-                        or ""
-                    ).strip()
-                    used_selectors.add(selector_hint)
+                    used_shell_ids.add(str(updated_block.target_template_region.shell_id or "").strip())
                     last_dom_index = max(last_dom_index, rebound_dom_index)
                     resolved_blocks[updated_block.block_id] = updated_block
                     continue
 
         review_candidates = [
             ShellResolutionCandidate(
+                shell_id=candidate.shell_id,
                 selector_hint=candidate.selector_hint,
                 region_role=compatible_role,  # type: ignore[arg-type]
                 score=round(score, 2),
@@ -529,15 +362,16 @@ def _suggest_block_selector(
     block: BlockPlan,
     candidate_roots: list[_CandidateRoot],
     template_soup: BeautifulSoup,
+    template_profile: TemplateProfile | None,
     used_selectors: set[str],
     last_dom_index: int,
 ) -> tuple[str, int]:
-    current_result = _apply_selector_hint(
-        block,
-        str(block.target_template_region.selector_hint or "").strip(),
-        template_soup,
-        rewrite_selector_hint=True,
+    current_candidate = (
+        _resolve_root_for_selector(block, template_soup, template_profile)
+        if template_profile is not None
+        else None
     )
+    current_result = _apply_selector_hint(block, current_candidate, rewrite_selector_hint=True) if current_candidate else None
     if current_result is not None:
         updated_block, current_dom_index = current_result
         current_selector = str(updated_block.target_template_region.selector_hint or "").strip()
@@ -687,11 +521,7 @@ def build_layout_compose_session(
 ) -> LayoutComposeSession:
     template_entry_path = Path(template_entry_html_path).resolve()
     template_soup = BeautifulSoup(str(template_reference_html or ""), "html.parser")
-    candidate_roots = (
-        _profile_candidate_roots(template_soup, template_profile)
-        if template_profile is not None
-        else _iter_candidate_roots(template_soup)
-    )
+    candidate_roots = _profile_candidate_roots(template_soup, template_profile) if template_profile is not None else []
     outline_lookup = {item.block_id: item for item in page_plan.page_outline}
     block_lookup = {block.block_id: block for block in page_plan.blocks}
 
@@ -763,6 +593,7 @@ def build_layout_compose_session(
                 )
             section_options.append(
                 LayoutSectionOption(
+                    shell_id=candidate.shell_id,
                     selector_hint=candidate.selector_hint,
                     region_role=compatible_role,  # type: ignore[arg-type]
                     dom_index=candidate.dom_index,
@@ -777,6 +608,7 @@ def build_layout_compose_session(
             block,
             candidate_roots,
             template_soup,
+            template_profile,
             used_selectors,
             last_dom_index,
         )
@@ -825,10 +657,13 @@ def apply_layout_compose_session_to_page_plan(
     page_plan: PagePlan,
     session: LayoutComposeSession,
     template_reference_html: str,
+    template_profile: TemplateProfile | None = None,
 ) -> PagePlan:
     validation_errors = validate_layout_compose_session(session)
     if validation_errors:
         raise ValueError("; ".join(validation_errors))
+    if template_profile is None:
+        raise ValueError("TemplateIR is required to apply layout compose selections.")
 
     template_soup = BeautifulSoup(str(template_reference_html or ""), "html.parser")
     outline_lookup = {item.block_id: item for item in page_plan.page_outline}
@@ -842,12 +677,16 @@ def apply_layout_compose_session_to_page_plan(
         if outline_item is None or block is None:
             raise ValueError(f"Layout compose referenced unknown block '{compose_block.block_id}'.")
 
-        resolved = _apply_selector_hint(
-            block,
-            compose_block.selected_selector_hint,
-            template_soup,
-            rewrite_selector_hint=True,
+        selected_region = block.target_template_region.model_copy(
+            update={
+                "shell_id": "",
+                "selector_hint": str(compose_block.selected_selector_hint or "").strip(),
+            },
+            deep=True,
         )
+        selected_block = block.model_copy(update={"target_template_region": selected_region}, deep=True)
+        selected_candidate = _resolve_root_for_selector(selected_block, template_soup, template_profile)
+        resolved = _apply_selector_hint(selected_block, selected_candidate, rewrite_selector_hint=True) if selected_candidate else None
         if resolved is None:
             raise ValueError(
                 f"Selected template section `{compose_block.selected_selector_hint}` could not be resolved for block "

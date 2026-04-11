@@ -662,7 +662,7 @@ Current project mode is AutoPage-style: template-first generation with local tem
 6. TEMPLATE_ENTRY_HTML_PATH (required):
    - Relative path to the selected template entry html.
 7. TEMPLATE_PROFILE_JSON (required):
-   - Compiled TemplateProfile with shell_candidates, global_preserve_selectors, optional_widgets, removable_demo_selectors, unsafe_selectors, compile_confidence, and risk flags.
+   - Compiled TemplateProfile with canonical `template_ir.shell_nodes`, canonical `template_ir.global_anchors`, derived compatibility selectors, optional_widgets, removable_demo_selectors, unsafe_selectors, compile_confidence, and risk flags.
 8. TEMPLATE_LINK_MAP_JSON (optional):
    - Mapping from template_id to source URL (usually from templates/template_link.json).
 9. MODULE_INDEX_JSON (optional):
@@ -698,9 +698,10 @@ Current project mode is AutoPage-style: template-first generation with local tem
    - If it asks to emphasize something, allocate a prominent block for it.
    - If it asks to reduce density or merge content, reflect that in block structure and outline.
 9. TemplateProfile-aware planning:
-   - `blocks[*].target_template_region.selector_hint` must come from TEMPLATE_PROFILE_JSON.shell_candidates[*].selector.
-   - Prefer selector hints with higher compile confidence and stable shell signatures.
-   - Do not invent new shell selectors outside TEMPLATE_PROFILE_JSON.shell_candidates.
+   - `blocks[*].target_template_region.shell_id` must come from TEMPLATE_PROFILE_JSON.template_ir.shell_nodes[*].shell_id.
+   - `blocks[*].target_template_region.selector_hint` must match the canonical selector of that chosen shell_id.
+   - Prefer bindable shell nodes with higher compile confidence and stable shell signatures.
+   - Do not invent new shell ids or selectors outside TEMPLATE_PROFILE_JSON.template_ir.shell_nodes.
    - Use `dom_mapping` only as a compatibility field for global preserve anchors from TEMPLATE_PROFILE_JSON.global_preserve_selectors.
 10. Cleanup planning:
    - Populate selectors_to_remove with wrapper selectors for residual template garbage such as placeholder copy, irrelevant widgets, dummy images, stale footers, or unrelated template sections.
@@ -777,6 +778,7 @@ Current project mode is AutoPage-style: template-first generation with local tem
     {
       "block_id": "string",
       "target_template_region": {
+        "shell_id": "string",
         "selector_hint": "string",
         "region_role": "hero | section | gallery | table | footer | nav",
         "operation": "replace_text | replace_media | insert_after | append_child"

@@ -9,16 +9,27 @@ from typing import Any, Iterable
 from bs4 import BeautifulSoup, Tag
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.template.deterministic_selector import score_and_select_template
-from src.services.llm import get_llm
-from src.validators.page_manifest import _capture_wrapper_chain, _tag_classes, _tag_ids, _tag_tokens
-from src.template.catalog import find_entry_html_candidates
 from src.contracts.schemas import (
+    CanonicalShellNode,
+    TemplateIR,
     TemplateCandidate,
     TemplateProfile,
     TemplateShellCandidate,
     TemplateWidget,
 )
+from src.services.llm import get_llm
+from src.template.catalog import find_entry_html_candidates
+from src.template.deterministic_selector import score_and_select_template
+from src.template.structural_core import (
+    SHELL_CONTAINER_TAGS,
+    build_unique_selector,
+    capture_wrapper_chain,
+    dom_index_for_tag,
+    tag_classes,
+    tag_ids,
+    tag_tokens,
+)
+from src.template.template_ir import build_global_anchor_from_tag, selector_global_id
 from src.template.resources import SyncedTemplateAssets, ensure_autopage_template_assets
 
 _CACHE_DIR_NAME = ".paperalchemy"
@@ -237,60 +248,25 @@ def _build_source_fingerprint(template_root: Path, entry_html_path: Path) -> str
     return hasher.hexdigest()
 
 
-def _selector_segment(tag: Tag) -> str:
-    tag_name = str(tag.name or "div")
-    tag_id = str(tag.get("id") or "").strip()
-    if tag_id:
-        return f"{tag_name}#{tag_id}"
-
-    classes = [name for name in _tag_classes(tag)[:2] if name]
-    if classes:
-        return tag_name + "".join(f".{name}" for name in classes)
-
-    siblings = [sibling for sibling in tag.find_previous_siblings(tag_name) if isinstance(sibling, Tag)]
-    if siblings:
-        return f"{tag_name}:nth-of-type({len(siblings) + 1})"
-    return tag_name
-
-
-def build_unique_selector(tag: Tag, soup: BeautifulSoup) -> str:
-    segments: list[str] = []
-    current: Tag | None = tag
-    while current is not None and isinstance(current, Tag):
-        if str(current.name or "") in {"html", "body"}:
-            break
-        segments.insert(0, _selector_segment(current))
-        selector = " > ".join(segments)
-        try:
-            matches = [match for match in soup.select(selector) if isinstance(match, Tag)]
-        except Exception:
-            matches = []
-        if len(matches) == 1 and matches[0] is tag:
-            return selector
-        parent = current.parent
-        current = parent if isinstance(parent, Tag) else None
-    return " > ".join(segments) or str(tag.name or "div")
-
-
 def _is_candidate_root(tag: Tag) -> bool:
     tag_name = str(tag.name or "")
-    if tag_name not in {"section", "div", "article", "header", "main", "aside", "nav", "footer"}:
+    if tag_name not in SHELL_CONTAINER_TAGS:
         return False
     if tag.find_parent(["script", "style", "noscript"]) is not None:
         return False
-    tokens = _tag_tokens(tag)
+    tokens = tag_tokens(tag)
     if tokens & {"modal", "toast", "tooltip", "dropdown"}:
         return False
     if tag_name in {"header", "nav", "footer", "main", "article"}:
         return True
-    if tag.get("id") or _tag_classes(tag):
+    if tag.get("id") or tag_classes(tag):
         return True
     return tag.find(["h1", "h2", "h3", "img", "figure", "table", "canvas", "svg"]) is not None
 
 
 def _infer_shell_role(tag: Tag) -> tuple[str, list[str]]:
     tag_name = str(tag.name or "")
-    tokens = _tag_tokens(tag)
+    tokens = tag_tokens(tag)
     signals: list[str] = []
     role = "section"
     if tag_name == "footer" or "footer" in tokens:
@@ -319,19 +295,115 @@ def _infer_shell_role(tag: Tag) -> tuple[str, list[str]]:
     return role, signals
 
 
-def _dom_index_for_tag(template_soup: BeautifulSoup, target: Tag) -> int:
-    root = template_soup.body or template_soup
-    for dom_index, tag in enumerate(root.find_all(True)):
-        if tag is target:
-            return dom_index
-    return 10_000
+def _stable_slug(value: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower())
+    return slug.strip("_")
 
 
-def discover_template_shell_candidates(template_html: str) -> list[TemplateShellCandidate]:
+def _stable_shell_id(tag: Tag, role: str, seen_ids: set[str]) -> str:
+    preferred_tokens = tag_ids(tag) + [
+        token
+        for token in tag_classes(tag)
+        if token.lower() not in {"container", "wrapper", "section", "content"}
+    ]
+    preferred_tokens.extend([role, str(tag.name or "div")])
+    base = "_".join(filter(None, (_stable_slug(token) for token in preferred_tokens[:2])))
+    if not base:
+        base = f"{role}_{str(tag.name or 'div').lower()}"
+    shell_id = base
+    suffix = 2
+    while shell_id in seen_ids:
+        shell_id = f"{base}_{suffix:02d}"
+        suffix += 1
+    seen_ids.add(shell_id)
+    return shell_id
+
+
+def _global_anchor_score(tag: Tag, selector: str, global_id: str) -> float:
+    tag_name = str(tag.name or "")
+    tokens = tag_tokens(tag)
+    score = 0.4
+    if "#" in selector:
+        score += 0.2
+    elif "." in selector:
+        score += 0.1
+    if global_id == "header_nav" and (tag_name == "nav" or {"nav", "navbar", "menu"} & tokens):
+        score += 0.5
+    if global_id == "header_brand" and ({"brand", "logo"} & tokens or tag_name in {"h1", "a"}):
+        score += 0.5
+    if global_id == "header_primary_action" and (tag_name in {"a", "button"} or {"cta", "action", "button"} & tokens):
+        score += 0.5
+    if global_id == "footer_meta" and (tag_name == "footer" or "footer" in tokens):
+        score += 0.5
+    return min(score, 0.99)
+
+
+def discover_canonical_global_anchors(template_html: str) -> list:
+    soup = BeautifulSoup(str(template_html or ""), "html.parser")
+    root = soup.body or soup
+    sticky_pattern = re.compile(r"\b(sticky|affix|toc|table-of-contents|sidebar)\b", flags=re.IGNORECASE)
+    candidates_by_global: dict[str, list[tuple[float, str, Tag]]] = {}
+
+    for tag in root.find_all(True):
+        if not isinstance(tag, Tag):
+            continue
+        tokens = tag_tokens(tag)
+        keep = False
+        if str(tag.name or "") in {"header", "nav", "footer"}:
+            keep = True
+        elif tokens & {"header", "navbar", "nav", "footer", "brand", "logo", "cta", "action"}:
+            keep = True
+        elif any(sticky_pattern.search(token) for token in tokens):
+            keep = True
+        if not keep:
+            continue
+
+        selector = build_unique_selector(tag, soup)
+        global_id = selector_global_id(selector)
+        if not selector or global_id is None:
+            continue
+        candidates_by_global.setdefault(global_id, []).append(
+            (_global_anchor_score(tag, selector, global_id), selector, tag)
+        )
+
+    anchors = []
+    for global_id, entries in candidates_by_global.items():
+        entries.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        confidence, selector, tag = entries[0]
+        anchors.append(
+            build_global_anchor_from_tag(
+                selector=selector,
+                global_id=global_id,
+                tag=tag,
+                soup=soup,
+                confidence=round(confidence, 3),
+            )
+        )
+    return sorted(anchors, key=lambda item: item.global_id)
+
+
+def discover_template_ir(
+    template_html: str,
+    *,
+    unsafe_selectors: list[str] | None = None,
+) -> TemplateIR:
     template_soup = BeautifulSoup(str(template_html or ""), "html.parser")
     root = template_soup.body or template_soup
-    candidates: list[TemplateShellCandidate] = []
+    shell_nodes: list[CanonicalShellNode] = []
     seen: set[str] = set()
+    seen_ids: set[str] = set()
+    unsafe_selector_set = {str(selector or "").strip() for selector in (unsafe_selectors or []) if str(selector or "").strip()}
+    global_anchors = discover_canonical_global_anchors(template_html)
+    protected_selectors = {
+        str(anchor.selector or "").strip()
+        for anchor in global_anchors
+        if str(anchor.selector or "").strip()
+    }
+    protected_selectors.update(
+        str(anchor.actionable_selector or "").strip()
+        for anchor in global_anchors
+        if str(anchor.actionable_selector or "").strip()
+    )
 
     for tag in root.find_all(True):
         if not _is_candidate_root(tag):
@@ -360,50 +432,49 @@ def discover_template_shell_candidates(template_html: str) -> list[TemplateShell
         if ":nth-of-type" in selector:
             confidence -= 0.1
             signals.append("positional_selector")
-        dom_index = _dom_index_for_tag(template_soup, tag)
-        candidates.append(
-            TemplateShellCandidate(
+        dom_index = dom_index_for_tag(template_soup, tag)
+        node_risk_flags = sorted({"unsafe_widget_shell"} if selector in unsafe_selector_set else set())
+        shell_nodes.append(
+            CanonicalShellNode(
+                shell_id=_stable_shell_id(tag, role, seen_ids),
                 selector=selector,
-                role=role,  # type: ignore[arg-type]
                 root_tag=str(tag.name or "div"),
-                required_classes=_tag_classes(tag),
-                preserve_ids=_tag_ids(tag),
-                wrapper_chain=_capture_wrapper_chain(tag),
+                required_classes=tag_classes(tag),
+                preserve_ids=tag_ids(tag),
+                wrapper_chain=capture_wrapper_chain(tag),
+                actionable_root_selector=selector,
+                region_role=role,  # type: ignore[arg-type]
                 dom_index=dom_index,
                 confidence=round(max(0.05, min(confidence, 0.99)), 3),
+                bindable=selector not in protected_selectors,
                 signals=sorted(set(signals)),
+                risk_flags=node_risk_flags,
             )
         )
 
-    candidates.sort(key=lambda item: (item.dom_index, -item.confidence, item.selector))
-    return candidates[:_MAX_SHELL_CANDIDATES]
+    shell_nodes.sort(key=lambda item: (item.dom_index, -item.confidence, item.selector))
+    return TemplateIR(
+        shell_nodes=shell_nodes[:_MAX_SHELL_CANDIDATES],
+        global_anchors=global_anchors,
+    )
 
 
-def _collect_global_preserve_selectors(template_html: str) -> list[str]:
-    soup = BeautifulSoup(str(template_html or ""), "html.parser")
-    root = soup.body or soup
-    selectors: list[str] = []
-    seen: set[str] = set()
-    sticky_pattern = re.compile(r"\b(sticky|affix|toc|table-of-contents|sidebar)\b", flags=re.IGNORECASE)
-
-    for tag in root.find_all(True):
-        if not isinstance(tag, Tag):
-            continue
-        tokens = _tag_tokens(tag)
-        keep = False
-        if str(tag.name or "") in {"header", "nav", "footer"}:
-            keep = True
-        elif tokens & {"header", "navbar", "nav", "footer", "brand"}:
-            keep = True
-        elif any(sticky_pattern.search(token) for token in tokens):
-            keep = True
-        if not keep:
-            continue
-        selector = build_unique_selector(tag, soup)
-        if selector and selector not in seen:
-            seen.add(selector)
-            selectors.append(selector)
-    return selectors[:10]
+def discover_template_shell_candidates(template_html: str) -> list[TemplateShellCandidate]:
+    template_ir = discover_template_ir(template_html)
+    return TemplateProfile(
+        template_id="compat",
+        template_root_dir="compat",
+        entry_html="index.html",
+        archetype="compat",
+        template_ir=template_ir,
+        optional_widgets=[],
+        removable_demo_selectors=[],
+        unsafe_selectors=[],
+        compile_confidence=0.0,
+        risk_flags=[],
+        notes=[],
+        source_fingerprint="compat",
+    ).shell_candidates
 
 
 def _collect_demo_selectors(template_html: str) -> list[str]:
@@ -472,7 +543,7 @@ def _collect_widgets_and_risks(template_root: Path, template_html: str) -> tuple
     for tag in soup.find_all(True):
         if not isinstance(tag, Tag):
             continue
-        tokens = _tag_tokens(tag)
+        tokens = tag_tokens(tag)
         if tag.name == "canvas" or tokens & {"chart", "plot", "echart", "apexchart"}:
             _append_widget(tag, "chart", ["chart_runtime_dependency"])
         if tokens & {"carousel", "slider", "swiper", "splide"}:
@@ -505,7 +576,7 @@ def _infer_archetype(template_root: Path, template_html: str, widgets: list[Temp
     root_tokens = {
         token
         for tag in soup.find_all(["body", "main", "header", "nav", "section", "article", "div"], limit=30)
-        for token in _tag_tokens(tag)
+        for token in tag_tokens(tag)
     }
     linked_assets = "\n".join(
         _read_text_safely(path)
@@ -625,13 +696,32 @@ def compile_template_profile(
         if cached_profile is not None:
             return cached_profile, cache_path, True
 
-    shell_candidates = discover_template_shell_candidates(entry_html_text)
-    global_preserve_selectors = _collect_global_preserve_selectors(entry_html_text)
     removable_demo_selectors = _collect_demo_selectors(entry_html_text)
     widgets, unsafe_selectors, widget_risks = _collect_widgets_and_risks(template_root, entry_html_text)
+    template_ir = discover_template_ir(
+        entry_html_text,
+        unsafe_selectors=unsafe_selectors,
+    )
+    shell_candidates = [
+        TemplateShellCandidate(
+            selector=node.selector,
+            role=node.region_role,
+            root_tag=node.root_tag,
+            required_classes=list(node.required_classes),
+            preserve_ids=list(node.preserve_ids),
+            wrapper_chain=list(node.wrapper_chain),
+            dom_index=int(node.dom_index),
+            confidence=float(node.confidence or 0.0),
+            signals=list(node.signals),
+        )
+        for node in template_ir.shell_nodes
+        if node.bindable
+    ]
+    global_preserve_selectors = [anchor.selector for anchor in template_ir.global_anchors if str(anchor.selector or "").strip()]
     archetype = _infer_archetype(template_root, entry_html_text, widgets)
     notes = [
-        f"shell_candidates={len(shell_candidates)}",
+        f"shell_nodes={len(template_ir.shell_nodes)}",
+        f"bindable_shell_nodes={len(shell_candidates)}",
         f"globals={len(global_preserve_selectors)}",
         f"widgets={len(widgets)}",
         f"archetype={archetype}",
@@ -647,8 +737,7 @@ def compile_template_profile(
         "template_id": normalized_candidate.template_id,
         "entry_html": normalized_candidate.chosen_entry_html,
         "archetype": archetype,
-        "global_preserve_selectors": global_preserve_selectors,
-        "shell_candidates": [candidate.model_dump() for candidate in shell_candidates[:10]],
+        "template_ir": template_ir.model_dump(),
         "optional_widgets": [widget.model_dump() for widget in widgets[:10]],
         "risk_flags": risk_flags,
         "notes": notes,
@@ -673,6 +762,7 @@ def compile_template_profile(
         template_root_dir=_to_project_relative_path(template_root, project_root),
         entry_html=normalized_candidate.chosen_entry_html,
         archetype=archetype,
+        template_ir=template_ir,
         global_preserve_selectors=global_preserve_selectors,
         shell_candidates=shell_candidates,
         optional_widgets=widgets,

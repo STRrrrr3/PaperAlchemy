@@ -10,6 +10,7 @@ from src.services.llm import get_llm
 from src.prompts import PLANNER_CRITIC_SYSTEM_PROMPT, PLANNER_CRITIC_USER_PROMPT_TEMPLATE
 from src.contracts.schemas import PagePlan, PlannerCriticReport, StructuredPaper, TemplateCandidate, TemplateProfile
 from src.contracts.state import PlannerState
+from src.template.template_ir import canonical_shell_nodes
 
 MAX_PLANNER_RETRY_DEFAULT = 2
 _STABLE_BLOCK_ID_PATTERN = re.compile(r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$")
@@ -202,10 +203,10 @@ def run_planner_code_critic(
                 )
 
     if template_profile is not None:
-        allowed_shell_selectors = {
-            str(candidate.selector or "").strip()
-            for candidate in template_profile.shell_candidates
-            if str(candidate.selector or "").strip()
+        allowed_shells_by_id = {
+            str(candidate.shell_id or "").strip(): candidate
+            for candidate in canonical_shell_nodes(template_profile, bindable_only=True)
+            if str(candidate.shell_id or "").strip()
         }
         allowed_global_selectors = {
             str(selector or "").strip()
@@ -213,10 +214,22 @@ def run_planner_code_critic(
             if str(selector or "").strip()
         }
         for block in page_plan.blocks:
+            shell_id = str(block.target_template_region.shell_id or "").strip()
             selector_hint = str(block.target_template_region.selector_hint or "").strip()
-            if selector_hint not in allowed_shell_selectors:
+            if not shell_id:
                 critiques.append(
-                    f"block '{block.block_id}' selector_hint '{selector_hint}' is not present in TemplateProfile.shell_candidates."
+                    f"block '{block.block_id}' must bind to a canonical TemplateIR shell_id."
+                )
+                continue
+            shell_node = allowed_shells_by_id.get(shell_id)
+            if shell_node is None:
+                critiques.append(
+                    f"block '{block.block_id}' shell_id '{shell_id}' is not present in TemplateProfile.template_ir.shell_nodes."
+                )
+                continue
+            if selector_hint != str(shell_node.selector or "").strip():
+                critiques.append(
+                    f"block '{block.block_id}' selector_hint '{selector_hint}' does not match canonical shell selector '{shell_node.selector}'."
                 )
         unexpected_dom_mapping = sorted(set(page_plan.dom_mapping) - allowed_global_selectors)
         if unexpected_dom_mapping:

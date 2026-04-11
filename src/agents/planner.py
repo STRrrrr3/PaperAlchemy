@@ -1,5 +1,4 @@
 ﻿import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -13,10 +12,12 @@ from src.utils.json_utils import to_pretty_json
 from src.services.llm import get_llm
 from src.template.catalog import build_template_catalog, load_module_index, load_template_link_map
 from src.prompts import PLANNER_SYSTEM_PROMPT, PLANNER_USER_PROMPT_TEMPLATE
-from src.contracts.schemas import BlockShellContract, PagePlan, StructuredPaper, TemplateCandidate, TemplateProfile
+from src.contracts.schemas import PagePlan, StructuredPaper, TemplateCandidate, TemplateProfile
 from src.contracts.state import PlannerState
 from src.template.compile import prepare_template_compile_bundle
 from src.template.resources import ensure_autopage_template_assets
+from src.template.structural_core import selector_tokens
+from src.template.template_ir import build_shell_contract, canonical_shell_nodes
 
 
 def _normalize_structured_paper(paper: Any) -> StructuredPaper | None:
@@ -74,27 +75,9 @@ def _dedupe_strings(values: list[str]) -> list[str]:
     return deduped
 
 
-def _selector_tokens(selector: str) -> set[str]:
-    return {
-        token
-        for token in re.split(r"[^a-z0-9]+", str(selector or "").lower())
-        if token
-    }
-
-
-def _build_shell_contract_from_candidate(candidate: Any) -> BlockShellContract:
-    return BlockShellContract(
-        root_tag=str(candidate.root_tag or "div"),
-        required_classes=list(candidate.required_classes or []),
-        preserve_ids=list(candidate.preserve_ids or []),
-        wrapper_chain=list(candidate.wrapper_chain or []),
-        actionable_root_selector=str(candidate.selector or "").strip(),
-    )
-
-
 def _ordered_shell_candidates(profile: TemplateProfile) -> list[Any]:
     return sorted(
-        profile.shell_candidates,
+        canonical_shell_nodes(profile, bindable_only=True),
         key=lambda item: (item.dom_index, -item.confidence, item.selector),
     )
 
@@ -103,32 +86,35 @@ def _choose_shell_candidate(
     profile: TemplateProfile,
     *,
     desired_role: str,
+    preferred_shell_id: str,
     preferred_selector: str,
-    used_selectors: set[str],
+    used_shell_ids: set[str],
 ) -> Any | None:
-    selector_tokens = _selector_tokens(preferred_selector)
+    preferred_selector_tokens = selector_tokens(preferred_selector)
     best_candidate = None
     best_score = float("-inf")
 
     for candidate in _ordered_shell_candidates(profile):
-        if candidate.selector in used_selectors:
+        if candidate.shell_id in used_shell_ids:
             continue
         score = float(candidate.confidence or 0.0) * 10.0
-        if str(candidate.role or "") == desired_role:
+        if str(candidate.region_role or "") == desired_role:
             score += 5.0
-        elif desired_role in {"hero", "section"} and str(candidate.role or "") in {"hero", "section"}:
+        elif desired_role in {"hero", "section"} and str(candidate.region_role or "") in {"hero", "section"}:
             score += 2.5
-        elif desired_role == "gallery" and str(candidate.role or "") == "section":
+        elif desired_role == "gallery" and str(candidate.region_role or "") == "section":
             score += 1.5
-        elif desired_role == "table" and str(candidate.role or "") == "section":
+        elif desired_role == "table" and str(candidate.region_role or "") == "section":
             score += 1.0
         else:
             score -= 1.5
 
-        if preferred_selector and candidate.selector == preferred_selector:
+        if preferred_shell_id and candidate.shell_id == preferred_shell_id:
+            score += 8.0
+        elif preferred_selector and candidate.selector == preferred_selector:
             score += 6.0
-        elif selector_tokens:
-            score += min(3.0, float(len(selector_tokens & _selector_tokens(candidate.selector))))
+        elif preferred_selector_tokens:
+            score += min(3.0, float(len(preferred_selector_tokens & selector_tokens(candidate.selector))))
 
         if candidate.preserve_ids:
             score += 0.6
@@ -144,26 +130,29 @@ def _choose_shell_candidate(
 def _normalize_blocks_with_template_profile(page_plan: PagePlan, template_profile: TemplateProfile) -> PagePlan:
     outline_lookup = {item.block_id: item for item in page_plan.page_outline}
     updated_blocks = []
-    used_selectors: set[str] = set()
+    used_shell_ids: set[str] = set()
 
     for block in page_plan.blocks:
+        preferred_shell_id = str(block.target_template_region.shell_id or "").strip()
         preferred_selector = str(block.target_template_region.selector_hint or "").strip()
         desired_role = str(block.target_template_region.region_role or "section").strip() or "section"
         chosen_candidate = _choose_shell_candidate(
             template_profile,
             desired_role=desired_role,
+            preferred_shell_id=preferred_shell_id,
             preferred_selector=preferred_selector,
-            used_selectors=used_selectors,
+            used_shell_ids=used_shell_ids,
         )
         if chosen_candidate is None:
             updated_blocks.append(block)
             continue
 
-        used_selectors.add(chosen_candidate.selector)
+        used_shell_ids.add(chosen_candidate.shell_id)
         updated_region = block.target_template_region.model_copy(
             update={
+                "shell_id": chosen_candidate.shell_id,
                 "selector_hint": chosen_candidate.selector,
-                "region_role": str(chosen_candidate.role or desired_role),
+                "region_role": str(chosen_candidate.region_role or desired_role),
             },
             deep=True,
         )
@@ -178,7 +167,7 @@ def _normalize_blocks_with_template_profile(page_plan: PagePlan, template_profil
             block.model_copy(
                 update={
                     "target_template_region": updated_region,
-                    "shell_contract": _build_shell_contract_from_candidate(chosen_candidate),
+                    "shell_contract": build_shell_contract(chosen_candidate),
                     "responsive_rules": updated_responsive_rules,
                 },
                 deep=True,
@@ -204,7 +193,7 @@ def _normalize_selectors_to_remove(page_plan: PagePlan, template_profile: Templa
     }
     protected_selectors.update(
         str(candidate.selector or "").strip()
-        for candidate in template_profile.shell_candidates
+        for candidate in canonical_shell_nodes(template_profile, bindable_only=True)
         if str(candidate.selector or "").strip()
     )
     merged = list(page_plan.selectors_to_remove or []) + list(template_profile.removable_demo_selectors or [])

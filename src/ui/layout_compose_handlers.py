@@ -21,6 +21,7 @@ from src.workflows.batch_runtime import render_current_workflow_preview
 from src.workflows.hitl_graph import get_default_hitl_workflow
 from src.workflows.hitl_nodes import (
     _get_template_entry_path,
+    _load_template_profile_for_state,
     normalize_coder_artifact,
     normalize_layout_compose_session,
     normalize_visual_smoke_report,
@@ -298,11 +299,13 @@ def continue_layout_compose_to_draft(
             )
 
         approved_page_plan = _load_snapshot_page_plan(snapshot_values)
+        template_profile = _load_template_profile_for_state(snapshot_values)
         template_entry_path = _get_template_entry_path(approved_page_plan)
         composed_page_plan = apply_layout_compose_session_to_page_plan(
             approved_page_plan,
             updated_session,
             read_text_with_fallback(template_entry_path),
+            template_profile=template_profile,
         )
         paper_folder_name = str(snapshot_values.get("paper_folder_name") or "").strip()
         if not paper_folder_name:

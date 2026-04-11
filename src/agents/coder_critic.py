@@ -8,6 +8,7 @@ from typing import Any
 from bs4 import BeautifulSoup
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from src.services.artifact_store import load_template_profile
 from src.utils.html_utils import message_content_to_text
 from src.services.llm import get_llm
 from src.validators.page_manifest import build_page_manifest_path, extract_page_manifest, load_page_manifest
@@ -42,6 +43,15 @@ def _normalize_page_plan(plan: Any) -> PagePlan | None:
         return PagePlan.model_validate(plan)
     except Exception:
         return None
+
+
+def _load_template_profile_from_artifact(artifact: CoderArtifact | None):
+    if artifact is None:
+        return None
+    template_profile_path = str(artifact.template_profile_path or "").strip()
+    if not template_profile_path:
+        return None
+    return load_template_profile(Path(template_profile_path))
 
 
 def _extract_json_object(text: str) -> dict[str, Any] | None:
@@ -224,6 +234,7 @@ def run_coder_code_critic(artifact: CoderArtifact | None, page_plan: PagePlan | 
     if manifest is None:
         critiques.append(f"Anchored revision manifest is missing or invalid: {manifest_path}")
     else:
+        template_profile = _load_template_profile_from_artifact(artifact)
         try:
             rebuilt_manifest = extract_page_manifest(
                 html_text=html_text,
@@ -231,6 +242,7 @@ def run_coder_code_critic(artifact: CoderArtifact | None, page_plan: PagePlan | 
                 selected_template_id=artifact.selected_template_id,
                 page_plan=page_plan,
                 require_expected_globals=str(manifest.schema_version or "").strip() != "1.0",
+                template_profile=template_profile,
             )
             if manifest.model_dump() != rebuilt_manifest.model_dump():
                 critiques.append("page_manifest.json is out of sync with current entry html anchors.")
