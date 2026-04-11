@@ -350,11 +350,31 @@ def extract_page_manifest(
                 source_sections=source_sections_lookup.get(block_id, []),
                 selector=build_block_selector(block_id),
                 slots=slot_records,
-                root_tag=str(block_tag.name or "div"),
-                root_classes=_tag_classes(block_tag),
-                preserve_ids=_tag_ids(block_tag),
-                wrapper_chain=_capture_wrapper_chain(block_tag),
-                actionable_root_selector=build_block_selector(block_id),
+                root_tag=(
+                    expected_shell_contract.root_tag
+                    if expected_shell_contract is not None
+                    else str(block_tag.name or "div")
+                ),
+                root_classes=(
+                    expected_shell_contract.required_classes
+                    if expected_shell_contract is not None
+                    else _tag_classes(block_tag)
+                ),
+                preserve_ids=(
+                    expected_shell_contract.preserve_ids
+                    if expected_shell_contract is not None
+                    else _tag_ids(block_tag)
+                ),
+                wrapper_chain=(
+                    expected_shell_contract.wrapper_chain
+                    if expected_shell_contract is not None
+                    else _capture_wrapper_chain(block_tag)
+                ),
+                actionable_root_selector=(
+                    expected_shell_contract.actionable_root_selector
+                    if expected_shell_contract is not None
+                    else build_block_selector(block_id)
+                ),
             )
         )
 
