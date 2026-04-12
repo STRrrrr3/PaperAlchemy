@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from src.contracts.schemas import SemanticPlan, TemplateCandidate
+from src.contracts.schemas import SemanticPagePlan, TemplateCandidate
 
 
 def _text_blob(template_item: dict[str, Any]) -> str:
@@ -35,7 +35,7 @@ def _has_capability(template_item: dict[str, Any], capability: str) -> bool:
     return True
 
 
-def _score_template(template_item: dict[str, Any], semantic_plan: SemanticPlan) -> tuple[float, list[str]]:
+def _score_template(template_item: dict[str, Any], semantic_plan: SemanticPagePlan) -> tuple[float, list[str]]:
     score = 0.0
     reasons: list[str] = []
 
@@ -48,7 +48,7 @@ def _score_template(template_item: dict[str, Any], semantic_plan: SemanticPlan) 
         reasons.append("missing_entry_html")
 
     blob = _text_blob(template_item)
-    for kw in semantic_plan.style_keywords:
+    for kw in semantic_plan.global_design.style_keywords:
         key = kw.strip().lower()
         if not key:
             continue
@@ -56,25 +56,31 @@ def _score_template(template_item: dict[str, Any], semantic_plan: SemanticPlan) 
             score += 0.12
             reasons.append(f"style_kw_match:{key}")
 
-    for capability in semantic_plan.required_capabilities:
-        cap = capability.strip().lower()
-        if not cap:
-            continue
-        if _has_capability(template_item, cap):
+    needs_interactivity = any(block.interaction.pattern != "none" for block in semantic_plan.semantic_blocks)
+    if needs_interactivity:
+        if _has_capability(template_item, "needs_interactivity"):
             score += 0.18
-            reasons.append(f"cap_ok:{cap}")
+            reasons.append("cap_ok:needs_interactivity")
         else:
             score -= 0.2
-            reasons.append(f"cap_miss:{cap}")
+            reasons.append("cap_miss:needs_interactivity")
 
     high_media_blocks = [
-        blk for blk in semantic_plan.block_blueprint if blk.media_intensity == "high"
+        blk for blk in semantic_plan.semantic_blocks if blk.asset_binding.figure_paths
     ]
     if high_media_blocks and bool(template_item.get("has_image_info")):
         score += 0.15
         reasons.append("high_media_compatible")
 
-    block_count = len(semantic_plan.block_blueprint)
+    if any(block.preferred_region_role == "table" for block in semantic_plan.semantic_blocks):
+        if _has_capability(template_item, "needs_table_friendly_layout"):
+            score += 0.12
+            reasons.append("cap_ok:needs_table_friendly_layout")
+        else:
+            score -= 0.12
+            reasons.append("cap_miss:needs_table_friendly_layout")
+
+    block_count = len(semantic_plan.page_outline)
     if block_count >= 8 and len(template_item.get("style_files") or []) > 0:
         score += 0.08
         reasons.append("long_page_style_support")
@@ -84,7 +90,7 @@ def _score_template(template_item: dict[str, Any], semantic_plan: SemanticPlan) 
 
 def select_template_candidates(
     template_catalog: list[dict[str, Any]],
-    semantic_plan: SemanticPlan,
+    semantic_plan: SemanticPagePlan,
     top_k: int,
 ) -> list[TemplateCandidate]:
     if not template_catalog:

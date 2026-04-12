@@ -35,26 +35,10 @@ class CriticReport(BaseModel):
     extraction_feedback: str = Field(description="Actionable feedback when extraction fails audit.")
 
 
-class SemanticBlock(BaseModel):
-    block_id: str
-    order: int
-    title: str
-    objective: str
-    source_sections: List[str]
-    preferred_interaction: Literal["none", "tabs", "accordion", "carousel", "hover-detail", "comparison-slider"]
-    media_intensity: Literal["low", "medium", "high"]
-
-
-class SemanticPlan(BaseModel):
-    # Deprecated runtime artifact kept temporarily for staged cleanup. The live planner
-    # flow now produces PagePlan directly via unified_planner.
-    plan_version: str = Field(description="Semantic planning schema version.")
-    planning_mode: Literal["hybrid_two_stage"] = Field(description="Hybrid planner mode id.")
-    design_intent: str = Field(description="High-level design objective.")
-    style_keywords: List[str] = Field(description="Visual style keywords.")
-    required_capabilities: List[str] = Field(description="Template capability requirements.")
-    block_blueprint: List[SemanticBlock] = Field(description="Template-agnostic block structure.")
-    novelty_points: List[str] = Field(description="Key innovation points to emphasize.")
+class SemanticPlanMeta(BaseModel):
+    plan_version: str = Field(description="Semantic planner schema version, e.g., '2.0'.")
+    planning_mode: Literal["semantic_only"] = Field(description="Semantic-only planner mode identifier.")
+    confidence: float = Field(description="Planner confidence in [0, 1].")
 
     @field_validator("planning_mode", mode="before")
     @classmethod
@@ -64,14 +48,48 @@ class SemanticPlan(BaseModel):
 
         normalized = value.strip().lower()
         alias_map = {
-            "hybrid": "hybrid_two_stage",
-            "hybrid-semantic": "hybrid_two_stage",
-            "hybrid_semantic": "hybrid_two_stage",
-            "hybrid two stage": "hybrid_two_stage",
-            "hybrid-two-stage": "hybrid_two_stage",
-            "two_stage": "hybrid_two_stage",
+            "semantic": "semantic_only",
+            "semantic_first": "semantic_only",
+            "semantic-first": "semantic_only",
+            "semantic planner": "semantic_only",
         }
         return alias_map.get(normalized, value)
+
+
+class SemanticTemplateSelection(BaseModel):
+    selection_rationale: str = Field(description="Why the upstream-selected template is a good semantic fit.")
+    fallback_template_id: Optional[str] = Field(
+        default=None,
+        description="Optional fallback template id from the candidate list.",
+    )
+
+
+class SemanticBlockPlan(BaseModel):
+    block_id: str
+    narrative_role: Literal["hook", "evidence", "method", "result", "conclusion", "supplement"]
+    preferred_region_role: Literal["hero", "section", "gallery", "table", "footer", "nav"]
+    presentation_priority: Literal["primary", "secondary", "supporting"]
+    component_recipe: List["ComponentRecipeItem"]
+    content_contract: "ContentContract"
+    asset_binding: "AssetBinding"
+    interaction: "InteractionPlan"
+    layout_notes: Optional[str] = Field(
+        default=None,
+        description="Optional semantic layout or presentation intent for deterministic binding.",
+    )
+    a11y_notes: List[str]
+    acceptance_checks: List[str]
+
+
+class SemanticPagePlan(BaseModel):
+    plan_meta: SemanticPlanMeta
+    template_selection: SemanticTemplateSelection
+    decision_summary: "DecisionSummary"
+    adaptation_strategy: "AdaptationStrategy"
+    global_design: "GlobalDesign"
+    page_outline: List["PageOutlineItem"]
+    semantic_blocks: List[SemanticBlockPlan]
+    open_questions: List[str]
 
 
 class TemplateCandidate(BaseModel):

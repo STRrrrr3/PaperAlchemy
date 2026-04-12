@@ -14,7 +14,7 @@ from src.agents.coder_critic import (
     take_screenshot_action,
     vision_critic_node,
 )
-from src.agents.planner import run_planner_agent, unified_planner_node
+from src.agents.planner import finalize_planner_output, run_planner_agent, unified_planner_node
 from src.agents.planner_critic import build_planner_critic_router, planner_critic_node
 from src.agents.reader import _load_reader_inputs, reader_node, run_reader_agent
 from src.agents.reader_critic import build_critic_router, critic_node
@@ -749,6 +749,7 @@ def _planner_phase_prepare_node(state: PlannerPhaseState) -> dict[str, Any]:
         "selected_template": selected_template,
         "template_profile": template_profile,
         "planner_feedback_history": [],
+        "semantic_page_plan": None,
         "page_plan": None,
         "planner_critic_passed": False,
         "planner_retry_count": 0,
@@ -757,10 +758,20 @@ def _planner_phase_prepare_node(state: PlannerPhaseState) -> dict[str, Any]:
 
 def _planner_phase_finalize_node(state: PlannerPhaseState) -> dict[str, Any]:
     paper_folder_name = _workflow_paper_folder_name(state)
-    page_plan = PagePlan.model_validate(state.get("page_plan"))
+    page_plan = finalize_planner_output(
+        semantic_page_plan=state.get("semantic_page_plan"),
+        selected_template=_normalize_selected_template(state.get("selected_template")),
+        template_profile=_load_template_profile_for_state(state),
+        generation_constraints=dict(state.get("generation_constraints") or {}),
+        template_candidates=_normalize_template_candidates(state.get("template_candidates")),
+        planner_critic_passed=bool(state.get("planner_critic_passed")),
+        planner_feedback_history=list(state.get("planner_feedback_history") or []),
+    )
+    if page_plan is None:
+        raise RuntimeError("Planner agent failed to produce a valid bound page plan.")
     _, _, planner_json_path, _ = get_output_paths(paper_folder_name)
     if not bool(state.get("planner_critic_passed")):
-        print("[PaperAlchemy-Planner] planner completed but critic did not fully pass.")
+        print("[PaperAlchemy-Planner] planner completed but semantic critic did not fully pass.")
     else:
         print("[PaperAlchemy-Planner] planner phase completed successfully.")
     save_page_plan(planner_json_path, page_plan)
@@ -768,6 +779,7 @@ def _planner_phase_finalize_node(state: PlannerPhaseState) -> dict[str, Any]:
     return {
         "structured_paper": None,
         "template_profile": None,
+        "semantic_page_plan": None,
         "page_plan": None,
         "previous_page_plan": None,
         "approved_page_plan": None,

@@ -1,4 +1,4 @@
-﻿import json
+import json
 from pathlib import Path
 from typing import Any
 
@@ -6,18 +6,27 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, StateGraph
 
-from src.agents.planner_critic import build_planner_critic_router, planner_critic_node
+from src.agents.planner_critic import (
+    build_planner_critic_router,
+    planner_critic_node,
+    run_bound_plan_validation,
+)
 from src.services.human_feedback import extract_human_feedback_text, normalize_human_feedback
 from src.utils.json_utils import to_pretty_json
 from src.services.llm import get_llm
+from src.template.plan_binder import bind_semantic_plan
 from src.template.catalog import build_template_catalog, load_module_index, load_template_link_map
 from src.prompts import PLANNER_SYSTEM_PROMPT, PLANNER_USER_PROMPT_TEMPLATE
-from src.contracts.schemas import PagePlan, StructuredPaper, TemplateCandidate, TemplateProfile
+from src.contracts.schemas import (
+    PagePlan,
+    SemanticPagePlan,
+    StructuredPaper,
+    TemplateCandidate,
+    TemplateProfile,
+)
 from src.contracts.state import PlannerState
 from src.template.compile import prepare_template_compile_bundle
 from src.template.resources import ensure_autopage_template_assets
-from src.template.structural_core import selector_tokens
-from src.template.template_ir import build_shell_contract, canonical_shell_nodes
 
 
 def _normalize_structured_paper(paper: Any) -> StructuredPaper | None:
@@ -38,6 +47,17 @@ def _normalize_page_plan(plan: Any) -> PagePlan | None:
         return None
     try:
         return PagePlan.model_validate(plan)
+    except Exception:
+        return None
+
+
+def _normalize_semantic_page_plan(plan: Any) -> SemanticPagePlan | None:
+    if isinstance(plan, SemanticPagePlan):
+        return plan
+    if plan is None:
+        return None
+    try:
+        return SemanticPagePlan.model_validate(plan)
     except Exception:
         return None
 
@@ -64,179 +84,16 @@ def _normalize_template_profile(profile: Any) -> TemplateProfile | None:
         return None
 
 
-def _dedupe_strings(values: list[str]) -> list[str]:
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for value in values:
-        clean = str(value or "").strip()
-        if clean and clean not in seen:
-            seen.add(clean)
-            deduped.append(clean)
-    return deduped
-
-
-def _ordered_shell_candidates(profile: TemplateProfile) -> list[Any]:
-    return sorted(
-        canonical_shell_nodes(profile, bindable_only=True),
-        key=lambda item: (item.dom_index, -item.confidence, item.selector),
-    )
-
-
-def _choose_shell_candidate(
-    profile: TemplateProfile,
-    *,
-    desired_role: str,
-    preferred_shell_id: str,
-    preferred_selector: str,
-    used_shell_ids: set[str],
-) -> Any | None:
-    preferred_selector_tokens = selector_tokens(preferred_selector)
-    best_candidate = None
-    best_score = float("-inf")
-
-    for candidate in _ordered_shell_candidates(profile):
-        if candidate.shell_id in used_shell_ids:
-            continue
-        score = float(candidate.confidence or 0.0) * 10.0
-        if str(candidate.region_role or "") == desired_role:
-            score += 5.0
-        elif desired_role in {"hero", "section"} and str(candidate.region_role or "") in {"hero", "section"}:
-            score += 2.5
-        elif desired_role == "gallery" and str(candidate.region_role or "") == "section":
-            score += 1.5
-        elif desired_role == "table" and str(candidate.region_role or "") == "section":
-            score += 1.0
-        else:
-            score -= 1.5
-
-        if preferred_shell_id and candidate.shell_id == preferred_shell_id:
-            score += 8.0
-        elif preferred_selector and candidate.selector == preferred_selector:
-            score += 6.0
-        elif preferred_selector_tokens:
-            score += min(3.0, float(len(preferred_selector_tokens & selector_tokens(candidate.selector))))
-
-        if candidate.preserve_ids:
-            score += 0.6
-        if candidate.required_classes:
-            score += 0.4
-        if score > best_score:
-            best_candidate = candidate
-            best_score = score
-
-    return best_candidate
-
-
-def _normalize_blocks_with_template_profile(page_plan: PagePlan, template_profile: TemplateProfile) -> PagePlan:
-    outline_lookup = {item.block_id: item for item in page_plan.page_outline}
-    updated_blocks = []
-    used_shell_ids: set[str] = set()
-
-    for block in page_plan.blocks:
-        preferred_shell_id = str(block.target_template_region.shell_id or "").strip()
-        preferred_selector = str(block.target_template_region.selector_hint or "").strip()
-        desired_role = str(block.target_template_region.region_role or "section").strip() or "section"
-        chosen_candidate = _choose_shell_candidate(
-            template_profile,
-            desired_role=desired_role,
-            preferred_shell_id=preferred_shell_id,
-            preferred_selector=preferred_selector,
-            used_shell_ids=used_shell_ids,
-        )
-        if chosen_candidate is None:
-            updated_blocks.append(block)
-            continue
-
-        used_shell_ids.add(chosen_candidate.shell_id)
-        updated_region = block.target_template_region.model_copy(
-            update={
-                "shell_id": chosen_candidate.shell_id,
-                "selector_hint": chosen_candidate.selector,
-                "region_role": str(chosen_candidate.region_role or desired_role),
-            },
-            deep=True,
-        )
-        updated_outline = outline_lookup.get(block.block_id)
-        updated_responsive_rules = block.responsive_rules.model_copy(
-            update={
-                "mobile_order": int(updated_outline.order if updated_outline is not None else block.responsive_rules.mobile_order)
-            },
-            deep=True,
-        )
-        updated_blocks.append(
-            block.model_copy(
-                update={
-                    "target_template_region": updated_region,
-                    "shell_contract": build_shell_contract(chosen_candidate),
-                    "responsive_rules": updated_responsive_rules,
-                },
-                deep=True,
-            )
-        )
-
-    return page_plan.model_copy(update={"blocks": updated_blocks}, deep=True)
-
-
-def _compat_dom_mapping(template_profile: TemplateProfile) -> dict[str, str]:
-    return {
-        selector: "preserve_global_anchor"
-        for selector in template_profile.global_preserve_selectors
-        if str(selector or "").strip()
-    }
-
-
-def _normalize_selectors_to_remove(page_plan: PagePlan, template_profile: TemplateProfile) -> list[str]:
-    protected_selectors = {
-        selector
-        for selector in template_profile.global_preserve_selectors
-        if str(selector or "").strip()
-    }
-    protected_selectors.update(
-        str(candidate.selector or "").strip()
-        for candidate in canonical_shell_nodes(template_profile, bindable_only=True)
-        if str(candidate.selector or "").strip()
-    )
-    merged = list(page_plan.selectors_to_remove or []) + list(template_profile.removable_demo_selectors or [])
-    normalized = []
-    for selector in _dedupe_strings(merged):
-        if selector in protected_selectors:
-            continue
-        normalized.append(selector)
-    return normalized
-
-
-def _render_strategy_risks(template_profile: TemplateProfile) -> list[str]:
-    risks: list[str] = []
-    if float(template_profile.compile_confidence or 0.0) < 0.7:
-        risks.append(
-            f"template_compile_confidence={template_profile.compile_confidence:.2f} is below compiled block threshold 0.70"
-        )
-    high_risk_widget_types = {
-        widget.widget_type
-        for widget in template_profile.optional_widgets
-        if {"fetch_runtime_dependency", "chart_runtime_dependency", "math_runtime_dependency"} & set(widget.risk_flags)
-    }
-    if high_risk_widget_types:
-        risks.append(
-            "template widgets require risky runtime handling: " + ", ".join(sorted(high_risk_widget_types))
-        )
-    for risk_flag in template_profile.risk_flags:
-        if risk_flag not in risks:
-            if risk_flag in {"fetch_runtime_dependency", "chart_runtime_dependency", "math_runtime_dependency"}:
-                risks.append(risk_flag)
-    return _dedupe_strings(risks)
-
-
 def unified_planner_node(state: PlannerState) -> dict[str, Any]:
     print(
-        "[PaperAlchemy-UnifiedPlanner] generating PagePlan from compiled template profile "
+        "[PaperAlchemy-UnifiedPlanner] generating SemanticPagePlan from compiled template context "
         f"(attempt {state.get('planner_retry_count', 0) + 1})..."
     )
 
     structured_paper = _normalize_structured_paper(state.get("structured_paper"))
     if not structured_paper:
         print("[PaperAlchemy-UnifiedPlanner] missing structured_paper, cannot proceed.")
-        return {"page_plan": None}
+        return {"semantic_page_plan": None}
 
     raw_candidates = state.get("template_candidates") or []
     candidates = [
@@ -250,7 +107,7 @@ def unified_planner_node(state: PlannerState) -> dict[str, Any]:
         selected = candidates[0]
     if selected is None or template_profile is None:
         print("[PaperAlchemy-UnifiedPlanner] selected template or template_profile is missing.")
-        return {"page_plan": None}
+        return {"semantic_page_plan": None}
 
     constraints = state.get("generation_constraints") or {}
     template_catalog = state.get("template_catalog") or []
@@ -261,7 +118,7 @@ def unified_planner_node(state: PlannerState) -> dict[str, Any]:
     previous_page_plan = _normalize_page_plan(state.get("previous_page_plan"))
 
     llm = get_llm(temperature=0.2, use_smart_model=True)
-    structured_llm = llm.with_structured_output(PagePlan)
+    structured_llm = llm.with_structured_output(SemanticPagePlan)
     user_msg = PLANNER_USER_PROMPT_TEMPLATE.format(
         structured_paper_json=to_pretty_json(structured_paper),
         previous_page_plan_json=to_pretty_json(previous_page_plan) if previous_page_plan else "null",
@@ -291,33 +148,54 @@ def unified_planner_node(state: PlannerState) -> dict[str, Any]:
         if not result:
             raise ValueError("Unified planner returned empty result")
 
-        result.plan_meta.planning_mode = "hybrid_template_bind"
-        result.template_selection.selected_template_id = selected.template_id
-        result.template_selection.selected_root_dir = selected.root_dir
-        result.template_selection.selected_entry_html = selected.chosen_entry_html
-        if not result.template_selection.fallback_template_id and len(candidates) > 1:
-            result.template_selection.fallback_template_id = candidates[1].template_id
-
-        result = _normalize_blocks_with_template_profile(result, template_profile)
-        result.dom_mapping = _compat_dom_mapping(template_profile)
-        result.selectors_to_remove = _normalize_selectors_to_remove(result, template_profile)
-
-        render_strategy_risks = _render_strategy_risks(template_profile)
-        result.plan_meta.render_strategy = (
-            "legacy_fullpage" if render_strategy_risks else "compiled_block_assembly"
-        )
-        result.coder_handoff = result.coder_handoff.model_copy(
-            update={
-                "known_risks": _dedupe_strings(
-                    list(result.coder_handoff.known_risks or []) + render_strategy_risks
-                )
-            },
-            deep=True,
-        )
-        return {"page_plan": result}
+        result.plan_meta.planning_mode = "semantic_only"
+        return {"semantic_page_plan": result}
     except Exception as exc:
         print(f"[PaperAlchemy-UnifiedPlanner] generation error: {exc}")
-        return {"page_plan": None}
+        return {"semantic_page_plan": None}
+
+
+def finalize_planner_output(
+    *,
+    semantic_page_plan: SemanticPagePlan | None,
+    selected_template: TemplateCandidate | None,
+    template_profile: TemplateProfile | None,
+    generation_constraints: dict[str, Any] | None = None,
+    template_candidates: list[TemplateCandidate] | None = None,
+    planner_critic_passed: bool = True,
+    planner_feedback_history: list[str] | None = None,
+) -> PagePlan | None:
+    if semantic_page_plan is None or selected_template is None or template_profile is None:
+        return None
+
+    bound_page_plan = bind_semantic_plan(
+        semantic_plan=semantic_page_plan,
+        selected_template=selected_template,
+        template_profile=template_profile,
+        generation_constraints=generation_constraints,
+        template_candidates=template_candidates,
+        semantic_validation_passed=planner_critic_passed,
+        semantic_feedback_history=planner_feedback_history,
+        bound_critiques=[],
+    )
+    bound_critiques = run_bound_plan_validation(bound_page_plan, template_profile)
+    final_page_plan = bind_semantic_plan(
+        semantic_plan=semantic_page_plan,
+        selected_template=selected_template,
+        template_profile=template_profile,
+        generation_constraints=generation_constraints,
+        template_candidates=template_candidates,
+        semantic_validation_passed=planner_critic_passed,
+        semantic_feedback_history=planner_feedback_history,
+        bound_critiques=bound_critiques,
+    )
+    if bound_critiques:
+        print(
+            "[PaperAlchemy-Planner] deterministic bound-plan validation failed:\n"
+            + "\n".join(bound_critiques)
+        )
+        return None
+    return final_page_plan
 
 
 def build_planner_graph(max_retry: int = 2):
@@ -406,21 +284,43 @@ def run_planner_agent(
         "selected_template": selected_template,
         "template_profile": template_profile,
         "planner_feedback_history": [],
+        "semantic_page_plan": None,
         "page_plan": None,
         "planner_critic_passed": False,
         "planner_retry_count": 0,
     }
 
-    print("[PaperAlchemy-Planner] running UnifiedPlanner + Critic graph...")
+    print("[PaperAlchemy-Planner] running semantic planner + critic graph...")
     for _ in app.stream(initial_state, thread):
         pass
 
     final_state = app.get_state(thread)
-    plan_result = final_state.values.get("page_plan")
-    normalized_plan = _normalize_page_plan(plan_result)
-    if not normalized_plan or not final_state.values.get("planner_critic_passed"):
-        print("[PaperAlchemy-Planner] planner completed but critic did not fully pass.")
+    semantic_result = final_state.values.get("semantic_page_plan")
+    normalized_semantic_plan = _normalize_semantic_page_plan(semantic_result)
+    normalized_selected_template = _normalize_template_candidate(
+        final_state.values.get("selected_template", selected_template)
+    )
+    normalized_template_profile = _normalize_template_profile(
+        final_state.values.get("template_profile", template_profile)
+    )
+    planner_critic_passed = bool(final_state.values.get("planner_critic_passed"))
+    planner_feedback_history = list(final_state.values.get("planner_feedback_history") or [])
+
+    final_page_plan = finalize_planner_output(
+        semantic_page_plan=normalized_semantic_plan,
+        selected_template=normalized_selected_template,
+        template_profile=normalized_template_profile,
+        generation_constraints=constraints,
+        template_candidates=list(template_candidates or []),
+        planner_critic_passed=planner_critic_passed,
+        planner_feedback_history=planner_feedback_history,
+    )
+    if not final_page_plan:
+        print("[PaperAlchemy-Planner] planner failed to produce a valid bound page plan.")
+        return None
+
+    if not planner_critic_passed:
+        print("[PaperAlchemy-Planner] planner completed but semantic critic did not fully pass.")
     else:
         print("[PaperAlchemy-Planner] planner phase completed successfully.")
-    return normalized_plan
-
+    return final_page_plan

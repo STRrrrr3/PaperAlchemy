@@ -1,4 +1,4 @@
-﻿import json
+import json
 import re
 from collections.abc import Callable
 from typing import Any
@@ -8,7 +8,14 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from src.utils.json_utils import to_pretty_json
 from src.services.llm import get_llm
 from src.prompts import PLANNER_CRITIC_SYSTEM_PROMPT, PLANNER_CRITIC_USER_PROMPT_TEMPLATE
-from src.contracts.schemas import PagePlan, PlannerCriticReport, StructuredPaper, TemplateCandidate, TemplateProfile
+from src.contracts.schemas import (
+    PagePlan,
+    PlannerCriticReport,
+    SemanticPagePlan,
+    StructuredPaper,
+    TemplateCandidate,
+    TemplateProfile,
+)
 from src.contracts.state import PlannerState
 from src.template.template_ir import canonical_shell_nodes
 
@@ -27,6 +34,17 @@ def _normalize_page_plan(plan: Any) -> PagePlan | None:
         return plan
     try:
         return PagePlan.model_validate(plan)
+    except Exception:
+        return None
+
+
+def _normalize_semantic_page_plan(plan: Any) -> SemanticPagePlan | None:
+    if plan is None:
+        return None
+    if isinstance(plan, SemanticPagePlan):
+        return plan
+    try:
+        return SemanticPagePlan.model_validate(plan)
     except Exception:
         return None
 
@@ -77,12 +95,11 @@ def _catalog_to_lookup(template_catalog: list[dict[str, Any]]) -> dict[str, dict
 
 
 def _selected_template_tokens(template_id: str) -> set[str]:
-    tokens = {
+    return {
         token
         for token in re.split(r"[^a-z0-9]+", str(template_id or "").lower())
         if token and token not in {"github", "io", "www", "com"}
     }
-    return tokens
 
 
 def _validate_block_id(block_id: str, template_tokens: set[str]) -> list[str]:
@@ -91,7 +108,7 @@ def _validate_block_id(block_id: str, template_tokens: set[str]) -> list[str]:
     lowered = clean.lower()
 
     if not clean:
-        critiques.append("Encountered an empty block_id in PagePlan.")
+        critiques.append("Encountered an empty block_id in semantic plan.")
         return critiques
     if not _STABLE_BLOCK_ID_PATTERN.match(clean):
         critiques.append(f"block_id '{clean}' must be stable snake_case.")
@@ -105,36 +122,40 @@ def _validate_block_id(block_id: str, template_tokens: set[str]) -> list[str]:
     return critiques
 
 
-def run_planner_code_critic(
-    page_plan: PagePlan | None,
+def run_semantic_plan_validation(
+    semantic_page_plan: SemanticPagePlan | None,
     structured_paper: StructuredPaper | None,
     template_catalog: list[dict[str, Any]],
     template_candidates: list[TemplateCandidate],
-    template_profile: TemplateProfile | None,
+    selected_template: TemplateCandidate | None,
 ) -> list[str]:
     critiques: list[str] = []
 
-    if not page_plan:
-        critiques.append("Planner output is empty or failed schema validation.")
+    if semantic_page_plan is None:
+        critiques.append("Planner output is empty or failed semantic schema validation.")
         return critiques
 
-    if not structured_paper:
-        critiques.append("Structured paper is missing, so source grounding cannot be verified.")
+    if structured_paper is None:
+        critiques.append("Structured paper is missing, so semantic grounding cannot be verified.")
+        return critiques
+
+    if selected_template is None:
+        critiques.append("Selected template context is missing for semantic planning review.")
         return critiques
 
     catalog_lookup = _catalog_to_lookup(template_catalog)
-    selected_id = page_plan.template_selection.selected_template_id
-    selected_entry = page_plan.template_selection.selected_entry_html
+    selected_id = str(selected_template.template_id or "").strip()
+    selected_entry = str(selected_template.chosen_entry_html or "").strip()
     template_tokens = _selected_template_tokens(selected_id)
 
-    selected_template = catalog_lookup.get(selected_id)
-    if not selected_template:
+    selected_catalog_entry = catalog_lookup.get(selected_id)
+    if not selected_catalog_entry:
         critiques.append(f"Selected template '{selected_id}' does not exist in template catalog.")
     else:
-        entry_candidates = selected_template.get("entry_html_candidates") or []
+        entry_candidates = selected_catalog_entry.get("entry_html_candidates") or []
         if selected_entry not in entry_candidates:
             critiques.append(
-                f"selected_entry_html '{selected_entry}' is not in template '{selected_id}' entry candidates."
+                f"selected_template entry_html '{selected_entry}' is not in template '{selected_id}' entry candidates."
             )
 
     if template_candidates:
@@ -142,6 +163,14 @@ def run_planner_code_critic(
         if selected_id not in candidate_ids:
             critiques.append(
                 f"Selected template '{selected_id}' is not in selector candidates {sorted(candidate_ids)}."
+            )
+
+        fallback_template_id = str(
+            semantic_page_plan.template_selection.fallback_template_id or ""
+        ).strip()
+        if fallback_template_id and fallback_template_id not in candidate_ids:
+            critiques.append(
+                f"fallback_template_id '{fallback_template_id}' is not in selector candidates {sorted(candidate_ids)}."
             )
 
     valid_sections = {sec.section_title for sec in structured_paper.sections}
@@ -154,7 +183,7 @@ def run_planner_code_critic(
 
     outline_block_ids: set[str] = set()
     outline_orders: set[int] = set()
-    for item in page_plan.page_outline:
+    for item in semantic_page_plan.page_outline:
         if item.block_id in outline_block_ids:
             critiques.append(f"Duplicate page_outline block_id '{item.block_id}'.")
         outline_block_ids.add(item.block_id)
@@ -172,83 +201,104 @@ def run_planner_code_critic(
                     f"page_outline block '{item.block_id}' references unknown source section '{sec_title}'."
                 )
 
-    block_ids: set[str] = set()
-    for block in page_plan.blocks:
-        if block.block_id in block_ids:
-            critiques.append(f"Duplicate blocks item block_id '{block.block_id}'.")
-        block_ids.add(block.block_id)
+    semantic_block_ids: set[str] = set()
+    for block in semantic_page_plan.semantic_blocks:
+        if block.block_id in semantic_block_ids:
+            critiques.append(f"Duplicate semantic_blocks item block_id '{block.block_id}'.")
+        semantic_block_ids.add(block.block_id)
         critiques.extend(_validate_block_id(block.block_id, template_tokens))
         if block.block_id not in outline_block_ids:
             critiques.append(
-                f"blocks item '{block.block_id}' does not exist in page_outline."
+                f"semantic_blocks item '{block.block_id}' does not exist in page_outline."
             )
         for asset_path in block.asset_binding.figure_paths:
             if asset_path not in valid_assets:
                 critiques.append(
-                    f"block '{block.block_id}' references unknown figure path '{asset_path}'."
+                    f"semantic block '{block.block_id}' references unknown figure path '{asset_path}'."
                 )
 
-    if outline_block_ids != block_ids:
+    if outline_block_ids != semantic_block_ids:
         critiques.append(
-            "page_outline block_ids and blocks block_ids must match exactly for stable revision targeting."
+            "page_outline block_ids and semantic_blocks block_ids must match exactly for stable revision targeting."
         )
 
-    selected_root = page_plan.template_selection.selected_root_dir.rstrip("/")
+    return critiques
+
+
+def run_bound_plan_validation(
+    page_plan: PagePlan | None,
+    template_profile: TemplateProfile | None,
+) -> list[str]:
+    critiques: list[str] = []
+
+    if page_plan is None:
+        critiques.append("Bound PagePlan is empty or failed schema validation.")
+        return critiques
+
+    if template_profile is None:
+        critiques.append("TemplateProfile is missing, so bound plan validation cannot run.")
+        return critiques
+
+    selected_root = str(page_plan.template_selection.selected_root_dir or "").strip().rstrip("/")
+    if not selected_root:
+        critiques.append("template_selection.selected_root_dir is missing in bound PagePlan.")
+    if not str(page_plan.template_selection.selected_entry_html or "").strip():
+        critiques.append("template_selection.selected_entry_html is missing in bound PagePlan.")
+
     for touch in page_plan.coder_handoff.file_touch_plan:
         normalized = touch.path.replace("\\", "/")
-        if normalized.startswith("templates/"):
-            if not normalized.startswith(selected_root):
-                critiques.append(
-                    f"file_touch_plan path '{touch.path}' is outside selected template root '{selected_root}'."
-                )
-
-    if template_profile is not None:
-        allowed_shells_by_id = {
-            str(candidate.shell_id or "").strip(): candidate
-            for candidate in canonical_shell_nodes(template_profile, bindable_only=True)
-            if str(candidate.shell_id or "").strip()
-        }
-        allowed_global_selectors = {
-            str(selector or "").strip()
-            for selector in template_profile.global_preserve_selectors
-            if str(selector or "").strip()
-        }
-        for block in page_plan.blocks:
-            shell_id = str(block.target_template_region.shell_id or "").strip()
-            selector_hint = str(block.target_template_region.selector_hint or "").strip()
-            if not shell_id:
-                critiques.append(
-                    f"block '{block.block_id}' must bind to a canonical TemplateIR shell_id."
-                )
-                continue
-            shell_node = allowed_shells_by_id.get(shell_id)
-            if shell_node is None:
-                critiques.append(
-                    f"block '{block.block_id}' shell_id '{shell_id}' is not present in TemplateProfile.template_ir.shell_nodes."
-                )
-                continue
-            if selector_hint != str(shell_node.selector or "").strip():
-                critiques.append(
-                    f"block '{block.block_id}' selector_hint '{selector_hint}' does not match canonical shell selector '{shell_node.selector}'."
-                )
-        unexpected_dom_mapping = sorted(set(page_plan.dom_mapping) - allowed_global_selectors)
-        if unexpected_dom_mapping:
+        if normalized.startswith("templates/") and not normalized.startswith(selected_root):
             critiques.append(
-                "dom_mapping should only contain TemplateProfile.global_preserve_selectors; unexpected keys: "
-                + ", ".join(unexpected_dom_mapping[:6])
+                f"file_touch_plan path '{touch.path}' is outside selected template root '{selected_root}'."
             )
 
-        compile_risky = float(template_profile.compile_confidence or 0.0) < 0.7 or any(
-            risk in {"fetch_runtime_dependency", "chart_runtime_dependency", "math_runtime_dependency"}
-            for risk in template_profile.risk_flags
+    allowed_shells_by_id = {
+        str(candidate.shell_id or "").strip(): candidate
+        for candidate in canonical_shell_nodes(template_profile, bindable_only=True)
+        if str(candidate.shell_id or "").strip()
+    }
+    allowed_global_selectors = {
+        str(selector or "").strip()
+        for selector in template_profile.global_preserve_selectors
+        if str(selector or "").strip()
+    }
+    for block in page_plan.blocks:
+        shell_id = str(block.target_template_region.shell_id or "").strip()
+        selector_hint = str(block.target_template_region.selector_hint or "").strip()
+        if not shell_id:
+            critiques.append(
+                f"block '{block.block_id}' must bind to a canonical TemplateIR shell_id."
+            )
+            continue
+        shell_node = allowed_shells_by_id.get(shell_id)
+        if shell_node is None:
+            critiques.append(
+                f"block '{block.block_id}' shell_id '{shell_id}' is not present in TemplateProfile.template_ir.shell_nodes."
+            )
+            continue
+        if selector_hint != str(shell_node.selector or "").strip():
+            critiques.append(
+                f"block '{block.block_id}' selector_hint '{selector_hint}' does not match canonical shell selector '{shell_node.selector}'."
+            )
+
+    unexpected_dom_mapping = sorted(set(page_plan.dom_mapping) - allowed_global_selectors)
+    if unexpected_dom_mapping:
+        critiques.append(
+            "dom_mapping should only contain TemplateProfile.global_preserve_selectors; unexpected keys: "
+            + ", ".join(unexpected_dom_mapping[:6])
         )
-        render_strategy = str(page_plan.plan_meta.render_strategy or "").strip()
-        if compile_risky and render_strategy != "legacy_fullpage":
-            critiques.append(
-                "plan_meta.render_strategy must be 'legacy_fullpage' when template compile confidence is low or runtime widgets are risky."
-            )
-        if not compile_risky and render_strategy not in {"compiled_block_assembly", "legacy_fullpage"}:
-            critiques.append("plan_meta.render_strategy must be a supported planner output.")
+
+    compile_risky = float(template_profile.compile_confidence or 0.0) < 0.7 or any(
+        risk in {"fetch_runtime_dependency", "chart_runtime_dependency", "math_runtime_dependency"}
+        for risk in template_profile.risk_flags
+    )
+    render_strategy = str(page_plan.plan_meta.render_strategy or "").strip()
+    if compile_risky and render_strategy != "legacy_fullpage":
+        critiques.append(
+            "plan_meta.render_strategy must be 'legacy_fullpage' when template compile confidence is low or runtime widgets are risky."
+        )
+    if not compile_risky and render_strategy not in {"compiled_block_assembly", "legacy_fullpage"}:
+        critiques.append("plan_meta.render_strategy must be a supported planner output.")
 
     return critiques
 
@@ -256,7 +306,8 @@ def run_planner_code_critic(
 def run_planner_semantic_critic(
     structured_paper: StructuredPaper,
     template_catalog: list[dict[str, Any]],
-    page_plan: PagePlan,
+    semantic_page_plan: SemanticPagePlan,
+    selected_template: TemplateCandidate | None = None,
 ) -> PlannerCriticReport:
     print("[PaperAlchemy-PlannerCritic] using Gemini-Flash for semantic planning audit...")
     llm = get_llm(temperature=0, use_smart_model=False)
@@ -265,7 +316,12 @@ def run_planner_semantic_critic(
     user_msg = PLANNER_CRITIC_USER_PROMPT_TEMPLATE.format(
         structured_paper_json=to_pretty_json(structured_paper),
         template_catalog_json=json.dumps(template_catalog, indent=2, ensure_ascii=False),
-        candidate_page_plan_json=to_pretty_json(page_plan),
+        selected_template_json=(
+            json.dumps(selected_template.model_dump(), indent=2, ensure_ascii=False)
+            if selected_template is not None
+            else "null"
+        ),
+        candidate_semantic_plan_json=to_pretty_json(semantic_page_plan),
     )
 
     try:
@@ -285,8 +341,8 @@ def run_planner_semantic_critic(
 
 
 def planner_critic_node(state: PlannerState) -> dict[str, Any]:
-    print("[PaperAlchemy-PlannerCritic] running plan audit...")
-    page_plan = _normalize_page_plan(state.get("page_plan"))
+    print("[PaperAlchemy-PlannerCritic] running semantic plan audit...")
+    semantic_page_plan = _normalize_semantic_page_plan(state.get("semantic_page_plan"))
     structured_paper = _normalize_structured_paper(state.get("structured_paper"))
     template_catalog = state.get("template_catalog")
     if not isinstance(template_catalog, list):
@@ -297,35 +353,36 @@ def planner_critic_node(state: PlannerState) -> dict[str, Any]:
         for item in (_normalize_template_candidate(candidate) for candidate in raw_candidates)
         if item is not None
     ]
-    template_profile = _normalize_template_profile(state.get("template_profile"))
+    selected_template = _normalize_template_candidate(state.get("selected_template"))
 
-    critiques = run_planner_code_critic(
-        page_plan=page_plan,
+    critiques = run_semantic_plan_validation(
+        semantic_page_plan=semantic_page_plan,
         structured_paper=structured_paper,
         template_catalog=template_catalog,
         template_candidates=template_candidates,
-        template_profile=template_profile,
+        selected_template=selected_template,
     )
 
-    if page_plan and structured_paper and not critiques:
+    if semantic_page_plan and structured_paper and not critiques:
         report = run_planner_semantic_critic(
             structured_paper=structured_paper,
             template_catalog=template_catalog,
-            page_plan=page_plan,
+            semantic_page_plan=semantic_page_plan,
+            selected_template=selected_template,
         )
         if not report.is_plan_valid:
             critiques.append(f"Semantic planning audit failed: {report.plan_feedback}")
 
     if critiques:
         feedback = "\n".join(critiques)
-        print(f"[PaperAlchemy-PlannerCritic] plan rejected:\n{feedback}")
+        print(f"[PaperAlchemy-PlannerCritic] semantic plan rejected:\n{feedback}")
         return {
             "planner_critic_passed": False,
             "planner_feedback_history": [feedback],
             "planner_retry_count": int(state.get("planner_retry_count", 0)) + 1,
         }
 
-    print("[PaperAlchemy-PlannerCritic] all plan checks passed.")
+    print("[PaperAlchemy-PlannerCritic] all semantic plan checks passed.")
     return {"planner_critic_passed": True}
 
 
@@ -341,4 +398,3 @@ def build_planner_critic_router(max_retry: int = MAX_PLANNER_RETRY_DEFAULT) -> C
         return "retry"
 
     return _router
-

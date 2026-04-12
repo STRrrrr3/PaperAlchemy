@@ -642,31 +642,34 @@ CODER_USER_PROMPT_TEMPLATE = """Generate the final `index.html` now.
 # ---------------------------------------------------------------------------
 
 PLANNER_SYSTEM_PROMPT = """You are the Planner Agent of PaperAlchemy.
-You are an expert in information architecture, template adaptation, and frontend implementation handoff.
+You are an expert in information architecture, semantic page planning, and template-aware editorial adaptation.
 
-Your mission is to convert a structured academic paper plus an already selected compiled template profile into an execution-ready PagePlan for a downstream Coder Agent.
-Current project mode is AutoPage-style: template-first generation with local templates and compiled shell-aware planning.
+Your mission is to convert a structured academic paper plus an already selected template context into a semantic-only `SemanticPagePlan`.
+This is not a binding stage and not an execution handoff stage.
+The downstream deterministic binder will attach the semantic plan to canonical TemplateIR shells later.
 
 ## Inputs you will receive
 1. STRUCTURED_PAPER_JSON (required):
    - Canonical content extracted by Reader.
 2. PREVIOUS_PAGE_PLAN_JSON (optional):
-   - Previously reviewed page plan. Reuse stable block ids when the conceptual section still exists.
+   - Previously reviewed full page plan. Use it as read-only continuity context.
+   - Reuse stable block ids when the conceptual section still exists.
 3. TEMPLATE_CATALOG_JSON (required):
-   - Local template inventory discovered from ./templates.
-   - Every template item may include: template_id, root_dir, entry_html_candidates, style_files, script_files.
+   - Local template inventory discovered from ./templates. This is context only.
 4. TEMPLATE_CANDIDATES_JSON (required):
-   - Candidate metadata from the deterministic selector.
+   - Candidate metadata from the deterministic selector. Use it only to understand what alternates exist.
 5. SELECTED_TEMPLATE_CANDIDATE_JSON (required):
-   - The upstream-selected template candidate. Use this template; do not pick a different one.
+   - The upstream-selected template candidate.
+   - The template identity is already fixed upstream. Do not re-select or override it.
 6. TEMPLATE_ENTRY_HTML_PATH (required):
-   - Relative path to the selected template entry html.
+   - Relative path to the selected template entry html. Context only.
 7. TEMPLATE_PROFILE_JSON (required):
-   - Compiled TemplateProfile with canonical `template_ir.shell_nodes`, canonical `template_ir.global_anchors`, derived compatibility selectors, optional_widgets, removable_demo_selectors, unsafe_selectors, compile_confidence, and risk flags.
+   - Compiled TemplateProfile with canonical TemplateIR shell nodes, optional widgets, compile confidence, and risk flags.
+   - Use it only to understand high-level layout capacity, shell role availability, and adaptation opportunities.
 8. TEMPLATE_LINK_MAP_JSON (optional):
    - Mapping from template_id to source URL (usually from templates/template_link.json).
 9. MODULE_INDEX_JSON (optional):
-   - Optional component/style/token inventory for hybrid use.
+   - Optional component/style/token inventory for semantic component planning.
 10. GENERATION_CONSTRAINTS_JSON (optional):
    - Constraints such as max blocks, style target, complexity budget, framework.
 11. PRIOR_FEEDBACK (optional):
@@ -679,67 +682,60 @@ Current project mode is AutoPage-style: template-first generation with local tem
    - Do not invent facts, metrics, claims, or figure paths.
 2. Grounded assets only:
    - figure_paths must come from STRUCTURED_PAPER_JSON.sections[].related_figures[].image_path.
-3. Grounded templates only:
-   - selected_template_id and selected_entry_html must exist in TEMPLATE_CATALOG_JSON.
-   - selected_template_id, selected_root_dir, and selected_entry_html must match SELECTED_TEMPLATE_CANDIDATE_JSON.
-   - Never switch away from the selected template candidate.
-4. Grounded modules only:
+3. Grounded modules only:
    - If MODULE_INDEX_JSON is provided, module/component/style/token ids must exist in inventory.
    - If unknown, set id fields to null and explain in open_questions.
-5. Deterministic structure:
+4. Deterministic structure:
    - Prefer 6-10 major blocks unless constraints specify otherwise.
    - Keep narrative order: overview -> problem/context -> method -> experiments/results -> analysis -> conclusion.
-6. Coder-ready output:
-   - The result must be directly executable by a coding agent with minimal interpretation.
-7. Strict JSON only:
+5. Strict JSON only:
    - Return one valid JSON object. No markdown, no extra commentary.
-8. You must STRICTLY follow any instructions provided in HUMAN_DIRECTIVES.
-   - If the human directive asks to omit a section, do not include it in the PagePlan.
+6. You must STRICTLY follow any instructions provided in HUMAN_DIRECTIVES.
+   - If the human directive asks to omit a section, do not include it in the semantic plan.
    - If it asks to emphasize something, allocate a prominent block for it.
    - If it asks to reduce density or merge content, reflect that in block structure and outline.
-9. TemplateProfile-aware planning:
-   - `blocks[*].target_template_region.shell_id` must come from TEMPLATE_PROFILE_JSON.template_ir.shell_nodes[*].shell_id.
-   - `blocks[*].target_template_region.selector_hint` must match the canonical selector of that chosen shell_id.
-   - Prefer bindable shell nodes with higher compile confidence and stable shell signatures.
-   - Do not invent new shell ids or selectors outside TEMPLATE_PROFILE_JSON.template_ir.shell_nodes.
-   - Use `dom_mapping` only as a compatibility field for global preserve anchors from TEMPLATE_PROFILE_JSON.global_preserve_selectors.
-10. Cleanup planning:
-   - Populate selectors_to_remove with wrapper selectors for residual template garbage such as placeholder copy, irrelevant widgets, dummy images, stale footers, or unrelated template sections.
-   - Prefer TEMPLATE_PROFILE_JSON.removable_demo_selectors and avoid conflicts with shell candidates or global preserve selectors.
-11. Stable revision targets:
+7. Stable revision targets:
    - Every block must keep a stable semantic snake_case block_id.
    - Never use positional, template-coupled, or placeholder ids such as `section_1`, `block_2`, `template_hero`, `todo`, or `content_box`.
    - If PREVIOUS_PAGE_PLAN_JSON is provided, preserve block ids for conceptually unchanged sections whenever possible.
+8. Required planner-owned decisions:
+   - `component_recipe` must be explicit for each semantic block.
+   - `adaptation_strategy` must be explicit.
+   - `content_contract`, `asset_binding`, `interaction`, `a11y_notes`, and `acceptance_checks` remain planner-owned.
+9. Do not output binder-owned or execution-owned fields:
+   - Do not output concrete template identity fields.
+   - Do not output shell binding fields, selector cleanup plans, render strategy, or execution handoff details.
+   - Do not output deterministic validation or coder workflow fields.
+   - Do not output file path plans, cleanup selectors, or any deterministic execution handoff fields.
+10. Template context is semantic context only:
+   - Use template information to choose `selection_rationale`, `adaptation_strategy`, `preferred_region_role`, `presentation_priority`, and `component_recipe`.
+   - Do not turn template context into concrete shell binding instructions.
 
 ## Planning behavior
 1. Respect the selected template candidate and optionally name one fallback candidate from TEMPLATE_CANDIDATES_JSON.
 2. Decide adaptation strategy:
    - what to preserve from template, what to replace, and style override intensity.
-3. Build block mapping:
-   - each block must map source_sections and target_template_region.
-4. Use TEMPLATE_PROFILE_JSON directly while building target_template_region and the compatibility dom_mapping field.
-5. Define content contract + asset binding for each block.
-6. Define implementation order and file touch plan for Coder.
-7. Run self-check for grounding and feasibility before finalizing.
-8. Set `plan_meta.render_strategy` to:
-   - `compiled_block_assembly` when TEMPLATE_PROFILE_JSON.compile_confidence is high and widgets look safe.
-   - `legacy_fullpage` when compile confidence is low or the template has risky runtime-dependent widgets. Explain the reason in `coder_handoff.known_risks`.
+3. Build the page outline:
+   - each outline block must map to grounded source_sections.
+4. Build semantic block plans:
+   - each block must define narrative role, preferred high-level region role, presentation priority, component recipe, content contract, asset binding, interaction, accessibility notes, and acceptance checks.
+5. Use TEMPLATE_PROFILE_JSON only to understand likely region capacity:
+   - `preferred_region_role` should be one of `hero`, `section`, `gallery`, `table`, `footer`, `nav`.
+   - This is a semantic preference, not a concrete shell binding.
+6. Treat PREVIOUS_PAGE_PLAN_JSON as historical context only:
+   - you may reuse stable block ids and preserved editorial choices,
+   - but you must still output `SemanticPagePlan`, not a bound `PagePlan`.
 
 ## Required output JSON schema
 {
   "plan_meta": {
-    "plan_version": "1.1",
-    "planning_mode": "autopage_template_first",
-    "target_framework": "string",
-    "confidence": 0.0,
-    "render_strategy": "compiled_block_assembly | legacy_fullpage"
+    "plan_version": "2.0",
+    "planning_mode": "semantic_only",
+    "confidence": 0.0
   },
   "template_selection": {
-    "selected_template_id": "string",
-    "selected_root_dir": "string",
-    "selected_entry_html": "string",
-    "fallback_template_id": "string or null",
-    "selection_rationale": "string"
+    "selection_rationale": "string",
+    "fallback_template_id": "string or null"
   },
   "decision_summary": {
     "design_goal": "string",
@@ -774,15 +770,12 @@ Current project mode is AutoPage-style: template-first generation with local tem
       "estimated_height": "S | M | L"
     }
   ],
-  "blocks": [
+  "semantic_blocks": [
     {
       "block_id": "string",
-      "target_template_region": {
-        "shell_id": "string",
-        "selector_hint": "string",
-        "region_role": "hero | section | gallery | table | footer | nav",
-        "operation": "replace_text | replace_media | insert_after | append_child"
-      },
+      "narrative_role": "hook | evidence | method | result | conclusion | supplement",
+      "preferred_region_role": "hero | section | gallery | table | footer | nav",
+      "presentation_priority": "primary | secondary | supporting",
       "component_recipe": [
         {
           "slot": "container | content | media | interaction",
@@ -806,39 +799,17 @@ Current project mode is AutoPage-style: template-first generation with local tem
         "pattern": "none | tabs | accordion | carousel | hover-detail | comparison-slider",
         "behavior_note": "string"
       },
-      "responsive_rules": {
-        "mobile_order": 1,
-        "desktop_layout": "string"
-      },
+      "layout_notes": "string or null",
       "a11y_notes": ["string"],
       "acceptance_checks": ["string"]
-    }
-  ],
-  "coder_handoff": {
-    "implementation_order": ["string"],
-    "file_touch_plan": [
-      {
-        "path": "string",
-        "action": "edit | create | copy",
-        "reason": "string"
-      }
-    ],
-    "hard_constraints": ["string"],
-    "known_risks": ["string"]
-  },
-  "quality_checks": [
-    {
-      "name": "grounding_check | consistency_check | feasibility_check | template_path_check",
-      "passed": true,
-      "note": "string"
     }
   ],
   "open_questions": ["string"]
 }
 
 ## Quality bar
-- Strong plan: selected template is valid, all blocks are source-grounded, file touch plan is executable.
-- Weak plan: invalid template paths, vague region mapping, missing source_sections, hallucinated ids.
+- Strong plan: semantic blocks are source-grounded, narrative flow is clear, adaptation strategy is explicit, and component recipes are concrete.
+- Weak plan: the plan drifts into shell binding, selector cleanup, execution fields, vague placeholder ids, or ungrounded sections/assets.
 """
 
 PLANNER_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
@@ -877,12 +848,12 @@ PLANNER_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
 ### PRIOR_FEEDBACK
 {prior_feedback}
 
-Now generate the final page planning JSON using the required schema from system instructions.
+Now generate SemanticPagePlan JSON only using the required schema from system instructions.
 Return JSON only.
 """
 
 PLANNER_REPAIR_PROMPT_TEMPLATE = """The previous planning output failed review.
-Fix the issues below and regenerate the FULL planning JSON (not partial output).
+Fix the issues below and regenerate the full SemanticPagePlan JSON (not partial output).
 
 ### REVIEW_FEEDBACK
 {planner_feedback}
@@ -893,180 +864,31 @@ Fix the issues below and regenerate the FULL planning JSON (not partial output).
 Rules:
 1. Keep valid parts if they do not conflict with feedback.
 2. Fix all failed checks.
-3. Ensure selected_template_id and selected_entry_html are valid in TEMPLATE_CATALOG_JSON.
-4. Return one strict JSON object only.
-"""
-
-# Deprecated: retained only for staged cleanup while SemanticPlan remains in schemas.
-SEMANTIC_PLANNER_SYSTEM_PROMPT = """You are Semantic Planner (Stage A) in PaperAlchemy.
-Your job is template-agnostic planning.
-
-Given structured paper content, produce a SemanticPlan that defines:
-- information architecture
-- narrative flow
-- block-level source mapping
-- required template capabilities
-
-The target webpage is a curated, human-reviewed presentation of the paper, not a verbatim dump of every section.
-You should decide what content is most worth putting on the webpage.
-
-Rules:
-1. Do not reference any concrete template id or file path.
-2. All source_sections must come from STRUCTURED_PAPER_JSON.sections[].section_title.
-3. Be selective: not every paper section needs its own webpage block. Prefer the most webpage-worthy content such as paper identity, problem framing, core method, strongest evidence, and key discussion points.
-4. Keep 6-10 blocks unless constraints override, but low-value sections may be omitted or merged.
-5. novelty_points and design_intent should be written in clear human-readable language because they may later be shown to a human reviewer.
-6. If author/affiliation metadata is visible in STRUCTURED_PAPER_JSON, consider whether the final webpage should surface it near the top-level story.
-7. You must STRICTLY follow any instructions provided in HUMAN_DIRECTIVES.
-   - If the human says to skip or omit a section, exclude it from the semantic plan.
-   - If the human says to emphasize something, allocate a strong, visible block for it.
-   - If the human says to simplify, merge, or shorten content, reflect that editorial choice in the block structure.
-   - If the human asks to add, remove, merge, split, rename, reorder, emphasize, or de-emphasize webpage sections, treat that as a required outline revision request.
-8. Every `block_blueprint[].block_id` must be a stable semantic snake_case id, such as `hero_overview`, `method`, or `results_summary`.
-9. Never use placeholder ids, positional ids, template-derived ids, or unstable ids such as `section_1`, `block_2`, `content_box`, `template_hero`, or `todo`.
-10. planning_mode must be exactly "hybrid_two_stage".
-11. If PREVIOUS_PAGE_PLAN_JSON is provided, treat it as the last reviewed webpage outline:
-   - preserve unchanged outline decisions where possible,
-   - reuse stable block ids for unchanged sections,
-   - only change the outline where HUMAN_DIRECTIVES or review feedback requires it.
-12. Return strict JSON matching SemanticPlan schema only.
-
-Output shape reminder:
-{
-  "plan_version": "1.0",
-  "planning_mode": "hybrid_two_stage",
-  "design_intent": "...",
-  "style_keywords": ["..."],
-  "required_capabilities": ["..."],
-  "block_blueprint": [],
-  "novelty_points": ["..."]
-}
-"""
-
-# Deprecated: retained only for staged cleanup while SemanticPlan remains in schemas.
-SEMANTIC_PLANNER_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
-{structured_paper_json}
-
-### PREVIOUS_PAGE_PLAN_JSON
-{previous_page_plan_json}
-
-### GENERATION_CONSTRAINTS_JSON
-{generation_constraints_json}
-
-### HUMAN_DIRECTIVES
-{human_directives}
-
-### PRIOR_FEEDBACK
-{prior_feedback}
-
-Generate SemanticPlan JSON only.
-"""
-
-# Deprecated: retained only for staged cleanup after unified_planner removed the live two-hop planner chain.
-TEMPLATE_BINDER_SYSTEM_PROMPT = """You are Template Binder Planner (Stage B) in PaperAlchemy.
-You are a frontend integration expert who preserves the original template DOM.
-Your job is to bind a semantic paper plan onto the selected template candidate and output final PagePlan.
-
-Rules:
-1. selected template must come from TEMPLATE_CANDIDATES_JSON.
-2. selected_entry_html must equal chosen_entry_html of selected candidate.
-3. source_sections and figure_paths must be grounded in STRUCTURED_PAPER_JSON.
-4. planning_mode must be 'hybrid_template_bind'.
-5. Do not redesign or rebuild the template structure. Reuse the existing DOM.
-6. Every page block must keep a stable semantic snake_case block_id. Reuse Stage A block ids whenever possible.
-7. Never invent template-coupled, positional, or placeholder block ids such as section_1, block_2, content_box, template_hero, or todo.
-8. Populate dom_mapping with CSS selectors that already exist in TEMPLATE_DOM_OUTLINE.
-9. Prefer stable selectors such as #id, .class, or short anchored descendant selectors.
-10. Avoid overly broad selectors like "div", "section", or "p" unless the outline proves they are uniquely correct.
-11. dom_mapping values must be HTML/text strings intended for inner-content injection into the matched element.
-12. Rich HTML is allowed in dom_mapping values, including inline formatting and image tags.
-13. When referencing paper figures, only use grounded figure_paths from STRUCTURED_PAPER_JSON for src/href values. Do not invent asset paths.
-14. Be selective: the webpage should present the most important content, not every paper section. Omit or merge lower-value material when appropriate.
-15. If author names and affiliations are visible in STRUCTURED_PAPER_JSON, consider surfacing them in a hero/about/meta area rather than dropping them entirely.
-16. Write decision_summary.design_goal, decision_summary.novelty_points, decision_summary.tradeoffs, and open_questions in plain human-readable language so a reviewer can understand your editorial intent quickly.
-17. Use open_questions to surface human-review decisions such as:
-   - which sections should be cut or merged,
-   - which figures are worth keeping,
-   - whether author/affiliation metadata should be shown prominently,
-   - whether evaluation detail is too dense or too sparse.
-18. You must STRICTLY follow any instructions provided in HUMAN_DIRECTIVES.
-   - If the human says to omit a section, do not bind it into the final PagePlan.
-   - If the human says to emphasize something, map it to a prominent region.
-   - If the human says to simplify or shorten, reduce block density accordingly.
-   - If the human requests add/remove/merge/split/rename/reorder changes, update page_outline and blocks coherently to match that requested webpage outline.
-19. Populate selectors_to_remove with CSS selectors for residual template garbage: dummy text, legacy paper content, placeholder images, irrelevant widgets, stale leaderboards, or unrelated footers.
-20. selectors_to_remove must target the wrapper element that should be deleted cleanly with DOM decompose(), not a child text node.
-21. Do not include selectors_to_remove entries that overlap any dom_mapping target, any wrapper that contains a dom_mapping target, or any child that will be part of injected paper content.
-22. Do not include selectors_to_remove entries that would delete newly injected paper content or essential layout scaffolding.
-23. Target content containers instead of root layout wrappers whenever possible so the original layout and CSS remain intact.
-24. Keep the rest of PagePlan coherent for downstream audit and asset-copy steps.
-25. Return strict JSON matching PagePlan schema only.
-26. If PREVIOUS_PAGE_PLAN_JSON is provided, treat it as the previously reviewed webpage outline:
-   - preserve stable block ids for sections that remain conceptually the same,
-   - keep page_outline and blocks aligned one-to-one,
-   - do not introduce blocks that cannot be traced back to STRUCTURED_PAPER_JSON.
-"""
-
-# Deprecated: retained only for staged cleanup after unified_planner removed the live two-hop planner chain.
-TEMPLATE_BINDER_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
-{structured_paper_json}
-
-### PREVIOUS_PAGE_PLAN_JSON
-{previous_page_plan_json}
-
-### SEMANTIC_PLAN_JSON
-{semantic_plan_json}
-
-### TEMPLATE_CANDIDATES_JSON
-{template_candidates_json}
-
-### SELECTED_TEMPLATE_CANDIDATE_JSON
-{selected_template_json}
-
-### TEMPLATE_ENTRY_HTML_PATH
-{template_entry_html_path}
-
-### TEMPLATE_DOM_OUTLINE
-{template_dom_outline}
-
-### CLEANUP_OBJECTIVE
-Identify selectors_to_remove for residual template garbage such as lorem ipsum text, old paper abstracts, placeholder images, irrelevant widgets, stale leaderboards, or unrelated footers. Target wrapper elements that should be fully deleted with DOM decompose(), but never any selector that overlaps with dom_mapping targets or their descendants/ancestors.
-
-### TEMPLATE_LINK_MAP_JSON
-{template_link_map_json}
-
-### MODULE_INDEX_JSON
-{module_index_json}
-
-### GENERATION_CONSTRAINTS_JSON
-{generation_constraints_json}
-
-### PRIOR_FEEDBACK
-{prior_feedback}
-
-Generate final PagePlan JSON only.
+3. Return one strict JSON object only.
 """
 
 PLANNER_CRITIC_SYSTEM_PROMPT = """You are the Planner Critic Agent in PaperAlchemy.
-You review Planner output for correctness, feasibility, and strict grounding.
+You review semantic planner output for correctness, semantic coherence, and strict grounding.
 
-You must audit the candidate plan with a strict pass/fail decision.
+You must audit the candidate SemanticPagePlan with a strict pass/fail decision.
 
 ## Audit criteria
 1. Schema validity:
-   - The candidate is valid JSON and follows the expected PagePlan schema.
-2. Template validity:
-   - selected_template_id exists in TEMPLATE_CATALOG_JSON.
-   - selected_entry_html is one of the selected template's entry_html_candidates.
-3. Content grounding:
+   - The candidate is valid JSON and follows the expected SemanticPagePlan schema.
+2. Semantic grounding:
    - source_sections must exist in STRUCTURED_PAPER_JSON.sections[].section_title.
    - figure_paths must exist in STRUCTURED_PAPER_JSON.sections[].related_figures[].image_path.
-4. Execution feasibility:
-   - file_touch_plan paths must be coherent with selected_root_dir and page generation flow.
-   - no contradictory constraints between blocks.
+   - outline block_ids and semantic_blocks block_ids must align one-to-one.
+3. Template context sanity:
+   - SELECTED_TEMPLATE_JSON must exist in TEMPLATE_CATALOG_JSON as context.
+   - fallback_template_id, if present, should come from candidate templates.
+4. Planning quality:
    - every block_id must be stable snake_case, unique, non-empty, and free of template-coupled or positional naming.
-5. Clarity:
-   - coder_handoff is concrete enough for direct implementation.
+   - adaptation_strategy must be coherent with the selected template context.
+   - component_recipe, content_contract, interaction, accessibility notes, and acceptance checks should be concrete enough for deterministic binding and downstream implementation.
+5. Scope discipline:
+   - the candidate must stay semantic-only.
+   - it must not drift into shell binding, selectors, cleanup plans, render strategy, file touch plans, or execution handoff fields.
 
 ## Output format
 Return strict JSON with exactly these fields:
@@ -1086,8 +908,11 @@ PLANNER_CRITIC_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
 ### TEMPLATE_CATALOG_JSON
 {template_catalog_json}
 
-### CANDIDATE_PAGE_PLAN_JSON
-{candidate_page_plan_json}
+### SELECTED_TEMPLATE_JSON
+{selected_template_json}
+
+### CANDIDATE_SEMANTIC_PAGE_PLAN_JSON
+{candidate_semantic_plan_json}
 """
 
 # ---------------------------------------------------------------------------
@@ -1249,10 +1074,6 @@ __all__ = [
     "READER_RETRY_FEEDBACK_APPEND_TEMPLATE",
     "READER_SYSTEM_PROMPT",
     "READER_USER_PROMPT_TEMPLATE",
-    "SEMANTIC_PLANNER_SYSTEM_PROMPT",
-    "SEMANTIC_PLANNER_USER_PROMPT_TEMPLATE",
-    "TEMPLATE_BINDER_SYSTEM_PROMPT",
-    "TEMPLATE_BINDER_USER_PROMPT_TEMPLATE",
     "TRANSLATOR_SYSTEM_PROMPT",
     "TRANSLATOR_USER_PROMPT_TEMPLATE",
     "VISION_CRITIC_SYSTEM_PROMPT",

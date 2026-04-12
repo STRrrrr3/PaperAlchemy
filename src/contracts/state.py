@@ -10,6 +10,7 @@ from src.contracts.schemas import (
     LayoutComposeSession,
     LayoutComposeUpdate,
     PagePlan,
+    SemanticPagePlan,
     RevisionPlan,
     ShellBindingReview,
     ShellManualSelection,
@@ -45,6 +46,7 @@ class PlannerState(TypedDict):
     selected_template: Optional[TemplateCandidate]
     template_profile: Optional[TemplateProfile]
     planner_feedback_history: Annotated[List[str], operator.add]
+    semantic_page_plan: Optional[SemanticPagePlan]
     page_plan: Optional[PagePlan]
     planner_critic_passed: bool
     planner_retry_count: int
@@ -103,6 +105,7 @@ class WorkflowState(TypedDict):
     layout_compose_update: LayoutComposeUpdate | None
     visual_smoke_report: VisualSmokeReport | None
     structured_paper: Optional[StructuredPaper]
+    semantic_page_plan: Optional[SemanticPagePlan]
     page_plan: Optional[PagePlan]
     approved_page_plan: Optional[PagePlan]
     coder_artifact: Optional[CoderArtifact]
