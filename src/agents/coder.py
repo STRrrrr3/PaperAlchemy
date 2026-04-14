@@ -48,6 +48,7 @@ from src.prompts import (
 from src.contracts.schemas import (
     BlockRenderArtifact,
     BlockRenderSpec,
+    BlockShellContract,
     CoderArtifact,
     PagePlan,
     ResolvedBlockBinding,
@@ -578,29 +579,171 @@ def _render_blocks(
     return artifacts
 
 
+def _find_main_content_container(soup: BeautifulSoup, template_profile: TemplateProfile) -> Tag:
+    """Find the main content container that holds all section-level content."""
+    # Try common structural selectors in order of specificity
+    for selector in (
+        "section.main-container",
+        "main",
+        "div#website-body > section",
+        "div#website-body",
+        "div#content",
+        "div.container",
+    ):
+        try:
+            matches = [m for m in soup.select(selector) if isinstance(m, Tag)]
+        except Exception:
+            continue
+        if matches:
+            return matches[0]
+    # Fallback: body itself
+    return soup.body or soup
+
+
+def _wrap_block_in_pattern(
+    block_tag: Tag,
+    shell_contract: BlockShellContract,
+    soup: BeautifulSoup,
+) -> Tag:
+    """Wrap a rendered block in cloned wrapper elements from the shell contract."""
+    result = block_tag
+    for wrapper_sig in shell_contract.wrapper_chain:
+        outer = soup.new_tag(str(wrapper_sig.tag or "div"))
+        classes = [c for c in wrapper_sig.required_classes if c]
+        if classes:
+            outer["class"] = classes
+        outer.append(result)
+        result = outer
+    # Ensure consistent centering for all blocks
+    outermost = result
+    outermost["style"] = str(outermost.get("style") or "") + "; max-width: 1100px; margin-left: auto; margin-right: auto;"
+    return result
+
+
+def _find_global_element(soup: BeautifulSoup, template_profile: TemplateProfile, global_id: str) -> Tag | None:
+    """Find a global element using its canonical anchor selector from the template profile."""
+    for anchor in template_profile.template_ir.global_anchors:
+        if anchor.global_id != global_id:
+            continue
+        for sel in (anchor.actionable_selector, anchor.selector):
+            sel = str(sel or "").strip()
+            if not sel:
+                continue
+            try:
+                matches = [m for m in soup.select(sel) if isinstance(m, Tag)]
+            except Exception:
+                continue
+            if matches:
+                return matches[0]
+    return None
+
+
+def _update_global_elements(
+    soup: BeautifulSoup,
+    structured_paper: StructuredPaper | None,
+    page_plan: PagePlan,
+    template_profile: TemplateProfile,
+) -> None:
+    """Update header brand, nav links, and footer with paper-specific content."""
+    if structured_paper is None:
+        return
+    paper_title = str(structured_paper.paper_title or "").strip()
+    short_title = paper_title.split(":")[0].strip() if paper_title else ""
+    if not short_title:
+        return
+
+    # Update header brand via global anchor
+    brand = _find_global_element(soup, template_profile, "header_brand")
+    if brand is not None:
+        brand.string = short_title
+        brand["data-pa-global"] = "header_brand"
+
+    # Update <title> tag
+    title_tag = soup.find("title")
+    if isinstance(title_tag, Tag):
+        title_tag.string = short_title
+
+    # Update nav via global anchor — replace with paper section links
+    nav = _find_global_element(soup, template_profile, "header_nav")
+    if nav is not None:
+        nav["data-pa-global"] = "header_nav"
+        nav.clear()
+        outline = sorted(page_plan.page_outline, key=lambda x: x.order)
+        for item in outline[:6]:
+            # Extract a short label from the section title
+            raw = str(item.title or item.block_id)
+            label = raw.split(":")[-1].split("/")[-1].split("and")[0].strip()[:18]
+            a_tag = soup.new_tag("a", href=f"#{item.block_id}")
+            btn = soup.new_tag("button", attrs={"class": "outline"})
+            span = soup.new_tag("span", attrs={"class": "outline"})
+            span.string = label
+            btn.append(span)
+            a_tag.append(btn)
+            nav.append(a_tag)
+
+    # Update footer via global anchor
+    footer = _find_global_element(soup, template_profile, "footer_meta")
+    if footer is not None:
+        footer["data-pa-global"] = "footer_meta"
+        # Find the deepest text-bearing element
+        text_el = footer.find("a") or footer.find(string=True)
+        if text_el and isinstance(text_el, Tag):
+            text_el.string = f"(c) 2025. {short_title} Authors."
+        elif text_el:
+            text_el.replace_with(f"(c) 2025. {short_title} Authors.")
+
+
 def _assemble_page(
     *,
     page_plan: PagePlan,
     template_profile: TemplateProfile,
     template_reference_html: str,
     block_artifacts: list[BlockRenderArtifact],
+    block_specs: list[BlockRenderSpec] | None = None,
+    structured_paper: StructuredPaper | None = None,
 ) -> str:
     soup = BeautifulSoup(str(template_reference_html or ""), "html.parser")
-    bound_selectors = {artifact.selector for artifact in block_artifacts}
+    container = _find_main_content_container(soup, template_profile)
 
-    for artifact in sorted(block_artifacts, key=lambda item: (item.order, item.block_id)):
-        target = _selector_tag(soup, artifact.selector, match_index=artifact.match_index)
-        replacement_root = _extract_single_root_tag(artifact.html)
-        target.replace_with(replacement_root)
-
-    for selector in page_plan.selectors_to_remove:
+    # Identify global elements that must be preserved
+    global_tag_ids: set[int] = set()
+    for anchor in template_profile.template_ir.global_anchors:
         try:
-            matches = [match for match in soup.select(str(selector or "").strip()) if isinstance(match, Tag)]
+            for match in soup.select(str(anchor.selector or "").strip()):
+                if isinstance(match, Tag):
+                    global_tag_ids.add(id(match))
+                    # Also protect all ancestors up to container
+                    for parent in match.parents:
+                        if isinstance(parent, Tag):
+                            global_tag_ids.add(id(parent))
         except Exception:
-            matches = []
-        for match in matches:
-            match.decompose()
+            pass
 
+    # Clear non-global content from container
+    for child in list(container.children):
+        if isinstance(child, Tag) and id(child) not in global_tag_ids:
+            child.decompose()
+
+    # Build spec lookup for wrapper info
+    spec_lookup: dict[str, BlockRenderSpec] = {}
+    if block_specs:
+        spec_lookup = {s.block_id: s for s in block_specs}
+
+    # Clone wrapper pattern + insert each block sequentially
+    for artifact in sorted(block_artifacts, key=lambda item: (item.order, item.block_id)):
+        block_root = _extract_single_root_tag(artifact.html)
+        spec = spec_lookup.get(artifact.block_id)
+        if spec and spec.shell_contract and spec.shell_contract.wrapper_chain:
+            wrapped = _wrap_block_in_pattern(block_root, spec.shell_contract, soup)
+        else:
+            wrapped = block_root
+        container.append(wrapped)
+
+    # Update global elements (header brand, nav, footer) with paper content
+    _update_global_elements(soup, structured_paper, page_plan, template_profile)
+
+    # Remove unsafe widget selectors not bound to any block
+    bound_selectors = {artifact.selector for artifact in block_artifacts}
     for selector in template_profile.unsafe_selectors:
         if selector in bound_selectors or selector in set(template_profile.global_preserve_selectors):
             continue
@@ -731,6 +874,8 @@ def _run_compiled_block_assembly(
         template_profile=template_profile,
         template_reference_html=template_reference_html,
         block_artifacts=block_render_artifacts,
+        block_specs=block_render_specs,
+        structured_paper=structured_paper,
     )
     asset_critiques = validate_local_image_references(
         html_text=generated_html,

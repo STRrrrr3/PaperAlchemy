@@ -382,6 +382,73 @@ def discover_canonical_global_anchors(template_html: str) -> list:
     return sorted(anchors, key=lambda item: item.global_id)
 
 
+def _resolve_overlapping_shells(
+    shell_nodes: list[CanonicalShellNode],
+    template_soup: BeautifulSoup,
+) -> None:
+    """Mark overlapping shells as non-bindable.
+
+    When shell A is an ancestor of shell B in the DOM, they cannot both be
+    independently replaced during block assembly.  To decide which one to
+    keep, we count how many sibling shells each one has (same parent).  The
+    shell in the larger sibling group stays bindable; the other is demoted.
+    """
+    if not shell_nodes:
+        return
+
+    # Resolve each shell's Tag in the DOM.
+    node_tags: list[tuple[CanonicalShellNode, Tag | None]] = []
+    for node in shell_nodes:
+        if not node.bindable:
+            node_tags.append((node, None))
+            continue
+        try:
+            matches = [m for m in template_soup.select(node.selector) if isinstance(m, Tag)]
+            tag = matches[node.match_index] if node.match_index < len(matches) else None
+        except Exception:
+            tag = None
+        node_tags.append((node, tag))
+
+    tag_to_node: dict[int, CanonicalShellNode] = {
+        id(tag): node for node, tag in node_tags if tag is not None and node.bindable
+    }
+
+    # Count sibling-shell group sizes (how many bindable shells share the same parent).
+    from collections import Counter
+    parent_counts: Counter[int] = Counter()
+    node_parent_id: dict[str, int] = {}
+    for node, tag in node_tags:
+        if tag is None or not node.bindable:
+            continue
+        p = tag.parent
+        pid = id(p) if p and isinstance(p, Tag) else 0
+        parent_counts[pid] += 1
+        node_parent_id[node.shell_id] = pid
+
+    # Detect ancestor-descendant pairs among bindable shells.
+    demote: set[str] = set()
+    bindable_pairs = [(n, t) for n, t in node_tags if t is not None and n.bindable]
+    for i, (node_a, tag_a) in enumerate(bindable_pairs):
+        for j, (node_b, tag_b) in enumerate(bindable_pairs):
+            if i >= j:
+                continue
+            a_is_ancestor = tag_b in tag_a.descendants
+            b_is_ancestor = tag_a in tag_b.descendants
+            if not a_is_ancestor and not b_is_ancestor:
+                continue
+            # Overlap detected — demote the shell in the smaller sibling group.
+            size_a = parent_counts.get(node_parent_id.get(node_a.shell_id, 0), 0)
+            size_b = parent_counts.get(node_parent_id.get(node_b.shell_id, 0), 0)
+            if size_a >= size_b:
+                demote.add(node_b.shell_id if a_is_ancestor else node_a.shell_id)
+            else:
+                demote.add(node_a.shell_id if a_is_ancestor else node_b.shell_id)
+
+    for node in shell_nodes:
+        if node.shell_id in demote:
+            node.bindable = False
+
+
 def discover_template_ir(
     template_html: str,
     *,
