@@ -6,7 +6,7 @@ from src.contracts.schemas import LayoutComposeSession, LayoutComposeUpdate, Pag
 from src.services.artifact_store import get_output_paths, load_cached_structured_data, load_coder_artifact, load_page_plan, save_page_plan
 from src.services.revision_history import build_revision_history_state, empty_revision_history_state, reset_revision_history_for_draft
 from src.template.shell_resolver import apply_layout_compose_session_to_page_plan, apply_layout_compose_update
-from src.ui.formatters import _visual_smoke_feedback_text, format_page_plan_to_markdown
+from src.ui.formatters import _arbiter_review_feedback_text, format_page_plan_to_markdown
 from src.ui.updates import (
     _hidden_preview_update,
     _layout_compose_ui_active,
@@ -24,7 +24,6 @@ from src.workflows.hitl_nodes import (
     _load_template_profile_for_state,
     normalize_coder_artifact,
     normalize_layout_compose_session,
-    normalize_visual_smoke_report,
 )
 
 
@@ -99,7 +98,6 @@ def _persist_layout_compose_update(
         {
             "layout_compose_session": updated_session,
             "layout_compose_update": update,
-            "visual_smoke_report": None,
         },
         as_node="layout_compose_review",
     )
@@ -319,7 +317,13 @@ def continue_layout_compose_to_draft(
                 "approved_page_plan": None,
                 "layout_compose_session": updated_session,
                 "layout_compose_update": update,
-                "visual_smoke_report": None,
+                "review_current_screenshot_path": "",
+                "review_template_screenshot_path": "",
+                "semantic_visual_review": None,
+                "layout_rhythm_review": None,
+                "polish_review": None,
+                "arbiter_review": None,
+                "arbiter_autofix_applied": False,
             },
             as_node="layout_compose_review",
         )
@@ -329,37 +333,9 @@ def continue_layout_compose_to_draft(
         paused_state = get_default_hitl_workflow().get_state(config)
         paused_values = dict(paused_state.values or {})
         review_stage = str(paused_values.get("review_stage") or "").strip().lower()
-        smoke_report = normalize_visual_smoke_report(paused_values.get("visual_smoke_report"))
-        feedback_text = _visual_smoke_feedback_text(smoke_report)
-        if feedback_text:
-            log(feedback_text)
-
-        if review_stage == "outline":
-            outline_overview = str(paused_values.get("outline_overview") or "").strip()
-            if not outline_overview:
-                page_plan = _load_snapshot_page_plan(paused_values)
-                structured_data = _load_snapshot_structured_paper(paused_values)
-                outline_overview = format_page_plan_to_markdown(
-                    page_plan.model_dump(),
-                    structured_data.model_dump(),
-                )
-            manual_layout_compose_enabled = _normalize_manual_layout_compose_enabled(
-                paused_values.get("manual_layout_compose_enabled")
-            )
-            log("[Planner] Visual smoke flagged a structural mismatch, so the workflow returned to outline planning instead of opening webpage patch review.")
-            return (
-                "\n".join(run_log_lines),
-                outline_overview,
-                *_review_accordion_updates("outline"),
-                _hidden_preview_update(),
-                "",
-                *_stage_action_updates(
-                    "outline",
-                    manual_layout_compose_enabled=manual_layout_compose_enabled,
-                ),
-                *_layout_compose_ui_hidden(),
-                empty_revision_history_state(),
-            )
+        review_feedback = _arbiter_review_feedback_text(paused_values.get("arbiter_review"))
+        if review_feedback:
+            log(review_feedback)
 
         if review_stage != "webpage":
             raise RuntimeError(
@@ -371,7 +347,7 @@ def continue_layout_compose_to_draft(
             paper_folder_name=paper_folder_name,
             artifact=coder_artifact,
             page_plan=live_page_plan,
-            summary=feedback_text or "Initial draft generated from layout compose.",
+            summary="Initial draft generated from layout compose.",
         )
         revision_history_state = build_revision_history_state(paper_folder_name, revision_history)
         preview_image_path, entry_html_path = render_current_workflow_preview(paused_values)
@@ -385,7 +361,6 @@ def continue_layout_compose_to_draft(
             entry_html_path,
             *_stage_action_updates(
                 "webpage",
-                feedback_text_value=feedback_text,
                 revision_history_state=revision_history_state,
             ),
             *_layout_compose_ui_hidden(),
@@ -435,7 +410,6 @@ def return_to_outline_review_from_layout_compose(
                 "layout_compose_update": None,
                 "shell_binding_review": None,
                 "shell_manual_selection": None,
-                "visual_smoke_report": None,
                 "review_stage": "outline",
             },
             as_node="outline_review",

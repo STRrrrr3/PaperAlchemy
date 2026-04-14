@@ -29,16 +29,14 @@ def build_template_preview_path(candidate: dict) -> Path:
     return PREVIEW_CACHE_DIR / f"{template_id}_{entry_name}.png"
 
 
+def build_page_screenshot_path(entry_html_path: Path, filename: str) -> Path:
+    site_dir = entry_html_path.parent
+    site_dir.mkdir(parents=True, exist_ok=True)
+    return site_dir / filename
+
+
 def build_final_preview_path(entry_html_path: Path) -> Path:
-    site_dir = entry_html_path.parent
-    site_dir.mkdir(parents=True, exist_ok=True)
-    return site_dir / "final_render.png"
-
-
-def build_visual_critic_screenshot_path(entry_html_path: Path) -> Path:
-    site_dir = entry_html_path.parent
-    site_dir.mkdir(parents=True, exist_ok=True)
-    return site_dir / "temp_screenshot.png"
+    return build_page_screenshot_path(entry_html_path, "final_render.png")
 
 
 def build_binding_template_preview_path(entry_html_path: Path, block_id: str) -> Path:

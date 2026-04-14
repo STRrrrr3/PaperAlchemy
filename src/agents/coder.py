@@ -12,10 +12,7 @@ from langgraph.graph import END, StateGraph
 
 from src.agents.coder_critic import (
     build_coder_critic_router,
-    build_vision_qa_router,
     coder_critic_node,
-    take_screenshot_action,
-    vision_critic_node,
 )
 from src.utils.html_utils import (
     extract_html_document,
@@ -56,7 +53,6 @@ from src.contracts.schemas import (
     ResolvedBlockBinding,
     StructuredPaper,
     TemplateProfile,
-    VisualSmokeReport,
 )
 from src.contracts.state import CoderState
 from src.template.template_ir import resolve_shell_node
@@ -91,17 +87,6 @@ def _normalize_coder_artifact(artifact: Any) -> CoderArtifact | None:
         return None
     try:
         return CoderArtifact.model_validate(artifact)
-    except Exception:
-        return None
-
-
-def _normalize_visual_smoke_report(report: Any) -> VisualSmokeReport | None:
-    if isinstance(report, VisualSmokeReport):
-        return report
-    if report is None:
-        return None
-    try:
-        return VisualSmokeReport.model_validate(report)
     except Exception:
         return None
 
@@ -310,14 +295,18 @@ def _write_json(path: Path, payload: Any) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-def _selector_tag(soup: BeautifulSoup, selector: str) -> Tag:
+def _selector_tag(soup: BeautifulSoup, selector: str, match_index: int = 0) -> Tag:
     try:
         matches = [match for match in soup.select(str(selector or "").strip()) if isinstance(match, Tag)]
     except Exception as exc:
         raise ValueError(f"Invalid selector '{selector}': {exc}") from exc
-    if len(matches) != 1:
-        raise ValueError(f"Expected one template shell for selector '{selector}', found {len(matches)}.")
-    return matches[0]
+    if not matches:
+        raise ValueError(f"No matches for selector '{selector}'.")
+    if match_index >= len(matches):
+        raise ValueError(
+            f"match_index {match_index} out of range for selector '{selector}' with {len(matches)} match(es)."
+        )
+    return matches[match_index]
 
 
 def _extract_single_root_tag(html_fragment: str) -> Tag:
@@ -352,7 +341,8 @@ def _build_render_specs(
         if not selector:
             raise ValueError(f"Block '{block.block_id}' is missing selector_hint for block assembly.")
 
-        shell_tag = _selector_tag(template_soup, selector)
+        mi = block.shell_contract.match_index if block.shell_contract else 0
+        shell_tag = _selector_tag(template_soup, selector, match_index=mi)
         candidate = resolve_shell_node(
             template_profile,
             shell_id=str(block.target_template_region.shell_id or "").strip(),
@@ -390,6 +380,7 @@ def _build_render_specs(
                     wrapper_chain=list(shell_contract.wrapper_chain),
                     actionable_root_selector=shell_contract.actionable_root_selector,
                     dom_index=int(candidate.dom_index if candidate is not None else order),
+                    match_index=mi,
                 ),
                 content_contract=updated_block.content_contract,
                 asset_binding=updated_block.asset_binding,
@@ -526,6 +517,7 @@ def _write_block_render_artifact(
         block_id=spec.block_id,
         order=spec.order,
         selector=spec.binding.selector,
+        match_index=spec.binding.match_index,
         render_mode="compiled_block_assembly",
         html=fragment_html,
         html_path=str(render_html_path),
@@ -597,7 +589,7 @@ def _assemble_page(
     bound_selectors = {artifact.selector for artifact in block_artifacts}
 
     for artifact in sorted(block_artifacts, key=lambda item: (item.order, item.block_id)):
-        target = _selector_tag(soup, artifact.selector)
+        target = _selector_tag(soup, artifact.selector, match_index=artifact.match_index)
         replacement_root = _extract_single_root_tag(artifact.html)
         target.replace_with(replacement_root)
 
@@ -845,7 +837,6 @@ def _run_legacy_fullpage_render(
                         ensure_ascii=False,
                     ),
                     prior_coder_feedback=_format_feedback_block(state.get("coder_feedback_history")),
-                    prior_visual_feedback=_format_feedback_block(state.get("visual_feedback")),
                     previous_generated_html=previous_generated_html,
                 )
             ),
@@ -985,20 +976,12 @@ def build_coder_graph(max_retry: int = 1):
     workflow = StateGraph(CoderState)
     workflow.add_node("coder", coder_node)
     workflow.add_node("coder_critic", coder_critic_node)
-    workflow.add_node("take_screenshot", take_screenshot_action)
-    workflow.add_node("vision_critic", vision_critic_node)
 
     workflow.set_entry_point("coder")
     workflow.add_edge("coder", "coder_critic")
     workflow.add_conditional_edges(
         "coder_critic",
         build_coder_critic_router(max_retry=max_retry),
-        {"retry": "coder", "visual_qa": "take_screenshot", "end": END},
-    )
-    workflow.add_edge("take_screenshot", "vision_critic")
-    workflow.add_conditional_edges(
-        "vision_critic",
-        build_vision_qa_router(),
         {"retry": "coder", "end": END},
     )
 
@@ -1016,7 +999,7 @@ def run_coder_agent(
     max_retry: int = 2,
     template_profile: TemplateProfile | None = None,
 ) -> CoderArtifact | None:
-    artifact, _, _ = run_coder_agent_with_diagnostics(
+    artifact, _ = run_coder_agent_with_diagnostics(
         paper_folder_name=paper_folder_name,
         structured_data=structured_data,
         page_plan=page_plan,
@@ -1038,7 +1021,7 @@ def run_coder_agent_with_diagnostics(
     previous_coder_artifact: CoderArtifact | None = None,
     max_retry: int = 2,
     template_profile: TemplateProfile | None = None,
-) -> tuple[CoderArtifact | None, VisualSmokeReport | None, PagePlan | None]:
+) -> tuple[CoderArtifact | None, PagePlan | None]:
     app = build_coder_graph(max_retry=max_retry)
     thread = {"configurable": {"thread_id": f"coder_{paper_folder_name}"}}
     initial_state: CoderState = {
@@ -1051,11 +1034,6 @@ def run_coder_agent_with_diagnostics(
         "block_render_specs": [],
         "block_render_artifacts": [],
         "coder_feedback_history": [],
-        "visual_feedback": [],
-        "visual_screenshot_path": "",
-        "visual_iterations": 0,
-        "is_visually_approved": False,
-        "visual_smoke_report": None,
         "coder_artifact": previous_coder_artifact,
         "coder_critic_passed": False,
         "coder_retry_count": 0,
@@ -1068,16 +1046,12 @@ def run_coder_agent_with_diagnostics(
     final_state = app.get_state(thread)
     artifact_result = final_state.values.get("coder_artifact")
     resolved_page_plan = _normalize_page_plan(final_state.values.get("page_plan"))
-    visual_smoke_report = _normalize_visual_smoke_report(final_state.values.get("visual_smoke_report"))
     normalized_artifact = _normalize_coder_artifact(artifact_result)
 
     if not normalized_artifact or not final_state.values.get("coder_critic_passed"):
         print("[PaperAlchemy-Coder] coder completed but critic did not fully pass.")
-        return None, visual_smoke_report, resolved_page_plan
-
-    if not final_state.values.get("is_visually_approved") and int(final_state.values.get("visual_iterations", 0)) > 0:
-        print("[PaperAlchemy-Coder] visual smoke test flagged issues; returning the latest artifact for human review.")
+        return None, resolved_page_plan
 
     print(f"[PaperAlchemy-Coder] build completed: {normalized_artifact.entry_html}")
-    return normalized_artifact, visual_smoke_report, resolved_page_plan
+    return normalized_artifact, resolved_page_plan
 

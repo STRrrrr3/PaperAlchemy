@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.revision.css_revision import css_revision_agent_node, css_revision_executor_node
+from src.revision.css_revision import arbiter_autofix_node, css_revision_agent_node, css_revision_executor_node
 from src.services.preview_service import PREVIEW_CACHE_DIR
 from src.template.resources import ensure_autopage_template_assets
 from src.ui.app_builder import APP_CSS, build_app as _build_app
@@ -21,9 +21,7 @@ from src.ui.constraints import (
 from src.ui.formatters import (
     _coerce_string_list,
     _extract_front_matter_candidates,
-    _planner_recovery_feedback_from_visual_smoke,
     _trim_review_text,
-    _visual_smoke_feedback_text,
     append_log_lines,
     attach_candidate_labels,
     build_candidate_label,
@@ -73,6 +71,12 @@ from src.ui.updates import (
     _stage_action_updates,
     _visible_preview_update,
 )
+from src.review.reviewer_nodes import (
+    capture_review_screenshots_node,
+    layout_rhythm_reviewer_node,
+    review_arbiter_node,
+    semantic_visual_reviewer_node,
+)
 from src.workflows.batch_runtime import (
     confirm_and_start_generation,
     render_current_workflow_preview,
@@ -98,7 +102,6 @@ from src.workflows.hitl_nodes import (
     normalize_layout_compose_update,
     normalize_shell_binding_review,
     normalize_shell_manual_selection,
-    normalize_visual_smoke_report,
     outline_review_node,
     overview_node,
     planner_phase_node,
@@ -108,9 +111,9 @@ from src.workflows.hitl_nodes import (
     webpage_review_node,
 )
 from src.workflows.hitl_routes import (
-    draft_recovery_router,
     human_review_router,
     outline_review_router,
+    post_arbiter_router,
     webpage_review_router,
 )
 
@@ -126,14 +129,19 @@ def build_hitl_workflow():
         outline_review_node=outline_review_node,
         layout_compose_prepare_node=layout_compose_prepare_node,
         layout_compose_review_node=layout_compose_review_node,
+        capture_review_screenshots_node=capture_review_screenshots_node,
+        semantic_visual_reviewer_node=semantic_visual_reviewer_node,
+        layout_rhythm_reviewer_node=layout_rhythm_reviewer_node,
+        review_arbiter_node=review_arbiter_node,
+        arbiter_autofix_node=arbiter_autofix_node,
         webpage_review_node=webpage_review_node,
         css_revision_agent_node=css_revision_agent_node,
         css_revision_executor_node=css_revision_executor_node,
         coder_phase_node=build_coder_phase_graph(),
         human_review_router=human_review_router,
         outline_review_router=outline_review_router,
-        draft_recovery_router=draft_recovery_router,
         webpage_review_router=webpage_review_router,
+        post_arbiter_router=post_arbiter_router,
     )
 
 

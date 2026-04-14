@@ -19,14 +19,19 @@ def build_hitl_workflow(
     outline_review_node: Callable[[WorkflowState], dict[str, Any]],
     layout_compose_prepare_node: Callable[[WorkflowState], dict[str, Any]],
     layout_compose_review_node: Callable[[WorkflowState], dict[str, Any]],
+    capture_review_screenshots_node: Callable[[WorkflowState], dict[str, Any]],
+    semantic_visual_reviewer_node: Callable[[WorkflowState], dict[str, Any]],
+    layout_rhythm_reviewer_node: Callable[[WorkflowState], dict[str, Any]],
+    review_arbiter_node: Callable[[WorkflowState], dict[str, Any]],
+    arbiter_autofix_node: Callable[[WorkflowState], dict[str, Any]],
     webpage_review_node: Callable[[WorkflowState], dict[str, Any]],
     css_revision_agent_node: Callable[[WorkflowState], dict[str, Any]],
     css_revision_executor_node: Callable[[WorkflowState], dict[str, Any]],
     coder_phase_node: Callable[[WorkflowState], dict[str, Any]],
     human_review_router: Callable[[WorkflowState], str],
     outline_review_router: Callable[[WorkflowState], str],
-    draft_recovery_router: Callable[[WorkflowState], str],
     webpage_review_router: Callable[[WorkflowState], str],
+    post_arbiter_router: Callable[[WorkflowState], str],
 ):
     workflow = StateGraph(WorkflowState)
     workflow.add_node("reader", reader_phase_node)
@@ -36,6 +41,11 @@ def build_hitl_workflow(
     workflow.add_node("outline_review", outline_review_node)
     workflow.add_node("layout_compose_prepare", layout_compose_prepare_node)
     workflow.add_node("layout_compose_review", layout_compose_review_node)
+    workflow.add_node("capture_review_screenshots", capture_review_screenshots_node)
+    workflow.add_node("reviewer_semantic_visual", semantic_visual_reviewer_node)
+    workflow.add_node("reviewer_layout_rhythm", layout_rhythm_reviewer_node)
+    workflow.add_node("review_arbiter", review_arbiter_node)
+    workflow.add_node("arbiter_autofix", arbiter_autofix_node)
     workflow.add_node("webpage_review", webpage_review_node)
     workflow.add_node("css_revision_agent", css_revision_agent_node)
     workflow.add_node("css_revision_executor", css_revision_executor_node)
@@ -64,14 +74,19 @@ def build_hitl_workflow(
     )
     workflow.add_edge("layout_compose_prepare", "layout_compose_review")
     workflow.add_edge("layout_compose_review", "coder")
+    workflow.add_edge("coder", "capture_review_screenshots")
+    workflow.add_edge("capture_review_screenshots", "reviewer_semantic_visual")
+    workflow.add_edge("reviewer_semantic_visual", "reviewer_layout_rhythm")
+    workflow.add_edge("reviewer_layout_rhythm", "review_arbiter")
     workflow.add_conditional_edges(
-        "coder",
-        draft_recovery_router,
+        "review_arbiter",
+        post_arbiter_router,
         {
-            "planner": "planner",
+            "arbiter_autofix": "arbiter_autofix",
             "webpage_review": "webpage_review",
         },
     )
+    workflow.add_edge("arbiter_autofix", "css_revision_agent")
     workflow.add_conditional_edges(
         "webpage_review",
         webpage_review_router,

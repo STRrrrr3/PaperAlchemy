@@ -106,6 +106,7 @@ def build_shell_contract(shell_node: CanonicalShellNode) -> BlockShellContract:
         preserve_ids=list(shell_node.preserve_ids or []),
         wrapper_chain=list(shell_node.wrapper_chain or []),
         actionable_root_selector=str(shell_node.actionable_root_selector or shell_node.selector or "").strip(),
+        match_index=shell_node.match_index,
     )
 
 

@@ -3,6 +3,7 @@ from typing import Annotated, Any, List, Literal, Optional, TypedDict
 
 from src.services.human_feedback import HumanFeedbackPayload
 from src.contracts.schemas import (
+    ArbiterReport,
     BlockRenderArtifact,
     BlockRenderSpec,
     CssRevisionPlan,
@@ -10,6 +11,7 @@ from src.contracts.schemas import (
     LayoutComposeSession,
     LayoutComposeUpdate,
     PagePlan,
+    ReviewerReport,
     SemanticPagePlan,
     RevisionPlan,
     ShellBindingReview,
@@ -18,7 +20,6 @@ from src.contracts.schemas import (
     TargetedReplacementPlan,
     TemplateCandidate,
     TemplateProfile,
-    VisualSmokeReport,
 )
 
 
@@ -62,11 +63,6 @@ class CoderState(TypedDict):
     block_render_specs: List[BlockRenderSpec]
     block_render_artifacts: List[BlockRenderArtifact]
     coder_feedback_history: Annotated[List[str], operator.add]
-    visual_feedback: Annotated[List[str], operator.add]
-    visual_screenshot_path: str
-    visual_iterations: int
-    is_visually_approved: bool
-    visual_smoke_report: VisualSmokeReport | None
     coder_artifact: Optional[CoderArtifact]
     coder_critic_passed: bool
     coder_retry_count: int
@@ -103,7 +99,13 @@ class WorkflowState(TypedDict):
     shell_manual_selection: ShellManualSelection | None
     layout_compose_session: LayoutComposeSession | None
     layout_compose_update: LayoutComposeUpdate | None
-    visual_smoke_report: VisualSmokeReport | None
+    review_current_screenshot_path: str
+    review_template_screenshot_path: str
+    semantic_visual_review: ReviewerReport | None
+    layout_rhythm_review: ReviewerReport | None
+    polish_review: ReviewerReport | None
+    arbiter_review: ArbiterReport | None
+    arbiter_autofix_applied: bool
     structured_paper: Optional[StructuredPaper]
     semantic_page_plan: Optional[SemanticPagePlan]
     page_plan: Optional[PagePlan]

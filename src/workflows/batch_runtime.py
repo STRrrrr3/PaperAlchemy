@@ -35,7 +35,7 @@ from src.ui.constraints import (
     ensure_template_assets,
     get_default_pdf,
 )
-from src.ui.formatters import _visual_smoke_feedback_text, resolve_selected_candidate
+from src.ui.formatters import resolve_selected_candidate
 from src.workflows.hitl_nodes import normalize_coder_artifact
 from src.template.compile import prepare_template_compile_bundle
 
@@ -126,13 +126,13 @@ def run_langgraph_batch(
     log(f"[Planner] Saved page plan to {planner_json_path}")
 
     log("[Coder] Running coder agent...")
-    coder_artifact, visual_smoke_report, resolved_page_plan = run_coder_agent_with_diagnostics(
+    coder_artifact, resolved_page_plan = run_coder_agent_with_diagnostics(
         paper_folder_name=paper_folder_name,
         structured_data=structured_data,
         page_plan=page_plan,
         human_directives=empty_human_feedback(),
         coder_instructions="",
-        max_retry=2,
+        max_retry=4,
         template_profile=template_profile,
     )
     if not coder_artifact:
@@ -143,11 +143,6 @@ def run_langgraph_batch(
         save_page_plan(planner_json_path, page_plan)
     save_coder_artifact(coder_json_path, coder_artifact)
     log(f"[Coder] Generated entry html at {coder_artifact.entry_html}")
-    smoke_feedback = _visual_smoke_feedback_text(visual_smoke_report)
-    if smoke_feedback:
-        log(smoke_feedback)
-    if visual_smoke_report and visual_smoke_report.suggested_recovery == "rerun_planner":
-        log("[Planner] Visual smoke recommends rerunning planner before accepting this batch draft.")
     log("[Done] Generation completed successfully.")
     return coder_artifact
 

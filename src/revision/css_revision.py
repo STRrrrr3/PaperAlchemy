@@ -8,7 +8,6 @@ from typing import Any, Literal
 from bs4 import BeautifulSoup
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.agents.coder_critic import _encode_image_to_data_url
 from src.contracts.schemas import ContentReplacement, CssRevisionPlan, CoderArtifact, PageManifest, PagePlan
 from src.contracts.state import WorkflowState
 from src.patching.patch_pipeline import (
@@ -26,9 +25,11 @@ from src.patching.patch_pipeline import (
     _to_site_relative_paths,
     _write_files_transaction,
 )
+from src.contracts.schemas import ArbiterReport
 from src.prompts import CSS_REVISION_AGENT_SYSTEM_PROMPT, CSS_REVISION_AGENT_USER_PROMPT_TEMPLATE
 from src.services.artifact_store import get_output_paths, load_coder_artifact, load_page_plan, load_template_profile
 from src.services.human_feedback import (
+    build_human_feedback_payload,
     build_multimodal_message_content,
     extract_human_feedback_images,
     extract_human_feedback_text,
@@ -36,7 +37,7 @@ from src.services.human_feedback import (
 )
 from src.services.llm import get_llm
 from src.services.preview_service import (
-    build_visual_critic_screenshot_path,
+    build_page_screenshot_path,
     load_style_context_json,
     take_local_screenshot,
 )
@@ -119,18 +120,19 @@ def _build_page_screenshot_payload(artifact: CoderArtifact | None) -> dict[str, 
     entry_html_path = Path(artifact.entry_html).resolve()
     screenshot_path = take_local_screenshot(
         str(entry_html_path),
-        str(build_visual_critic_screenshot_path(entry_html_path)),
+        str(build_page_screenshot_path(entry_html_path, "css_revision_current.png")),
     )
     if not screenshot_path:
         return None
-    data_url = _encode_image_to_data_url(Path(screenshot_path))
-    if not data_url:
+    image_payloads = build_human_feedback_payload("", [screenshot_path])["images"]
+    if not image_payloads:
         return None
+    payload = image_payloads[0]
     return {
-        "name": Path(screenshot_path).name,
-        "path": screenshot_path,
-        "mime_type": "image/png",
-        "data_url": data_url,
+        "name": str(payload.get("name") or Path(screenshot_path).name),
+        "path": str(payload.get("path") or screenshot_path),
+        "mime_type": str(payload.get("mime_type") or "image/png"),
+        "data_url": str(payload.get("data_url") or ""),
     }
 
 
@@ -363,6 +365,34 @@ def _validate_revision_plan_output(
             "This mixed request appears to include visual styling changes. Add css_rules for the visual adjustments if they are feasible.",
         )
     return True, False, ""
+
+
+def arbiter_autofix_node(state: WorkflowState) -> dict[str, Any]:
+    from src.ui.formatters import format_arbiter_autofix_prompt
+
+    raw = state.get("arbiter_review")
+    if raw is None:
+        print("[ArbiterAutofix] No arbiter review found, skipping.")
+        return {"arbiter_autofix_applied": True}
+    try:
+        report = raw if isinstance(raw, ArbiterReport) else ArbiterReport.model_validate(raw)
+    except Exception:
+        print("[ArbiterAutofix] Could not parse arbiter review, skipping.")
+        return {"arbiter_autofix_applied": True}
+    if not report.items:
+        print("[ArbiterAutofix] Arbiter review has no items, skipping.")
+        return {"arbiter_autofix_applied": True}
+
+    prompt_text = format_arbiter_autofix_prompt(report)
+    feedback_payload = build_human_feedback_payload(prompt_text, [])
+    print(f"[ArbiterAutofix] Converted {len(report.items)} arbiter item(s) into CSS revision feedback.")
+    return {
+        "human_directives": feedback_payload,
+        "arbiter_autofix_applied": True,
+        "css_revision_plan": None,
+        "css_revision_summary": "",
+        "patch_error": "",
+    }
 
 
 def css_revision_agent_node(state: WorkflowState) -> dict[str, Any]:

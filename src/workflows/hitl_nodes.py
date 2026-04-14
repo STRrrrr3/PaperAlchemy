@@ -9,10 +9,7 @@ from langgraph.graph import END, StateGraph
 from src.agents.coder import coder_node, run_coder_agent_with_diagnostics
 from src.agents.coder_critic import (
     build_coder_critic_router,
-    build_vision_qa_router,
     coder_critic_node,
-    take_screenshot_action,
-    vision_critic_node,
 )
 from src.agents.planner import finalize_planner_output, run_planner_agent, unified_planner_node
 from src.agents.planner_critic import build_planner_critic_router, planner_critic_node
@@ -29,7 +26,6 @@ from src.contracts.schemas import (
     StructuredPaper,
     TemplateCandidate,
     TemplateProfile,
-    VisualSmokeReport,
 )
 from src.contracts.state import CoderState, PlannerState, ReaderState, WorkflowState
 from src.services.artifact_store import (
@@ -50,7 +46,6 @@ from src.template.compile import prepare_template_compile_bundle
 from src.template.resources import ensure_autopage_template_assets
 from src.template.shell_resolver import build_layout_compose_session, resolve_page_plan_shells
 from src.ui.formatters import (
-    _planner_recovery_feedback_from_visual_smoke,
     format_page_plan_to_markdown,
     format_paper_to_markdown,
 )
@@ -76,7 +71,6 @@ class PlannerPhaseState(PlannerState, total=False):
     shell_manual_selection: ShellManualSelection | None
     layout_compose_session: LayoutComposeSession | None
     layout_compose_update: LayoutComposeUpdate | None
-    visual_smoke_report: VisualSmokeReport | None
     template_profile_path: str
     template_compile_cache_hit: bool
 
@@ -307,17 +301,6 @@ def normalize_layout_compose_update(update: Any) -> LayoutComposeUpdate | None:
         return None
 
 
-def normalize_visual_smoke_report(report: Any) -> VisualSmokeReport | None:
-    if report is None:
-        return None
-    if isinstance(report, VisualSmokeReport):
-        return report
-    try:
-        return VisualSmokeReport.model_validate(report)
-    except Exception:
-        return None
-
-
 def _apply_shell_manual_selection_to_plan(
     page_plan: PagePlan,
     manual_selection: ShellManualSelection,
@@ -483,14 +466,14 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
     template_profile = _load_template_profile_for_state(state)
 
     print("[Coder] Running coder agent...")
-    coder_artifact, visual_smoke_report, resolved_page_plan = run_coder_agent_with_diagnostics(
+    coder_artifact, resolved_page_plan = run_coder_agent_with_diagnostics(
         paper_folder_name=paper_folder_name,
         structured_data=structured_data,
         page_plan=page_plan,
         human_directives=state.get("human_directives"),
         coder_instructions=str(state.get("coder_instructions") or ""),
         previous_coder_artifact=previous_coder_artifact,
-        max_retry=2,
+        max_retry=4,
         template_profile=template_profile,
     )
     if not coder_artifact:
@@ -501,15 +484,10 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
     save_page_plan(planner_json_path, effective_page_plan)
     save_coder_artifact(coder_json_path, coder_artifact)
     print(f"[Coder] Generated entry html at {coder_artifact.entry_html}")
-    updated_human_directives = _planner_recovery_feedback_from_visual_smoke(
-        state.get("human_directives"),
-        visual_smoke_report,
-    )
     return {
         "page_plan": effective_page_plan,
         "approved_page_plan": effective_page_plan,
         "coder_artifact": coder_artifact,
-        "human_directives": updated_human_directives,
         "patch_error": "",
         "revision_plan": None,
         "targeted_replacement_plan": None,
@@ -520,7 +498,6 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
         "shell_manual_selection": None,
         "layout_compose_session": None,
         "layout_compose_update": None,
-        "visual_smoke_report": visual_smoke_report,
     }
 
 
@@ -544,7 +521,6 @@ def layout_compose_prepare_node(state: WorkflowState) -> dict[str, Any]:
         "layout_compose_update": None,
         "shell_binding_review": None,
         "shell_manual_selection": None,
-        "visual_smoke_report": None,
     }
 
 
@@ -580,14 +556,12 @@ def shell_resolver_phase_node(state: WorkflowState) -> dict[str, Any]:
         return {
             "shell_binding_review": binding_review,
             "shell_manual_selection": None,
-            "visual_smoke_report": None,
         }
 
     print("[ShellResolver] All blocks resolved to template shells.")
     return {
         "shell_binding_review": None,
         "shell_manual_selection": None,
-        "visual_smoke_report": None,
     }
 
 
@@ -787,7 +761,6 @@ def _planner_phase_finalize_node(state: PlannerPhaseState) -> dict[str, Any]:
         "shell_manual_selection": None,
         "layout_compose_session": None,
         "layout_compose_update": None,
-        "visual_smoke_report": None,
     }
 
 
@@ -822,11 +795,6 @@ def _coder_phase_prepare_node(state: CoderPhaseState) -> dict[str, Any]:
         "block_render_specs": [],
         "block_render_artifacts": [],
         "coder_feedback_history": [],
-        "visual_feedback": [],
-        "visual_screenshot_path": "",
-        "visual_iterations": 0,
-        "is_visually_approved": False,
-        "visual_smoke_report": None,
         "coder_artifact": _load_coder_artifact_for_state(state),
         "coder_critic_passed": False,
         "coder_retry_count": 0,
@@ -837,7 +805,6 @@ def _coder_phase_finalize_node(state: CoderPhaseState) -> dict[str, Any]:
     paper_folder_name = _workflow_paper_folder_name(state)
     coder_artifact = normalize_coder_artifact(state.get("coder_artifact"))
     page_plan = PagePlan.model_validate(state.get("page_plan"))
-    visual_smoke_report = normalize_visual_smoke_report(state.get("visual_smoke_report"))
     if not coder_artifact or not bool(state.get("coder_critic_passed")):
         raise RuntimeError("Coder agent failed to build the final webpage.")
 
@@ -845,19 +812,13 @@ def _coder_phase_finalize_node(state: CoderPhaseState) -> dict[str, Any]:
     save_page_plan(planner_json_path, page_plan)
     save_coder_artifact(coder_json_path, coder_artifact)
     print(f"[Coder] Generated entry html at {coder_artifact.entry_html}")
-    if not bool(state.get("is_visually_approved")) and int(state.get("visual_iterations", 0)) > 0:
-        print("[PaperAlchemy-Coder] visual smoke test flagged issues; returning the latest artifact for human review.")
-    updated_human_directives = _planner_recovery_feedback_from_visual_smoke(
-        state.get("human_directives"),
-        visual_smoke_report,
-    )
     return {
         "structured_paper": None,
         "page_plan": None,
         "template_profile": None,
         "coder_artifact": None,
         "block_render_artifacts": [],
-        "human_directives": updated_human_directives,
+        "human_directives": normalize_human_feedback(state.get("human_directives")),
         "patch_error": "",
         "revision_plan": None,
         "targeted_replacement_plan": None,
@@ -868,17 +829,14 @@ def _coder_phase_finalize_node(state: CoderPhaseState) -> dict[str, Any]:
         "shell_manual_selection": None,
         "layout_compose_session": None,
         "layout_compose_update": None,
-        "visual_smoke_report": visual_smoke_report,
     }
 
 
-def build_coder_phase_graph(max_retry: int = 2):
+def build_coder_phase_graph(max_retry: int = 4):
     workflow = StateGraph(CoderPhaseState)
     workflow.add_node("coder_prepare", _coder_phase_prepare_node)
     workflow.add_node("coder", coder_node)
     workflow.add_node("coder_critic", coder_critic_node)
-    workflow.add_node("take_screenshot", take_screenshot_action)
-    workflow.add_node("vision_critic", vision_critic_node)
     workflow.add_node("coder_finalize", _coder_phase_finalize_node)
 
     workflow.set_entry_point("coder_prepare")
@@ -887,12 +845,6 @@ def build_coder_phase_graph(max_retry: int = 2):
     workflow.add_conditional_edges(
         "coder_critic",
         build_coder_critic_router(max_retry=max_retry),
-        {"retry": "coder", "visual_qa": "take_screenshot", "end": "coder_finalize"},
-    )
-    workflow.add_edge("take_screenshot", "vision_critic")
-    workflow.add_conditional_edges(
-        "vision_critic",
-        build_vision_qa_router(),
         {"retry": "coder", "end": "coder_finalize"},
     )
     workflow.add_edge("coder_finalize", END)

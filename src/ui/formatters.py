@@ -4,8 +4,7 @@ from collections import defaultdict
 import re
 from typing import Any
 
-from src.contracts.schemas import PagePlan, VisualSmokeReport
-from src.services.human_feedback import build_human_feedback_payload, extract_human_feedback_text
+from src.contracts.schemas import ArbiterReport, PagePlan
 
 def append_log_lines(existing_text: str, new_lines: list[str]) -> str:
     merged = [line for line in str(existing_text or "").splitlines() if line.strip()]
@@ -258,27 +257,31 @@ def resolve_selected_candidate(
             return candidate
     return None
 
-def _visual_smoke_feedback_text(report: VisualSmokeReport | None) -> str:
-    if not report or report.passed or not report.issues:
+def _arbiter_review_feedback_text(report: Any) -> str:
+    if report is None:
         return ""
-    recovery = str(report.suggested_recovery or "").strip()
-    suffix = f" (recovery: {recovery})" if recovery else ""
-    return "[Visual Smoke] " + "; ".join(report.issues) + suffix
+    try:
+        arbiter_report = report if isinstance(report, ArbiterReport) else ArbiterReport.model_validate(report)
+    except Exception:
+        return ""
+    if not arbiter_report.items:
+        return ""
+    suggestions = [
+        f"{item.severity}: {item.target} -> {item.advice}"
+        for item in arbiter_report.items
+    ]
+    return "[Draft Review] " + " | ".join(suggestions)
 
-def _planner_recovery_feedback_from_visual_smoke(
-    existing_feedback: Any,
-    report: VisualSmokeReport | None,
-) -> Any:
-    if report is None or report.suggested_recovery != "rerun_planner":
-        return existing_feedback
-
-    prior_text = extract_human_feedback_text(existing_feedback)
-    smoke_issue_text = "; ".join(report.issues) or "Visual smoke detected a structural page mismatch."
-    feedback_lines = []
-    if prior_text:
-        feedback_lines.append(prior_text)
-    feedback_lines.append(
-        "Visual smoke requires planner recovery. Rework the page structure/template binding instead of a local patch."
-    )
-    feedback_lines.append(f"Structural issues: {smoke_issue_text}")
-    return build_human_feedback_payload("\n".join(feedback_lines), None)
+def format_arbiter_autofix_prompt(report: ArbiterReport) -> str:
+    if not report.items:
+        return ""
+    lines = ["[Auto-fix from Arbiter Review]",
+             "The automated review found the following CSS/layout issues to fix.",
+             "Each item includes a target selector and specific CSS changes.",
+             "Apply these CSS fixes precisely as described:\n"]
+    for i, item in enumerate(report.items, 1):
+        lines.append(f"{i}. [{item.severity.upper()}] {item.target}: {item.advice}")
+    lines.append("\nApply CSS-only fixes for these layout and visual issues. "
+                 "Use the exact selectors and CSS property values specified above. "
+                 "Do not change content or page structure.")
+    return "\n".join(lines)

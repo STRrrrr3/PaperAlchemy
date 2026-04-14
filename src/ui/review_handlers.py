@@ -38,7 +38,7 @@ from src.ui.constraints import (
     get_default_pdf,
 )
 from src.ui.formatters import (
-    _visual_smoke_feedback_text,
+    _arbiter_review_feedback_text,
     append_log_lines,
     attach_candidate_labels,
     format_page_plan_to_markdown,
@@ -56,7 +56,7 @@ from src.ui.updates import (
 )
 from src.workflows.batch_runtime import render_current_workflow_preview
 from src.workflows.hitl_graph import get_default_hitl_workflow
-from src.workflows.hitl_nodes import normalize_coder_artifact, normalize_layout_compose_session, normalize_visual_smoke_report
+from src.workflows.hitl_nodes import normalize_coder_artifact, normalize_layout_compose_session
 
 
 def _load_snapshot_structured_paper(snapshot_values: dict[str, Any]) -> StructuredPaper:
@@ -158,7 +158,13 @@ def _build_cached_resume_state(
         "shell_manual_selection": None,
         "layout_compose_session": None,
         "layout_compose_update": None,
-        "visual_smoke_report": None,
+        "review_current_screenshot_path": "",
+        "review_template_screenshot_path": "",
+        "semantic_visual_review": None,
+        "layout_rhythm_review": None,
+        "polish_review": None,
+        "arbiter_review": None,
+        "arbiter_autofix_applied": False,
     }
 
     if (
@@ -551,7 +557,13 @@ def run_extraction(
             "shell_manual_selection": None,
             "layout_compose_session": None,
             "layout_compose_update": None,
-            "visual_smoke_report": None,
+            "review_current_screenshot_path": "",
+            "review_template_screenshot_path": "",
+            "semantic_visual_review": None,
+            "layout_rhythm_review": None,
+            "polish_review": None,
+            "arbiter_review": None,
+            "arbiter_autofix_applied": False,
         }
 
         log("[Reader] Running workflow until the extraction review checkpoint...")
@@ -647,7 +659,6 @@ def revise_extraction(
                 "shell_manual_selection": None,
                 "layout_compose_session": None,
                 "layout_compose_update": None,
-                "visual_smoke_report": None,
             },
             as_node="overview",
         )
@@ -730,7 +741,6 @@ def approve_extraction_and_plan_outline(
                 "shell_manual_selection": None,
                 "layout_compose_session": None,
                 "layout_compose_update": None,
-                "visual_smoke_report": None,
             },
             as_node="overview",
         )
@@ -829,7 +839,6 @@ def revise_outline(
                 "shell_manual_selection": None,
                 "layout_compose_session": None,
                 "layout_compose_update": None,
-                "visual_smoke_report": None,
             },
             as_node="outline_review",
         )
@@ -924,7 +933,13 @@ def approve_outline_and_generate_draft(
                 "shell_manual_selection": None,
                 "layout_compose_session": None,
                 "layout_compose_update": None,
-                "visual_smoke_report": None,
+                "review_current_screenshot_path": "",
+                "review_template_screenshot_path": "",
+                "semantic_visual_review": None,
+                "layout_rhythm_review": None,
+                "polish_review": None,
+                "arbiter_review": None,
+                "arbiter_autofix_applied": False,
             },
             as_node="outline_review",
         )
@@ -954,37 +969,9 @@ def approve_outline_and_generate_draft(
                 empty_revision_history_state(),
             )
 
-        smoke_report = normalize_visual_smoke_report(paused_values.get("visual_smoke_report"))
-        feedback_text = _visual_smoke_feedback_text(smoke_report)
-        if feedback_text:
-            log(feedback_text)
-
-        if review_stage == "outline":
-            outline_overview = str(paused_values.get("outline_overview") or "").strip()
-            if not outline_overview:
-                page_plan = _load_snapshot_page_plan(paused_values)
-                structured_data = _load_snapshot_structured_paper(paused_values)
-                outline_overview = format_page_plan_to_markdown(
-                    page_plan.model_dump(),
-                    structured_data.model_dump(),
-                )
-            restored_manual_layout_compose_enabled = _normalize_manual_layout_compose_enabled(
-                paused_values.get("manual_layout_compose_enabled")
-            )
-            log("[Planner] Visual smoke flagged a structural mismatch, so the workflow returned to outline planning instead of opening webpage patch review.")
-            return (
-                "\n".join(run_log_lines),
-                outline_overview,
-                *_review_accordion_updates("outline"),
-                _hidden_preview_update(),
-                "",
-                *_stage_action_updates(
-                    "outline",
-                    manual_layout_compose_enabled=restored_manual_layout_compose_enabled,
-                ),
-                *_layout_compose_ui_hidden(),
-                empty_revision_history_state(),
-            )
+        review_feedback = _arbiter_review_feedback_text(paused_values.get("arbiter_review"))
+        if review_feedback:
+            log(review_feedback)
 
         if review_stage != "webpage":
             raise RuntimeError(
@@ -996,7 +983,7 @@ def approve_outline_and_generate_draft(
             paper_folder_name=paper_folder_name,
             artifact=coder_artifact,
             page_plan=page_plan,
-            summary=feedback_text or "Initial draft generated.",
+            summary="Initial draft generated.",
         )
         revision_history_state = _refresh_revision_history_state(paper_folder_name, revision_history)
         preview_image_path, entry_html_path = render_current_workflow_preview(paused_values)
@@ -1010,7 +997,6 @@ def approve_outline_and_generate_draft(
             entry_html_path,
             *_stage_action_updates(
                 "webpage",
-                feedback_text_value=feedback_text,
                 revision_history_state=revision_history_state,
             ),
             *_layout_compose_ui_hidden(),
@@ -1081,7 +1067,6 @@ def request_webpage_revision(
                 "css_revision_summary": "",
                 "patch_error": "",
                 "is_webpage_approved": False,
-                "visual_smoke_report": None,
             },
             as_node="webpage_review",
         )
@@ -1215,7 +1200,6 @@ def _switch_webpage_version(
                 "css_revision_summary": "",
                 "patch_error": "",
                 "is_webpage_approved": False,
-                "visual_smoke_report": None,
             },
             as_node="webpage_review",
         )
@@ -1318,7 +1302,6 @@ def approve_webpage(
                 "css_revision_summary": "",
                 "patch_error": "",
                 "is_webpage_approved": True,
-                "visual_smoke_report": None,
             },
             as_node="webpage_review",
         )

@@ -390,7 +390,7 @@ def discover_template_ir(
     template_soup = BeautifulSoup(str(template_html or ""), "html.parser")
     root = template_soup.body or template_soup
     shell_nodes: list[CanonicalShellNode] = []
-    seen: set[str] = set()
+    selector_counts: dict[str, int] = {}
     seen_ids: set[str] = set()
     unsafe_selector_set = {str(selector or "").strip() for selector in (unsafe_selectors or []) if str(selector or "").strip()}
     global_anchors = discover_canonical_global_anchors(template_html)
@@ -409,9 +409,10 @@ def discover_template_ir(
         if not _is_candidate_root(tag):
             continue
         selector = build_unique_selector(tag, template_soup)
-        if not selector or selector in seen:
+        if not selector:
             continue
-        seen.add(selector)
+        match_index = selector_counts.get(selector, 0)
+        selector_counts[selector] = match_index + 1
         role, signals = _infer_shell_role(tag)
         confidence = 0.45
         if "#" in selector:
@@ -438,6 +439,7 @@ def discover_template_ir(
             CanonicalShellNode(
                 shell_id=_stable_shell_id(tag, role, seen_ids),
                 selector=selector,
+                match_index=match_index,
                 root_tag=str(tag.name or "div"),
                 required_classes=tag_classes(tag),
                 preserve_ids=tag_ids(tag),

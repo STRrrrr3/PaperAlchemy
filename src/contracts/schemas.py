@@ -108,6 +108,7 @@ class TemplateShellCandidate(BaseModel):
     preserve_ids: List[str] = Field(default_factory=list)
     wrapper_chain: List["ShellWrapperSignature"] = Field(default_factory=list)
     dom_index: int = 0
+    match_index: int = 0
     confidence: float = 0.0
     signals: List[str] = Field(default_factory=list)
 
@@ -122,6 +123,7 @@ class CanonicalShellNode(BaseModel):
     actionable_root_selector: str
     region_role: Literal["hero", "section", "gallery", "table", "footer", "nav"]
     dom_index: int = 0
+    match_index: int = 0
     confidence: float = 0.0
     bindable: bool = True
     signals: List[str] = Field(default_factory=list)
@@ -297,6 +299,7 @@ class BlockShellContract(BaseModel):
     preserve_ids: List[str] = Field(default_factory=list)
     wrapper_chain: List[ShellWrapperSignature] = Field(default_factory=list)
     actionable_root_selector: str
+    match_index: int = 0
 
 
 class BlockPlan(BaseModel):
@@ -411,6 +414,7 @@ class ResolvedBlockBinding(BaseModel):
     wrapper_chain: List[ShellWrapperSignature] = Field(default_factory=list)
     actionable_root_selector: str
     dom_index: int = 0
+    match_index: int = 0
 
 
 class BlockRenderSpec(BaseModel):
@@ -434,6 +438,7 @@ class BlockRenderArtifact(BaseModel):
     block_id: str
     order: int
     selector: str
+    match_index: int = 0
     render_mode: Literal["compiled_block_assembly", "legacy_fullpage"] = "compiled_block_assembly"
     html: str = ""
     html_path: str = ""
@@ -548,14 +553,19 @@ class LayoutComposeUpdate(BaseModel):
     action: str = ""
 
 
-class VisualSmokeReport(BaseModel):
-    passed: bool = True
-    issue_class: Literal["none", "cosmetic", "structure"] = "none"
-    suggested_recovery: Literal["accept", "patch_or_review", "rerun_planner"] = "accept"
-    issues: List[str] = Field(default_factory=list)
-    selectors_to_remove: List[str] = Field(default_factory=list)
-    css_rules_to_inject: List[str] = Field(default_factory=list)
-    screenshot_path: str = ""
+class ReviewItem(BaseModel):
+    severity: Literal["high", "medium", "low"]
+    target: str
+    advice: str
+
+
+class ReviewerReport(BaseModel):
+    reviewer: Literal["semantic_visual", "layout_rhythm", "polish"]
+    items: List[ReviewItem] = Field(default_factory=list)
+
+
+class ArbiterReport(BaseModel):
+    items: List[ReviewItem] = Field(default_factory=list)
 
 
 class AnchorChildStyle(BaseModel):
@@ -859,6 +869,7 @@ def _compat_shell_candidates_from_template_ir(template_ir: TemplateIR) -> List[T
                 preserve_ids=list(shell_node.preserve_ids),
                 wrapper_chain=list(shell_node.wrapper_chain),
                 dom_index=int(shell_node.dom_index),
+                match_index=int(shell_node.match_index),
                 confidence=float(shell_node.confidence or 0.0),
                 signals=list(shell_node.signals),
             )
@@ -897,6 +908,7 @@ def _template_ir_from_compat_fields(
                 actionable_root_selector=selector,
                 region_role=candidate.role,
                 dom_index=int(candidate.dom_index),
+                match_index=int(candidate.match_index),
                 confidence=float(candidate.confidence or 0.0),
                 bindable=True,
                 signals=list(candidate.signals),
