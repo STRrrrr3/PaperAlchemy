@@ -309,7 +309,7 @@ def bind_semantic_plan(
         )
 
     render_strategy_risks = _render_strategy_risks(template_profile)
-    render_strategy = "legacy_fullpage" if render_strategy_risks else "compiled_block_assembly"
+    render_strategy = "legacy_fullpage"
     target_framework = str(
         constraints.get("target_framework")
         or constraints.get("framework")

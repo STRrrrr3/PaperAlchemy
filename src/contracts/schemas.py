@@ -389,6 +389,10 @@ class CoderArtifact(BaseModel):
         default=None,
         description="Directory containing per-block render artifacts when block assembly is used.",
     )
+    fullpage_context_dir: Optional[str] = Field(
+        default=None,
+        description="Directory containing structure-guided fullpage digest artifacts when fullpage rendering is used.",
+    )
 
 
 class CoderCriticReport(BaseModel):

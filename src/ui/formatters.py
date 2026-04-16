@@ -276,12 +276,12 @@ def format_arbiter_autofix_prompt(report: ArbiterReport) -> str:
     if not report.items:
         return ""
     lines = ["[Auto-fix from Arbiter Review]",
-             "The automated review found the following CSS/layout issues to fix.",
-             "Each item includes a target selector and specific CSS changes.",
-             "Apply these CSS fixes precisely as described:\n"]
+             "The automated review found the following issues to fix.",
+             "Each item includes a target and specific changes.",
+             "Apply these fixes precisely as described:\n"]
     for i, item in enumerate(report.items, 1):
         lines.append(f"{i}. [{item.severity.upper()}] {item.target}: {item.advice}")
-    lines.append("\nApply CSS-only fixes for these layout and visual issues. "
-                 "Use the exact selectors and CSS property values specified above. "
-                 "Do not change content or page structure.")
+    lines.append("\nApply both CSS fixes and content replacements as needed. "
+                 "Use the exact selectors and values specified above. "
+                 "For wrong images, replace with the correct asset path from the available paper assets.")
     return "\n".join(lines)

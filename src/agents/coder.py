@@ -1039,6 +1039,7 @@ def _run_legacy_fullpage_render(
         template_profile_path=template_profile_path,
         page_manifest_path=page_manifest_path,
         block_artifact_dir=None,
+        fullpage_context_dir=None,
     )
     return artifact, page_plan
 
@@ -1058,7 +1059,7 @@ def coder_node(state: CoderState) -> dict[str, Any]:
         print("[PaperAlchemy-Coder] missing page_plan/structured_paper/paper_folder_name.")
         return {}
 
-    requested_strategy = str(page_plan.plan_meta.render_strategy or "compiled_block_assembly").strip()
+    requested_strategy = str(page_plan.plan_meta.render_strategy or "legacy_fullpage").strip()
     try:
         if requested_strategy == "compiled_block_assembly" and template_profile is not None:
             artifact, resolved_page_plan, block_specs, block_artifacts = _run_compiled_block_assembly(

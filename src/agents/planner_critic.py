@@ -288,16 +288,8 @@ def run_bound_plan_validation(
             + ", ".join(unexpected_dom_mapping[:6])
         )
 
-    compile_risky = float(template_profile.compile_confidence or 0.0) < 0.7 or any(
-        risk in {"fetch_runtime_dependency", "chart_runtime_dependency", "math_runtime_dependency"}
-        for risk in template_profile.risk_flags
-    )
     render_strategy = str(page_plan.plan_meta.render_strategy or "").strip()
-    if compile_risky and render_strategy != "legacy_fullpage":
-        critiques.append(
-            "plan_meta.render_strategy must be 'legacy_fullpage' when template compile confidence is low or runtime widgets are risky."
-        )
-    if not compile_risky and render_strategy not in {"compiled_block_assembly", "legacy_fullpage"}:
+    if render_strategy not in {"compiled_block_assembly", "legacy_fullpage"}:
         critiques.append("plan_meta.render_strategy must be a supported planner output.")
 
     return critiques
