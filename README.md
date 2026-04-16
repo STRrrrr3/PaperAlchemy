@@ -9,17 +9,17 @@
 
 **PaperAlchemy** 旨在把静态的 PDF 学术论文“点石成金”，无缝转化为结构化数据，并全自动生成美观、可交互的学术前端网页展示（Static Single Page Application）。
 
-本项目目前已经打通了高度细化的**端到端工作流 (PDF → 结构化 JSON → 智能模板编译 → 分块渲染 → 网页修订)**，在后台通过多模态大模型解析、精准语义提取与严谨的代码编译装配能力，极大地消除了长片段长文生成网页时的幻觉。加上贯穿始终的 Human-in-the-Loop（人在回路）监控及基于“意图引擎 (Intent Engine)”的局部安全打补丁机制，为您提供一站式学术内容多媒体化的最佳实践。
+本项目目前已经打通了高度细化的**端到端工作流 (PDF → 结构化 JSON → 智能模板编译 → 分块渲染 → 视觉机审与 CSS 级安全修订)**。在后台，通过多模态大模型解析、精准的语义提取、极其严谨的编译块级代码装配能力，以及自动化的网页多维度审视节点（视觉、排版节奏等），极大地消除了长文本转化网页时常见的“幻觉”。配合贯穿整个管线的 Human-in-the-Loop (HITL) 关键断点拦截监控，以及高度重构的全新 CSS 本地修订引擎 (CSS Revision Agent & Executor)，为您提供极为稳定的一站式学术内容多媒体化构建方案与工作体验。
 
 ---
 
 ## 🌟 核心特性
 
-- 📄 **多模态精准解析**：接管 Docling 处理管线，不仅提取纯文本，还能完整锚定表格与全页参考图像切割。
-- 🤖 **多智能体深度协同**：依托 LangGraph 构建稳健的有限状态机架构，Reader、Planner、Coder 各个节点按契约严格流转业务逻辑。
-- 🎨 **模板优先的组件级装配**：抛弃极高幻觉风险的全页代码无中生有，采用先进的模板探测与编译 (Template Compile) 以及块级独立组装引擎 (Block Render Spec)，将页面结构化绑定。
-- 🌍 **意图驱动的原生局部修订**：不满意可随时对最终站点进行可视化局部微调。全新集成的 Intent Engine 与 Patch Pipeline 会精准地在网页对应 DOM 锚点上施加样式覆写与结构替换，而绝不会破坏整体架构。
-- 🖥️ **全生命周期人工干预**：基于 Gradio 框架编织的可视化工控台，用户能在“大纲敲定前”、“网页板块拼装前 (Layout Compose)”与“终稿验收后”无缝介入甚至阻断工作流，完美把控业务表现边界。
+- 📄 **多模态精准解析**：深度挂载 Docling 解析管线，不仅完美提取文本语义段落，更能精准切割论文全页快照参考与独立的图表图片素材资产锚定。
+- 🤖 **多智能体深度协同**：依托 LangGraph 编织的健壮有限状态机流图设计，将 Reader (信息萃取)、Planner (排版)、Coder (生成)、Review (视觉审阅) 与 Revision (修订) 各管线按确定性严格契约推进。
+- 🎨 **模板优先的组件级装配**：摒弃存在高幻觉风险的大模型无限制零基础页面生成。直接通过先进的模板探测 (Template Compile) 与块级内容汇编引擎 (Compiled Block Assembly) 独立渲染结构化视图后填埋绑定到宿主模板的安全插槽区域。
+- 🌍 **多层级视觉预审与 CSS 原生修订**：全新上线自动截图自修复流 (Arbiter Autofix) 和精确定距安全多层重刷引擎 (CSS Revision Agent & Executor)。从根本上替代了脆弱笼统的旧意图引擎机制。对于网页不满意区域，模型会且仅会利用纯 CSS 补丁 (`css_rules`) 和锚点片段替换 (`content_replacements`) 进行手术级局部刷新，规避重渲染带来的毁灭和污染。
+- 🖥️ **全生命周期人工干预 (HitL)**：在 Gradio 构建的视图栈上，用户可在萃取大纲后 (Overview)、网页布局拼装微调前 (Layout Compose Review)、以及最后网页全景检查验收时 (Webpage Review) 随时阻断系统流图，执行微观控制、下发意见或强制阻断越权。
 
 ---
 
@@ -27,18 +27,18 @@
 
 | 模块 | 核心技术/框架 | 描述 |
 | --- | --- | --- |
-| **基础逻辑编排** | **LangGraph** | 提供高维度图论状态机的流程流转节点控制、Checkpoint 记忆与 HITL 断点管理。 |
-| **多模态大模型** | **Gemini (支持 Vertex AI 优先验证)** | 依托 `langchain_google_genai` 提供文档抽取摘要、片段代码块编译生成、修改意图分类验证等。 |
-| **PDF 解构抽取** | **Docling** | 全能的文档引擎，分离图文坐标，输出多模态解析资产缓存与全文本。 |
-| **强类型流转校验** | **Pydantic** | 贯穿 Parser、Reader 到最终 Artifact 生命周期的数据边界限制模型，彻底隔离组件幻象。 |
-| **图形终端与阅览** | **Gradio / Playwright** | Gradio 提供状态展示器面板，Playwright 用于服务端页面一键截屏快照验收 (Visual Smoke)。 |
-| **网页微调打桩** | **BeautifulSoup4** | 在意图引擎确认指令后，依赖其提供精准 DOM 定点定位抽取方案或局部替换。 |
+| **基础逻辑编排** | **LangGraph** | 提供高维度图论状态机的流程流转节点控制、Checkpoint 记忆与 HITL 断点管理机制。 |
+| **多模态大模型** | **Gemini (支持 Vertex AI 优先验证)** | 依托 `langchain_google_genai` 提供文档抽取摘要、方案决策推断、审查裁判决策以及 CSS 级修订计划的生成。 |
+| **PDF 解构抽取** | **Docling** | 全能的开源文档引擎，精确分离图文包络坐标，抽取并输出多模态解析模型资产与全文本。 |
+| **强类型流转校验** | **Pydantic** | 贯穿全工作流的命脉防线，从 Reader 的结构化结果至最终 Revision Plan 边界严防死守，彻底隔离组件幻象。 |
+| **图形终端与阅览** | **Gradio / Playwright** | Gradio 提供整体业务展示控制台，Playwright 用于服务端运行时页面级快照的一键截取 (Visual Smoke) 向下流输送。 |
+| **网页微调打桩** | **BeautifulSoup4** | 作为后端核心依赖，实现模板静态层探测架构解剖以及在 CSS 替换/局部落位时的安全定距抽换操作。 |
 
 ---
 
 ## ⚙️ 架构与内部工作流 (WorkFlow)
 
-PaperAlchemy 的关键管线设计高度解耦并注重容错流。每个 Agent 主流程均配有基于 Actor-Critic（行动-评论）防丢反思机制的自检节点，系统确保数据符合下一流层边界时才持续调度发包流转。
+PaperAlchemy 使用 LangGraph 进行核心流转。最新修订的主系统管线涵盖五大核心分级阶段（阅读萃取、模式编译/排版规划、重组装配、机分重审与微调反思），并附带了高度解耦的微反馈闭环。
 
 ```mermaid
 graph TD
@@ -49,116 +49,94 @@ graph TD
     classDef SubGraph fill:none,stroke:#333,stroke-width:2px,stroke-dasharray: 5 5;
 
     A["📄 Raw PDF Input"]:::Input --> Parser("fa:fa-cogs 多模态解析"):::Agent
-    Parser --> |"📝 MD & JSON资产"| R_Agent
+    Parser --> |"📝 MD & JSON资产"| Reader_Phase
     
     subgraph Main_LangGraph ["LangGraph 核心流图 (Main Graph)"]
         
-        %% Reader Phase Subgraph
-        subgraph SubGraph_Reader ["读者组件子图 (Reader Subgraph)"]
-            R_Agent("🧠 Reader Generator")
-            R_Critic{"🔍 Reader Critic校验"}
-            R_Agent --> R_Critic
-            R_Critic -- "未提取全/幻觉重试" --> R_Agent
-            R_Critic -- "校验通过" --> R_End["✅ StructuredPaper"]:::Artifact
-        end
-        R_End --> HitL_Overview(("HitL: 前期萃取干预")):::HitL
+        %% Reader Phase
+        Reader_Phase("🧠 Reader 萃取与重查 (含 Critic)")
+        Reader_Phase --> HitL_Overview(("HitL: overview<br>大纲核正与阻断点")):::HitL
         
-        HitL_Overview -- "继续" --> T_Compile("⚙️ Template Compiler"):::Agent
-        T_Compile --> |"📑 TemplateProfile"| P_Agent
+        %% Plan Phase
+        HitL_Overview -- "继续" --> T_Compile("⚙️ template_compile<br>模板解析探测"):::Agent
+        T_Compile --> Planner_Phase("🧭 Planner 排版规划校验 (含 Critic)")
+        Planner_Phase --> HitL_Outline(("HitL: outline_review<br>大纲与排版审阅点")):::HitL
         
-        %% Planner Phase Subgraph
-        subgraph SubGraph_Planner ["规划组件子图 (Planner Subgraph)"]
-            P_Agent("🧭 Planner Generator")
-            P_Critic{"🔍 Planner Critic校验"}
-            P_Agent --> P_Critic
-            P_Critic -- "组件约束不符" --> P_Agent
-            P_Critic -- "校验通过" --> P_End["🗺️ PagePlan"]:::Artifact
-        end
+        %% Layout Compose
+        HitL_Outline -- "深度排版微调指令" --> LC_Prep("📌 layout_compose_prepare<br>排版编辑块预处理")
+        LC_Prep --> LC_Rev(("HitL: layout_compose_review<br>精细块状拼装控制")):::HitL
         
-        P_End --> HitL_Outline(("HitL: 大纲评审与 Layout 介入")):::HitL
-        HitL_Outline -- "组装授权" --> C_Agent
+        %% Coder Phase
+        HitL_Outline -- "直接生成" --> Coder_Phase("💻 Coder Phase<br>块组装机制构建成页")
+        LC_Rev -- "确任生成" --> Coder_Phase
         
-        %% Coder Phase Subgraph
-        subgraph SubGraph_Coder ["编码器子图 (Coder Subgraph)"]
-            C_Agent("💻 Coder Generator<br>分块重组/兜底整页")
-            C_Critic{"🔍 Coder Critic<br>DOM结构与边界查验"}
-            C_Agent --> C_Critic
-            C_Critic -- "约束违背/Manifest异常" --> C_Agent
-            C_Critic -- "验证通过" --> C_End["🌐 落地网页与Manifest"]:::Artifact
-        end
-        C_End --> VisualQA["👁️ Visual Smoke 视觉查验"]:::Agent
+        %% Review & Arbiter Phase
+        Coder_Phase --> Capture("📸 capture_review_screenshots<br>页面级可视快照捕获"):::Agent
+        Capture --> RV_SemVis("👁️ semantic_visual 视觉语义交叉审查")
+        RV_SemVis --> RV_Layout("📐 layout_rhythm 排版及布局节奏审查")
+        RV_Layout --> Arbiter("⚖️ review_arbiter <br>综合裁判归集与决策")
         
-        VisualQA -- "如视觉崩溃需规划重排" --> P_Agent
-        VisualQA -- "正常网页就绪" --> HitL_Webpage(("HitL: 视觉大端审视与防线拦截")):::HitL
+        %% Revision Phase
+        Arbiter -- "存在低风险必须修改项" --> Arbiter_Autofix("🔧 arbiter_autofix<br>自动封装修补建议")
+        Arbiter_Autofix --> CSS_Agent("🤖 css_revision_agent<br>转化反馈为独立策略集")
         
-        %% Revision Phase Subgraph
-        HitL_Webpage -- "意图反馈录入" --> IE("🧩 Intent Engine 路由识别"):::Agent
-        IE --> |"Non-Patch 不合规修饰打回"| HitL_Webpage
+        Arbiter -- "合规或无致命问题" --> HitL_Webpage(("HitL: webpage_review<br>末端验收多模态评审")):::HitL
         
-        IE --> |"Patch 意图继续"| Patch_Plan
-        subgraph SubGraph_Patch ["定锚微调子图 (Patch Subgraph)"]
-            Patch_Plan("🛠️ Patch Planner")
-            Patch_Exec("⚙️ Patch Executor")
-            Patch_Verify{"✅ Visual Verifier"}
-            Patch_Plan --> Patch_Exec --> Patch_Verify
-            Patch_Verify -- "微调注入失效回炉" --> Patch_Plan
-        end
+        HitL_Webpage -- "人手工录入修改指令" --> CSS_Agent
+        CSS_Agent --> CSS_Exec("⚙️ css_revision_executor<br>安全定距样式内容注剥器")
+        CSS_Exec --> HitL_Webpage
         
-        %% 【优化点】：直接从内部校验节点输出
-        Patch_Verify --> |"安全闭环写入存储层"| HitL_Webpage
-        HitL_Webpage -- "最终落定满意" --> End(("🏁 交付最终形态站点"))
+        HitL_Webpage -- "满意落定" --> End(("🏁 最终站点态交付"))
     end
     
     style Main_LangGraph fill:#fafafa,stroke:#78909c,stroke-width:2px;
-    style SubGraph_Reader fill:#fff8e1,stroke:#ffe082,stroke-width:2px;
-    style SubGraph_Planner fill:#f3e5f5,stroke:#e1bee7,stroke-width:2px;
-    style SubGraph_Coder fill:#e8f5e9,stroke:#c8e6c9,stroke-width:2px;
-    style SubGraph_Patch fill:#e1f5fe,stroke:#b3e5fc,stroke-width:2px;
 ```
 
 ### 深入解析各阶段核心逻辑
 
 1. **PDF 解析与抽取层 (`src/parsing/`)**：
-   原始 PDF 被安全提取转换为易于流转长文本读取的 Markdown 以及精准包含参考图像提取逻辑的组件表树特征 JSON。此项步骤能提前锁定全页截图和图表裁切范围与锚定坐标关联情况。
+   原始 PDF 通过集成管道无损转换，并提取为包含语义层次和分离表单的高可读 Markdown。独立裁切留存每一页图片内容特征以及精确到元素的参考图像包罗信息并写入暂存仓，供各级引擎按需即时索检获取。
 
-2. **读者结构化阶段 (`src/agents/reader.py`)**：
-   该智能体会消费粗糙的 Markdown 并在后台剥离浓缩为极强树形结构约束的 `StructuredPaper` （摘要核心论断，各节独立分段等信息特征提取实体类）。此时系统已从冗余且不受序的纯文字过渡成数据库概念的数据记录链。Critic 环节自动检查提取是否存在篇幅遗漏跳页导致的大面断结缺失错误。
+2. **读者结构化阶段 (`src/agents/reader.py` 等)**：
+   该智能体会消费底层 Markdown 在后台通过自检剥离出强实体结构边界 `StructuredPaper` （如摘要判断、核心研究块提取）。自带在内部环回防跳页截流的 Critic，一旦缺失逻辑或幻听内容会在闭环中不断重溯刷新，以确证底层建筑精准不可动摇。
 
-3. **智能排版编译规划阶段 (`src/template/` & `src/agents/planner.py`)**：
-   引入全新的模板提前感知策略 (Template Compile)。不再依赖原始代码文本供大模型瞎猜排版范例结构，而是先独立抽出固定规范的数据视图映射特征 `TemplateProfile`。Planner Agent 根据目标匹配值将文档知识按块级细分开，映射在允许挂靠的安全组件区域 (Shell Candidates) 里，得出带有严格上下文装配关系的蓝图文件 `PagePlan` (取代废弃的 SemanticPlan)。后续也可自由开启 HitL 手动介入执行人工排版。
+3. **智能排版编译规划阶段 (`src/template/` & `src/agents/planner.py`等)**：
+   全系统启用了更优秀的提前感知探测器库。直接跳脱死板模板，转从预定分析机制抽取特征并包装生成 `TemplateProfile` 传递。进而，通过核心 Planner 将各小结业务信息按最适合表现区域生成图纸契约（`PagePlan`）。现在支持中段加入强大的 `Layout Compose` 模式手工指定各区块插装的层叠先后视觉控制点。
 
-4. **实体编码与节点重组阶段 (`src/agents/coder.py`)**：
-   该阶段核心采用业界领先稳定的 **块级编译重组策略 (Compiled Block Assembly)** (仅在遇到极高风险的不兼容模板时才调用 Legacy Fullpage 旧策略兜底保护)。针对之前派发明确的每一个分化小结指令单独利用并发或者顺序环境计算渲染局部代码切片后放入检验器，若安全，利用固定主干逻辑填埋入最终页面中，极度确保无安全泄露、无页面逻辑完全错乱幻觉产生。最终提现前留存带有数据源锚标记 (`data-pa-block`, `data-pa-slot`) 的追述文件 (Manifest)。
+4. **实体编码与节点重组阶段 (`workflows/coder_phase.py`与相关包群)**：
+   全管线抛绝过往全整页面一次性出栈可能引起的代码极速崩裂灾害。实行强有力的 **板块编译与独立组装生成策略 (Compiled Block Assembly)** 方式，单独针对拆离好块落区调用处理计算与合法注入，依靠 `PageManifest` 定桩生成无污染的终端成果底牌页面文件。
 
-5. **意图微调引擎修订阶段 (`src/revision/` & `src/patching/`)**：
-   淘汰掉老一代的笼统 Translator。利用强分级的**意图识别引擎 (Intent Engine)** 对最终网页不满意区域修改指令做分类。如判定为是针对特定按钮元素、色块底景等进行的微调修改或局部节点文本修饰，会进入 Patch 专用流程执行定距抽取打补丁作业。全程免除整页生成大模型重新刷新带来的性能噩耗和不可预期性，完全基于 DOM 注入改写操作刷新。
+5. **意图微调引擎修订阶段 (`src/review/` & `src/revision/`等)**：
+   颠覆性重组，舍并旧式脆弱笼统整页重绘逻辑。改用强分类判定引擎与裁判分拣点相依运行体系。依靠 `capture_review_screenshots`、分维度的评论器汇总后传递到 `css_revision_agent` 中。针对任何不满要求该引擎转化生成纯粹基于原位特征修改补丁方案 (包含声明式样式改变 `CssRevisionRule` 及可置换碎化内嵌 `ContentReplacement` 块），经由最下游安全无侵入注入实施替换更新作业，规避整个链的死锁或者大翻车情况发生。
 
 ---
 
 ## 📂 项目目录结构概述
 
-最新的系统架构实施了高度职能化拆解和分级隔离包部署（完全兼容对旧版本引入和现有全部功能栈的回溯适配）：
+最新的系统架构执行了极严格且高度职能化的分离部署。保证内部合约防退步隔离以及清晰状态边界定义管理流：
 
 ```text
 PaperAlchemy/
-  ├─ main.py                # 项目启动主执行器，推荐使用
-  ├─ app.py                 # Gradio 工作流与外置兼容层门面配置 (Facade 封装入口层)
-  ├─ requirements.txt       # Conda 依赖建议列表清单
-  ├─ src/                   # 核心代码分层
-  │   ├─ agents/            # 各主要流转核心调度处理智能体 (Reader / Planner / Coder 等)
-  │   ├─ contracts/         # 项目级基础契约、跨阶段工作流状态容器与 Schema 定义汇聚
-  │   ├─ parsing/           # 第三方提取外围库包裹逻辑或解析结果缓存落盘机制
-  │   ├─ patching/          # 面向最后一步定距网页模板静态节点的补证外科手术执行者
-  │   ├─ revision/          # 意图引擎控制中枢、反馈鉴权包构建识别与截屏查验证算系统
-  │   ├─ services/          # 第三方 LLM 控制节点挂载调频支持及辅助硬盘保存系统
-  │   ├─ template/          # 重点：模板静态解析层编译扫描缓存构建、插槽资源逻辑探测
-  │   ├─ ui/                # 承载 Gradio 所有控制分块拆分装钉和页面后端事件拦截重构器
-  │   ├─ workflows/         # 使用 LangGraph 框架构建工作流实体、路网挂接处理调度管线
-  │   └─ utils/             # 无状态简单通用辅助逻辑
+  ├─ main.py                # 项目守护执行与根网罗挂点启动服务组件核心
+  ├─ app.py                 # Gradio 视图流程框架及各子流程分发点核心调用处 (Facade)
+  ├─ requirements.txt       # Conda 项目组依赖声明列表
+  ├─ src/                   # 系统代码级包树根节点
+  │   ├─ agents/            # 早期的 LLM 逻辑决策 Agent 控制层与对应校验（Reader/Planner 等基干）
+  │   ├─ contracts/         # 项目级基础契约、跨环节工作流业务实体类设计声明与状态定义汇集点
+  │   ├─ parsing/           # 外挂第三方系统解析抽取逻辑包装实现体系及缓存预热管理
+  │   ├─ patching/          # 面向页面生成管道层提供底层基于 DOM 合规重操作或者基础装配绑定的引擎
+  │   ├─ review/            # 全新引入的自动化机器视检点与仲裁分理逻辑集 (提供截屏与多种 Critic)
+  │   ├─ revision/          # 流图核心：多模态意图与强约束 CSS 修订计划安全提取执行管线处理包
+  │   ├─ services/          # 无独立状态的数据基建支援、LLM 基座实例化挂入及图文反馈转译构建区
+  │   ├─ template/          # 重点：基于代码前置特征检测与编译扫描解析器工具落点区域
+  │   ├─ ui/                # 承前启后的独立界面控制块代码：管理 Gradio 全部生命防反击卡与刷新机制
+  │   ├─ validators/        # Manifest 安全防脱敏重测与引用资源合法查体组件审计员
+  │   ├─ workflows/         # 使用 LangGraph 基于 StateGraph 将上方全包组织拼合串线与挂钩执行引擎 (含批处理与断断机制)
+  │   └─ utils/             # 一般性跨领域普通帮助执行子库方法
   ├─ data/
-  │   ├─ input/             # 用户上传的原始待处理 PDF 默认抓放容器
-  │   └─ output/            # 工作流内循环或中间产物监控、落盘编译库缓存与最后建站结果
-  └─ tests/                 # 涵盖业务结构流图节点运转防退步、数据结构相容与单元验证测试用集
+  │   ├─ input/             # PDF 未加工原始上传资料仓
+  │   └─ output/            # 工作流一切间断临时性生成信息产存区及工程化网页落点仓展示服务区
+  └─ tests/                 # 测试与防回填业务接口集成节点库
 ```
 
 ---
@@ -166,46 +144,46 @@ PaperAlchemy/
 ## 🚀 快速上手与部署指南
 
 ### 1. 环境准备与依赖安装
-由于目前高度依赖了兼容底层组件库逻辑，本项目推荐且绑定操作环境于自带 Conda 环境层级验证配置中，暂不建议混搭隔离的新建虚拟虚拟依赖路径环境。激活 Conda 基础引擎配置环境后：
+由于目前高度依赖了兼容底层组件运行架构与测试隔离要求，推荐将运行服务置于新建对应的 Conda 环境级别使用以杜绝各种脏状态混淆：
 ```bash
 pip install -r requirements.txt
 ```
 
-*(特别注意)* 为顺利让后台通过 Playwright 视觉审查机制来判断页面结果，首次配置阶段必须为本地下载浏览器渲染所需底层无头环境依赖机制包：
+*(特别注意)* 为顺利启用核心视觉机审组件链去配合网页快照和断点人工复位视觉复查环节处理，初次时必须要下达执行命令拉取运行容器组件所依托对应内核：
 ```bash
 playwright install chromium
 ```
 
 ### 2. 配置大语言模型凭据 (`.env`)
-由于目前核心模型算力依赖外调架构分派任务，请在项目根目录中自行手动新建一份 `.env` 文件。`.env` 或任何后缀包含权限 JSON 均不可提交入 Git 公共仓库暴露危险痕迹。当前已经成功全面打通多维 Gemini 系列大模型接入方式：
+云端超大规模参数基座直接驱动此工作网，需在运行目录里配置私密环境挂靠凭据 (`.env`) 表述配置（切记该包严禁推送于各版本服务器历史）：
 
-1. **Vertex AI Service Account JSON（主力验证与推荐）**
-   此接入方式下允许享有更广范围响应带宽池。将本地具备云平台相应权力的 JSON 引入文件。当存有相关格式 JSON 时系统内层环境自动感知并越过默认校验走此链路（或借助下述参数直接引导）：
+1. **Vertex AI Service Account JSON（主力验证与推荐部署做法）**
+   此接入方式下运行流被极大保证带宽连线效率，有效应对大时耗流媒体或海量 PDF 分析等应用请求负载需求：
    ```env
    VERTEX_SERVICE_ACCOUNT_JSON=C:\path\to\your-service-account.json
    VERTEX_PROJECT=your-gcp-project-id
    VERTEX_LOCATION=global
    ```
    
-2. **Google AI Studio API Key（历史遗留备灾回退路径）**
-   系统只会在无可选 Vertex 配置前提下才会去拉取如下 Key：
+2. **Google AI Studio API Key（历史常规请求挂载默认落底方法）**
+   如若你无法配凑或非生产环境单纯仅用于极精简单一处理情况并配齐了网络顺畅环境可回填单密锁口：
    ```env
    GOOGLE_API_KEY=your_gemini_api_key
    ```
    
-> *若正处于代理网关部署阻断情况非常规环境开发，可补配 `HTTPS_PROXY=http://127.0.0.1:xxxx` 或等效策略避免连线超时抛错。*
+> *若正处于代理网关部署阻断情况非常规环境开发，可补配 `HTTPS_PROXY=http://127.0.0.1:xxxx` 或等效策略避免长连线超时报错闪退。*
 
 ### 3. 点火启动可视化控制台
-完成组件部署并放置好所需测试论文样本入对应的 Input 下后，切到根节点目录路径即可点火后台守护管理控制程序：
+组件就绪完成并放置需要被炼金的样板学术文档资料（例如 PDF 源文件）至对应的 `data/input` 之下区域时直接启动主进程守护：
 ```bash
 python main.py
 ```
-> 后台环境会绑定挂载全部功能组件。打开本地浏览器地址跳转于 `http://127.0.0.1:7860/` 将正式开始全托管可视操纵台。
+> 服务器在一切加载核验就位过后将启动全局工作环境视图供您的常规默认浏览器端接收使用，跳转指向通常会固定锁定于 `http://127.0.0.1:7860/`，随即宣告完全交付点火运营！
 
 **端管线快速试飞行进节奏说明**：
-1. **喂养输入**：先在根管理界面将指定的一份学术原文本文件挂接派发。
-2. **初阶校验**：等待后端解拆报告，然后下达美学骨架倾向设置决定，在 Planner 产出时可直观预审分块结构，按需开启阻截功能手工进行更微观精准的分区重新连接组合。
-3. **分装落定与成品交付修订**：允许其执行块组装成网页落盘过程。等待系统完成成品交付快照弹送时（此时界面会露出局部编辑指令输入卡）。只要指令合理合规在意图验证中被接收，系统立刻进行零页面干扰级的重入局部刷新回塞，直至效果完全对标期待。
+1. **源头解析**：下拉或键入要求处理的目标论文项目输入文件名然后点选执行即可以挂接进入管网首班车。
+2. **提炼与校验规划点拦截**：它会先行进入抽取引擎提炼章节文本交与你概审确认执行规划，继而它会向您推出 Layout 细度排版配置视图（您可以介入细调每个被提取模块的先后逻辑位置呈现规则或图组挂载位置策略），随后您就可以敲下回车载入真正的代码成片处理逻辑里。
+3. **分装落定与定距重审机制 (HitL 介入极微调)**：等到系统生成好初步效果通过审阅器快照回传屏幕展示出全部成果之后，界面末端将留有可执行调整挂点意图的指令块。若出现比如某区块间距有欠缺或者需要词句的直白改写您只需要把期望文字录入提交。`CSS Revision Executor` 即会在不动主基骨底气层上秒更效果以达最高审美意向！
 
 ---
 
@@ -215,7 +193,7 @@ python main.py
 - [x] 解析组件全通管线：从底层对 Docling 解耦拆骨分离组件提取及加入 Actor-Critic 防偏节点拦截 Reader。
 - [x] TemplateProfile 编译层预制构建完善，彻底完成前置解析脱虚向实，打碎并把控所有外部 UI 入口组件插槽契点与静态安全性核查。
 - [x] 项目内嵌级业务领域解耦升级与大重构目录（分离归档出数十个对应垂直体系职能如 `contracts`、`patching`、`workflows` 与 `ui` 包装等结构面相）。
-- [x] 将陈冗低辨识率泛滥的网页回炉修善 Translator 阶段全数彻底改道转写由新接线的核心 **Intent Engine** 作为统一代理和精准锚记靶标判定依据体系进行底层安全操戈控制逻辑替代处理落实施行。
+- [x] 淘汰低辨识率的旧版 Translator 与 Intent Engine，全面上线全新整合的多模态 **CSS 级修订引擎 (CSS Revision Agent & Executor)**，精准基于 DOM 产出带有目标锚点的 CSS 规则与局部内容片段置换 (Content Replacement)，确立绝对安全的修订生命周期闭环。
 - [ ] 后续对多语言或基于移动屏幕适配环境探索更多自建 Template Profiler 流动映射控制算法适配尝试与验证补充。
 
 ---
