@@ -1018,6 +1018,44 @@ def approve_outline_and_generate_draft(
             current_revision_history_state or empty_revision_history_state(),
         )
 
+
+def _model_dump_or_dict(value: Any) -> dict[str, Any]:
+    if hasattr(value, "model_dump"):
+        dumped = value.model_dump()
+        return dumped if isinstance(dumped, dict) else {}
+    return value if isinstance(value, dict) else {}
+
+
+def _patch_revision_summary(paused_values: dict[str, Any]) -> str:
+    patch_agent_output = str(paused_values.get("patch_agent_output") or "").strip()
+    if patch_agent_output:
+        return patch_agent_output
+
+    targeted_plan = _model_dump_or_dict(paused_values.get("targeted_replacement_plan"))
+    if not targeted_plan:
+        return ""
+
+    counts = {
+        "replacements": len(targeted_plan.get("replacements") or []),
+        "style_changes": len(targeted_plan.get("style_changes") or []),
+        "attribute_changes": len(targeted_plan.get("attribute_changes") or []),
+        "override_css_rules": len(targeted_plan.get("override_css_rules") or []),
+        "fallback_blocks": len(targeted_plan.get("fallback_blocks") or []),
+    }
+    if not any(counts.values()):
+        return ""
+    return "; ".join(f"{key}={value}" for key, value in counts.items())
+
+
+def _patch_route_was_used(paused_values: dict[str, Any]) -> bool:
+    if str(paused_values.get("edit_intent") or "").strip() == "patch":
+        return True
+    if str(paused_values.get("patch_agent_output") or "").strip():
+        return True
+    targeted_plan = _model_dump_or_dict(paused_values.get("targeted_replacement_plan"))
+    return bool(targeted_plan)
+
+
 def request_webpage_revision(
     feedback_text: str,
     feedback_images: Any,
@@ -1060,6 +1098,8 @@ def request_webpage_revision(
                 "human_directives": feedback_payload,
                 "coder_instructions": "",
                 "coder_artifact": None,
+                "edit_intent": None,
+                "edit_intent_reason": "",
                 "patch_agent_output": "",
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
@@ -1071,16 +1111,17 @@ def request_webpage_revision(
             as_node="webpage_review",
         )
 
-        log("[CSSRevision] Resuming workflow through CSS Revision Agent -> CSS Revision Executor...")
+        log("[Revision] Resuming workflow through adaptive revision routing...")
         get_default_hitl_workflow().invoke(None, config=config)
         paused_state = get_default_hitl_workflow().get_state(config)
         paused_values = dict(paused_state.values or {})
         patch_error = str(paused_values.get("patch_error") or "").strip()
+        patch_summary = _patch_revision_summary(paused_values)
+        patch_route_used = _patch_route_was_used(paused_values)
         css_revision_summary = str(paused_values.get("css_revision_summary") or "").strip()
         css_revision_plan = paused_values.get("css_revision_plan")
-        if hasattr(css_revision_plan, "model_dump"):
-            css_revision_plan = css_revision_plan.model_dump()
-        if isinstance(css_revision_plan, dict):
+        css_revision_plan = _model_dump_or_dict(css_revision_plan)
+        if css_revision_plan:
             css_rule_count = len(css_revision_plan.get("css_rules") or [])
             replacement_count = len(css_revision_plan.get("content_replacements") or [])
         else:
@@ -1088,8 +1129,22 @@ def request_webpage_revision(
             replacement_count = 0
 
         if patch_error:
-            log(f"[CSSRevision] Safe fail: {patch_error}")
+            if patch_route_used:
+                log(f"[Patch] Safe fail: {patch_error}")
+            else:
+                log(f"[CSSRevision] Safe fail: {patch_error}")
             revision_history_state = current_revision_history_state or empty_revision_history_state()
+        elif patch_route_used:
+            log(f"[Patch] Applied: {patch_summary or 'anchored patch applied.'}")
+            paper_folder_name, page_plan, coder_artifact = _resolve_live_webpage_artifacts(paused_values)
+            revision_history = append_revision_version(
+                paper_folder_name=paper_folder_name,
+                artifact=coder_artifact,
+                page_plan=page_plan,
+                source="webpage_revision",
+                summary=patch_summary or "Applied anchored patch revision.",
+            )
+            revision_history_state = _refresh_revision_history_state(paper_folder_name, revision_history)
         elif css_rule_count or replacement_count:
             log(
                 "[CSSRevision] Applied: "

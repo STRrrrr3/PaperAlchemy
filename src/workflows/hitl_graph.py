@@ -25,12 +25,17 @@ def build_hitl_workflow(
     review_arbiter_node: Callable[[WorkflowState], dict[str, Any]],
     arbiter_autofix_node: Callable[[WorkflowState], dict[str, Any]],
     webpage_review_node: Callable[[WorkflowState], dict[str, Any]],
+    translator_node: Callable[[WorkflowState], dict[str, Any]],
+    edit_intent_router_node: Callable[[WorkflowState], dict[str, Any]],
+    patch_agent_node: Callable[[WorkflowState], dict[str, Any]],
+    patch_executor_node: Callable[[WorkflowState], dict[str, Any]],
     css_revision_agent_node: Callable[[WorkflowState], dict[str, Any]],
     css_revision_executor_node: Callable[[WorkflowState], dict[str, Any]],
     coder_phase_node: Callable[[WorkflowState], dict[str, Any]],
     human_review_router: Callable[[WorkflowState], str],
     outline_review_router: Callable[[WorkflowState], str],
     webpage_review_router: Callable[[WorkflowState], str],
+    translated_revision_router: Callable[[WorkflowState], str],
     post_arbiter_router: Callable[[WorkflowState], str],
 ):
     workflow = StateGraph(WorkflowState)
@@ -47,6 +52,10 @@ def build_hitl_workflow(
     workflow.add_node("review_arbiter", review_arbiter_node)
     workflow.add_node("arbiter_autofix", arbiter_autofix_node)
     workflow.add_node("webpage_review", webpage_review_node)
+    workflow.add_node("translator", translator_node)
+    workflow.add_node("edit_intent_router", edit_intent_router_node)
+    workflow.add_node("patch_agent", patch_agent_node)
+    workflow.add_node("patch_executor", patch_executor_node)
     workflow.add_node("css_revision_agent", css_revision_agent_node)
     workflow.add_node("css_revision_executor", css_revision_executor_node)
     workflow.add_node("coder", coder_phase_node)
@@ -91,10 +100,22 @@ def build_hitl_workflow(
         "webpage_review",
         webpage_review_router,
         {
+            "translator": "translator",
             "css_revision_agent": "css_revision_agent",
             "end": END,
         },
     )
+    workflow.add_edge("translator", "edit_intent_router")
+    workflow.add_conditional_edges(
+        "edit_intent_router",
+        translated_revision_router,
+        {
+            "patch_agent": "patch_agent",
+            "css_revision_agent": "css_revision_agent",
+        },
+    )
+    workflow.add_edge("patch_agent", "patch_executor")
+    workflow.add_edge("patch_executor", "webpage_review")
     workflow.add_edge("css_revision_agent", "css_revision_executor")
     workflow.add_edge("css_revision_executor", "webpage_review")
 

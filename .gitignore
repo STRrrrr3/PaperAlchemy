@@ -1,4 +1,4 @@
-# 忽略 Python 的编译垃圾
+﻿# 忽略 Python 的编译垃圾
 __pycache__/
 *.py[cod]
 
@@ -31,6 +31,7 @@ tests/
 data/
 CLAUDE.md
 settings.local.json
+Bench Design/
 
 # 忽略论文原始与中间数据（体积大、不可复现）
 data/input/

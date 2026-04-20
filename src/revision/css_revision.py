@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from bs4 import BeautifulSoup
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -36,6 +35,7 @@ from src.services.human_feedback import (
     has_human_feedback,
 )
 from src.services.llm import get_llm
+from src.revision.request_intent import classify_revision_request, has_explicit_content_change
 from src.services.preview_service import (
     build_page_screenshot_path,
     load_style_context_json,
@@ -181,87 +181,6 @@ def _update_css_revision_notes(
     filtered = [part for part in parts if not part.startswith("v8-css-injection-revision:")]
     filtered.append(summary)
     return " | ".join(filtered)
-
-
-_CONTENT_KEYWORDS = {
-    "title",
-    "heading",
-    "label",
-    "text",
-    "wording",
-    "copy",
-    "caption",
-    "rename",
-    "retitle",
-    "author",
-    "authors",
-    "affiliation",
-    "affiliations",
-    "abstract",
-    "subtitle",
-    "image",
-    "figure",
-    "logo",
-    "section name",
-}
-_VISUAL_KEYWORDS = {
-    "align",
-    "alignment",
-    "background",
-    "banner",
-    "border",
-    "box",
-    "button",
-    "card",
-    "center",
-    "color",
-    "font",
-    "header",
-    "height",
-    "layout",
-    "margin",
-    "nav",
-    "navigation",
-    "padding",
-    "position",
-    "radius",
-    "shadow",
-    "size",
-    "spacing",
-    "typography",
-    "underline",
-    "visible",
-    "visibility",
-    "width",
-    "wrapper",
-}
-_EXPLICIT_CONTENT_PATTERNS = (
-    r"\brename\b",
-    r"\bretitle\b",
-    r"\bchange\b.+\bto\b",
-    r"\breplace\b.+\bwith\b",
-    r"\bupdate\b.+\btext\b",
-    r"\bmake\b.+\b(read|say|show)\b",
-)
-
-
-def _classify_revision_request(text: str, has_images: bool) -> Literal["content", "visual", "mixed"]:
-    lowered = str(text or "").strip().lower()
-    if not lowered:
-        return "visual" if has_images else "content"
-
-    has_content_signal = any(keyword in lowered for keyword in _CONTENT_KEYWORDS) or _has_explicit_content_change(lowered)
-    has_visual_signal = any(keyword in lowered for keyword in _VISUAL_KEYWORDS)
-    if has_content_signal and has_visual_signal:
-        return "mixed"
-    if has_content_signal:
-        return "content"
-    return "visual"
-
-
-def _has_explicit_content_change(text: str) -> bool:
-    lowered = str(text or "").strip().lower()
-    return any(re.search(pattern, lowered) for pattern in _EXPLICIT_CONTENT_PATTERNS)
 
 
 def _build_css_revision_prompt(
@@ -422,20 +341,20 @@ def css_revision_agent_node(state: WorkflowState) -> dict[str, Any]:
 
     human_feedback = extract_human_feedback_text(feedback) or "(no text feedback provided)"
     feedback_images = extract_human_feedback_images(feedback)
-    request_intent_category = _classify_revision_request(human_feedback, bool(feedback_images))
-    has_explicit_content_change = _has_explicit_content_change(human_feedback)
+    request_intent_category = classify_revision_request(human_feedback, bool(feedback_images))
+    explicit_content_change = has_explicit_content_change(human_feedback)
     style_context_json = load_style_context_json(Path(artifact.entry_html).resolve())
     multimodal_images = [page_screenshot, *feedback_images]
 
     print(
         "[CSSRevisionAgent] Translating multimodal feedback into a CssRevisionPlan... "
-        f"(intent={request_intent_category}, explicit_content_change={has_explicit_content_change})"
+        f"(intent={request_intent_category}, explicit_content_change={explicit_content_change})"
     )
     try:
         revision_plan = _invoke_css_revision_plan(
             human_feedback=human_feedback,
             request_intent_category=request_intent_category,
-            has_explicit_content_change=has_explicit_content_change,
+            has_explicit_content_change=explicit_content_change,
             retry_guidance="",
             artifact=artifact,
             manifest=manifest,
@@ -451,7 +370,7 @@ def css_revision_agent_node(state: WorkflowState) -> dict[str, Any]:
     validated, should_retry, retry_guidance = _validate_revision_plan_output(
         revision_plan,
         request_intent_category=request_intent_category,
-        has_explicit_content_change=has_explicit_content_change,
+        has_explicit_content_change=explicit_content_change,
     )
     if should_retry and not str(revision_plan.not_possible_explanation or "").strip():
         print(f"[CSSRevisionAgent] Retrying once to correct plan shape: {retry_guidance}")
@@ -459,7 +378,7 @@ def css_revision_agent_node(state: WorkflowState) -> dict[str, Any]:
             revision_plan = _invoke_css_revision_plan(
                 human_feedback=human_feedback,
                 request_intent_category=request_intent_category,
-                has_explicit_content_change=has_explicit_content_change,
+                has_explicit_content_change=explicit_content_change,
                 retry_guidance=retry_guidance,
                 artifact=artifact,
                 manifest=manifest,
@@ -474,7 +393,7 @@ def css_revision_agent_node(state: WorkflowState) -> dict[str, Any]:
         validated, _, retry_guidance = _validate_revision_plan_output(
             revision_plan,
             request_intent_category=request_intent_category,
-            has_explicit_content_change=has_explicit_content_change,
+            has_explicit_content_change=explicit_content_change,
         )
 
     summary = str(revision_plan.revision_summary or "").strip()
