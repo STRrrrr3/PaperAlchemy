@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import gradio as gr
 
-from src.contracts.schemas import PagePlan, StructuredPaper
+from src.contracts.schemas import ASSET_CONFIRMATION_NONE_ID, AssetConfirmationItem, PagePlan, SectionAssetBinding, StructuredPaper
 from src.contracts.state import WorkflowState
 from src.services.artifact_store import (
     get_output_paths,
@@ -17,6 +17,7 @@ from src.services.artifact_store import (
     load_page_plan,
 )
 from src.services.human_feedback import build_human_feedback_payload, empty_human_feedback, extract_human_feedback_text
+from src.services.paper_assets import confirmation_pending
 from src.services.revision_history import (
     append_revision_version,
     build_revision_history_state,
@@ -26,7 +27,7 @@ from src.services.revision_history import (
     reset_revision_history_for_draft,
     restore_revision_version,
 )
-from src.services.preview_service import build_template_preview_path, take_local_screenshot
+from src.services.preview_service import build_paper_figure_preview_path, build_template_preview_path, take_local_screenshot
 from src.template.deterministic_selector import score_and_select_templates
 from src.ui.constraints import (
     INPUT_DIR,
@@ -87,6 +88,84 @@ def _load_snapshot_page_plan(snapshot_values: dict[str, Any]) -> PagePlan:
     if page_plan is None:
         raise ValueError("The paused workflow state is missing page_plan and no disk cache was found.")
     return page_plan
+
+
+def _confirmation_item_key(item: AssetConfirmationItem) -> str:
+    return f"{str(item.section_title or '').strip()}::{str(item.proposed_asset_id or '').strip()}"
+
+
+def _asset_confirmation_ui_hidden() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    return (
+        gr.update(value="", visible=False),
+        gr.update(choices=[], value=None, interactive=False, visible=False),
+        gr.update(value=[], visible=False),
+        gr.update(choices=[], value=None, interactive=False, visible=False),
+        gr.update(interactive=False, visible=False),
+    )
+
+
+def _asset_confirmation_ui_active(
+    structured_paper: StructuredPaper,
+    paper_folder_name: str,
+    active_key: str | None = None,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    session = structured_paper.asset_confirmation_session
+    if session is None or not session.items:
+        return _asset_confirmation_ui_hidden()
+
+    registry_lookup = {
+        str(asset.asset_id or "").strip(): asset
+        for asset in structured_paper.asset_registry
+        if str(asset.asset_id or "").strip()
+    }
+    items = list(session.items)
+    item_map = {_confirmation_item_key(item): item for item in items}
+    selected_key = str(active_key or "").strip()
+    if selected_key not in item_map:
+        selected_key = _confirmation_item_key(items[0])
+    active_item = item_map[selected_key]
+
+    choices = []
+    for item in items:
+        label = str(item.section_title or "").strip()
+        proposed_asset_id = str(item.proposed_asset_id or "").strip()
+        if proposed_asset_id:
+            label += f" -> {proposed_asset_id}"
+        choices.append((label, _confirmation_item_key(item)))
+
+    gallery_items: list[tuple[str, str]] = []
+    selection_choices: list[tuple[str, str]] = []
+    for candidate_asset_id in active_item.candidate_asset_ids:
+        asset = registry_lookup.get(str(candidate_asset_id or "").strip())
+        if asset is None:
+            continue
+        preview_path = build_paper_figure_preview_path(paper_folder_name, str(asset.image_path or "").strip())
+        caption = str(asset.caption or "").strip() or str(asset.visual_summary or "").strip() or str(asset.image_path or "").strip()
+        gallery_caption = f"{asset.asset_id}\n{caption}"
+        if preview_path:
+            gallery_items.append((preview_path, gallery_caption))
+        selection_choices.append((gallery_caption, asset.asset_id))
+    selection_choices.append(("None / leave this section without a bound asset", ASSET_CONFIRMATION_NONE_ID))
+
+    selected_asset_id = str(active_item.selected_asset_id or "").strip() or None
+    summary_lines = [
+        "### Asset Confirmation",
+        f"- Pending items: {len(items)}",
+        f"- Section: {active_item.section_title}",
+    ]
+    proposed_asset_id = str(active_item.proposed_asset_id or "").strip()
+    if proposed_asset_id:
+        summary_lines.append(f"- Proposed asset: `{proposed_asset_id}`")
+    if str(active_item.selection_reason or "").strip():
+        summary_lines.append(f"- Reason: {active_item.selection_reason}")
+
+    return (
+        gr.update(value="\n".join(summary_lines), visible=True),
+        gr.update(choices=choices, value=selected_key, interactive=True, visible=True),
+        gr.update(value=gallery_items, visible=bool(gallery_items)),
+        gr.update(choices=selection_choices, value=selected_asset_id, interactive=True, visible=True),
+        gr.update(interactive=True, visible=True),
+    )
 
 
 def _build_cached_resume_state(
@@ -248,6 +327,156 @@ def _refresh_revision_history_state(
     history = revision_history if revision_history is not None else load_revision_history(paper_folder_name)
     return build_revision_history_state(paper_folder_name, history)
 
+
+def select_asset_confirmation_target(
+    confirmation_target_key: str | None,
+    workflow_thread_id: str,
+    current_logs: str,
+) -> tuple[Any, ...]:
+    run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
+
+    def log(message: str) -> None:
+        print(message)
+        run_log_lines.append(message)
+
+    try:
+        thread_id = str(workflow_thread_id or "").strip()
+        if not thread_id:
+            raise ValueError("No paused workflow was found. Run Step 1 before confirming assets.")
+        config = {"configurable": {"thread_id": thread_id}}
+        snapshot = get_default_hitl_workflow().get_state(config)
+        snapshot_values = dict(snapshot.values or {})
+        if str(snapshot_values.get("review_stage") or "overview") != "overview":
+            raise ValueError("Asset confirmation is only available during the overview review stage.")
+        structured_paper = _load_snapshot_structured_paper(snapshot_values)
+        paper_folder_name = str(snapshot_values.get("paper_folder_name") or "").strip()
+        log(f"[Overview] Active asset confirmation switched to `{confirmation_target_key or '(auto)'}`.")
+        return (
+            "\n".join(run_log_lines),
+            *_asset_confirmation_ui_active(structured_paper, paper_folder_name, confirmation_target_key),
+        )
+    except Exception as exc:
+        log(f"[Error] {exc}")
+        return ("\n".join(run_log_lines), *_asset_confirmation_ui_hidden())
+
+
+def save_asset_confirmation_selection(
+    confirmation_target_key: str | None,
+    selected_asset_id: str | None,
+    workflow_thread_id: str,
+    current_logs: str,
+) -> tuple[Any, ...]:
+    run_log_lines = [line for line in str(current_logs or "").splitlines() if line.strip()]
+
+    def log(message: str) -> None:
+        print(message)
+        run_log_lines.append(message)
+
+    try:
+        thread_id = str(workflow_thread_id or "").strip()
+        if not thread_id:
+            raise ValueError("No paused workflow was found. Run Step 1 before confirming assets.")
+        config = {"configurable": {"thread_id": thread_id}}
+        snapshot = get_default_hitl_workflow().get_state(config)
+        snapshot_values = dict(snapshot.values or {})
+        if str(snapshot_values.get("review_stage") or "overview") != "overview":
+            raise ValueError("Asset confirmation is only available during the overview review stage.")
+
+        structured_paper = _load_snapshot_structured_paper(snapshot_values)
+        paper_folder_name = str(snapshot_values.get("paper_folder_name") or "").strip()
+        if not paper_folder_name:
+            raise ValueError("The paused workflow state is missing paper metadata. Run Step 1 again.")
+        session = structured_paper.asset_confirmation_session
+        if session is None or not session.items:
+            raise ValueError("There are no pending asset confirmations.")
+
+        target_key = str(confirmation_target_key or "").strip()
+        selected_value = str(selected_asset_id or "").strip()
+        if not target_key:
+            target_key = _confirmation_item_key(session.items[0])
+        if not selected_value:
+            raise ValueError("Choose one candidate asset or 'None' before saving.")
+
+        updated_items: list[AssetConfirmationItem] = []
+        active_item: AssetConfirmationItem | None = None
+        for item in session.items:
+            if _confirmation_item_key(item) == target_key:
+                active_item = item.model_copy(update={"selected_asset_id": selected_value}, deep=True)
+                updated_items.append(active_item)
+            else:
+                updated_items.append(item)
+        if active_item is None:
+            raise ValueError("The selected asset confirmation target no longer exists.")
+
+        updated_sections = []
+        for section in structured_paper.sections:
+            if str(section.section_title or "").strip() != str(active_item.section_title or "").strip():
+                updated_sections.append(section)
+                continue
+            bindings = [binding for binding in section.asset_bindings if str(binding.asset_id or "").strip() != str(active_item.proposed_asset_id or "").strip()]
+            if selected_value != ASSET_CONFIRMATION_NONE_ID:
+                bindings = [
+                    binding
+                    for binding in bindings
+                    if str(binding.asset_id or "").strip() != selected_value
+                ]
+                bindings.append(
+                    SectionAssetBinding(
+                        asset_id=selected_value,
+                        confidence=1.0,
+                        rationale="Human-confirmed during overview asset review.",
+                    )
+                )
+            updated_sections.append(section.model_copy(update={"asset_bindings": bindings}, deep=True))
+
+        updated_paper = structured_paper.model_copy(
+            update={
+                "sections": updated_sections,
+                "asset_confirmation_session": session.model_copy(update={"items": updated_items}, deep=True),
+            },
+            deep=True,
+        )
+        _, structured_json_path, _, _ = get_output_paths(paper_folder_name)
+        structured_json_path.write_text(
+            json.dumps(updated_paper.model_dump(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        get_default_hitl_workflow().update_state(
+            config,
+            {
+                "structured_paper": updated_paper,
+                "paper_overview": format_paper_to_markdown(updated_paper.model_dump()),
+            },
+            as_node="overview",
+        )
+        log(f"[Overview] Saved asset confirmation for `{active_item.section_title}` -> `{selected_value}`.")
+        return (
+            "\n".join(run_log_lines),
+            format_paper_to_markdown(updated_paper.model_dump()),
+            *_asset_confirmation_ui_active(updated_paper, paper_folder_name, confirmation_target_key),
+            *_stage_action_updates(
+                "overview",
+                overview_approve_enabled=not confirmation_pending(updated_paper),
+            ),
+        )
+    except Exception as exc:
+        log(f"[Error] {exc}")
+        try:
+            thread_id = str(workflow_thread_id or "").strip()
+            config = {"configurable": {"thread_id": thread_id}}
+            snapshot_values = dict((get_default_hitl_workflow().get_state(config).values or {}))
+            structured_paper = _load_snapshot_structured_paper(snapshot_values)
+            paper_folder_name = str(snapshot_values.get("paper_folder_name") or "").strip()
+            confirmation_ui = _asset_confirmation_ui_active(structured_paper, paper_folder_name, confirmation_target_key)
+        except Exception:
+            confirmation_ui = _asset_confirmation_ui_hidden()
+        return (
+            "\n".join(run_log_lines),
+            gr.update(),
+            *confirmation_ui,
+            *_stage_action_updates("overview"),
+        )
+
 def find_templates(
     background_color: str,
     density: str,
@@ -302,6 +531,7 @@ def find_templates(
             "",
             "",
             *_stage_action_updates("none"),
+            *_asset_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             empty_revision_history_state(),
         )
@@ -320,6 +550,7 @@ def find_templates(
             "",
             "",
             *_stage_action_updates("none"),
+            *_asset_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             empty_revision_history_state(),
         )
@@ -343,6 +574,7 @@ def preview_selected_template(
             "",
             "",
             *_stage_action_updates("none"),
+            *_asset_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             empty_revision_history_state(),
         )
@@ -373,6 +605,7 @@ def preview_selected_template(
             "",
             "",
             *_stage_action_updates("none"),
+            *_asset_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             empty_revision_history_state(),
         )
@@ -389,6 +622,7 @@ def preview_selected_template(
             "",
             "",
             *_stage_action_updates("none"),
+            *_asset_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             empty_revision_history_state(),
         )
@@ -484,6 +718,7 @@ def run_extraction(
                     _visible_preview_update(preview_image_path),
                     entry_html_path,
                     *_stage_action_updates("webpage", revision_history_state=revision_history_state),
+                    *_asset_confirmation_ui_hidden(),
                     *_layout_compose_ui_hidden(),
                     revision_history_state,
                 )
@@ -499,11 +734,13 @@ def run_extraction(
                     gr.update(),
                     "",
                     *_stage_action_updates("outline"),
+                    *_asset_confirmation_ui_hidden(),
                     *_layout_compose_ui_hidden(),
                     empty_revision_history_state(),
                 )
 
             log("[Overview] Resumed the cached extraction review from disk.")
+            resume_structured_paper = _load_snapshot_structured_paper(resume_state)
             return (
                 "\n".join(run_log_lines),
                 str(resume_state.get("paper_overview") or ""),
@@ -512,7 +749,11 @@ def run_extraction(
                 thread_id,
                 gr.update(),
                 "",
-                *_stage_action_updates("overview"),
+                *_stage_action_updates(
+                    "overview",
+                    overview_approve_enabled=not confirmation_pending(resume_structured_paper),
+                ),
+                *_asset_confirmation_ui_active(resume_structured_paper, paper_folder_name),
                 *_layout_compose_ui_hidden(),
                 empty_revision_history_state(),
             )
@@ -574,6 +815,8 @@ def run_extraction(
         if not paper_overview:
             structured_data = _load_snapshot_structured_paper(paused_values)
             paper_overview = format_paper_to_markdown(structured_data.model_dump())
+        else:
+            structured_data = _load_snapshot_structured_paper(paused_values)
         log("[Overview] Reader extraction complete. Review the source pack, revise if needed, or approve it to plan the webpage outline.")
         return (
             "\n".join(run_log_lines),
@@ -583,7 +826,11 @@ def run_extraction(
             thread_id,
             gr.update(),
             "",
-            *_stage_action_updates("overview"),
+            *_stage_action_updates(
+                "overview",
+                overview_approve_enabled=not confirmation_pending(structured_data),
+            ),
+            *_asset_confirmation_ui_active(structured_data, paper_folder_name),
             *_layout_compose_ui_hidden(),
             empty_revision_history_state(),
         )
@@ -598,6 +845,7 @@ def run_extraction(
             gr.update(),
             "",
             *_stage_action_updates("none"),
+            *_asset_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             empty_revision_history_state(),
         )
@@ -671,13 +919,19 @@ def revise_extraction(
         if not paper_overview:
             structured_data = _load_snapshot_structured_paper(paused_values)
             paper_overview = format_paper_to_markdown(structured_data.model_dump())
+        else:
+            structured_data = _load_snapshot_structured_paper(paused_values)
         log("[Overview] Revised extraction complete. Review the updated source pack or approve it to plan the webpage outline.")
         return (
             "\n".join(run_log_lines),
             paper_overview,
             "",
             *_review_accordion_updates("overview"),
-            *_stage_action_updates("overview"),
+            *_stage_action_updates(
+                "overview",
+                overview_approve_enabled=not confirmation_pending(structured_data),
+            ),
+            *_asset_confirmation_ui_active(structured_data, paper_folder_name),
             *_layout_compose_ui_hidden(),
             empty_revision_history_state(),
         )
@@ -689,6 +943,7 @@ def revise_extraction(
             current_outline_overview,
             *_review_accordion_updates("overview"),
             *_stage_action_updates("overview", feedback_text_value=feedback_text),
+            *_asset_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             empty_revision_history_state(),
         )
@@ -719,6 +974,9 @@ def approve_extraction_and_plan_outline(
         paper_folder_name = str(snapshot_values.get("paper_folder_name") or "").strip()
         if not paper_folder_name:
             raise ValueError("The paused workflow state is missing paper metadata. Run Step 1 again.")
+        structured_data = _load_snapshot_structured_paper(snapshot_values)
+        if confirmation_pending(structured_data):
+            raise ValueError("Resolve the pending asset confirmations before approving extraction.")
 
         get_default_hitl_workflow().update_state(
             config,
@@ -774,18 +1032,30 @@ def approve_extraction_and_plan_outline(
                 "outline",
                 manual_layout_compose_enabled=manual_layout_compose_enabled,
             ),
+            *_asset_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             empty_revision_history_state(),
         )
     except Exception as exc:
         log(f"[Error] {exc}")
+        try:
+            structured_data = _load_snapshot_structured_paper(snapshot_values)
+            confirmation_ui = _asset_confirmation_ui_active(structured_data, paper_folder_name)
+            overview_actions = _stage_action_updates(
+                "overview",
+                overview_approve_enabled=not confirmation_pending(structured_data),
+            )
+        except Exception:
+            confirmation_ui = _asset_confirmation_ui_hidden()
+            overview_actions = _stage_action_updates("overview")
         return (
             "\n".join(run_log_lines),
             current_overview,
             current_outline_overview,
             *_review_accordion_updates("overview"),
             "",
-            *_stage_action_updates("overview"),
+            *overview_actions,
+            *confirmation_ui,
             *_layout_compose_ui_hidden(),
             empty_revision_history_state(),
         )
@@ -867,6 +1137,7 @@ def revise_outline(
                 "outline",
                 manual_layout_compose_enabled=manual_layout_compose_enabled,
             ),
+            *_asset_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             empty_revision_history_state(),
         )
@@ -880,6 +1151,7 @@ def revise_outline(
                 "outline",
                 feedback_text_value=feedback_text,
             ),
+            *_asset_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             empty_revision_history_state(),
         )
@@ -965,6 +1237,7 @@ def approve_outline_and_generate_draft(
                 _hidden_preview_update(),
                 "",
                 *_stage_action_updates("none"),
+                *_asset_confirmation_ui_hidden(),
                 *_layout_compose_ui_active(compose_session),
                 empty_revision_history_state(),
             )
@@ -999,6 +1272,7 @@ def approve_outline_and_generate_draft(
                 "webpage",
                 revision_history_state=revision_history_state,
             ),
+            *_asset_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             revision_history_state,
         )
@@ -1014,6 +1288,7 @@ def approve_outline_and_generate_draft(
                 "outline",
                 manual_layout_compose_enabled=manual_layout_compose_enabled,
             ),
+            *_asset_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             current_revision_history_state or empty_revision_history_state(),
         )
@@ -1048,7 +1323,7 @@ def _patch_revision_summary(paused_values: dict[str, Any]) -> str:
 
 
 def _patch_route_was_used(paused_values: dict[str, Any]) -> bool:
-    if str(paused_values.get("edit_intent") or "").strip() == "patch":
+    if str(paused_values.get("edit_intent") or "").strip() in {"patch", "asset_rebind"}:
         return True
     if str(paused_values.get("patch_agent_output") or "").strip():
         return True
@@ -1186,6 +1461,7 @@ def request_webpage_revision(
             _visible_preview_update(preview_image_path),
             entry_html_path,
             *_stage_action_updates("webpage", revision_history_state=revision_history_state),
+            *_asset_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             revision_history_state,
         )
@@ -1202,6 +1478,7 @@ def request_webpage_revision(
                 feedback_images_value=feedback_images,
                 revision_history_state=current_revision_history_state,
             ),
+            *_asset_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             current_revision_history_state or empty_revision_history_state(),
         )
@@ -1370,6 +1647,7 @@ def approve_webpage(
             _visible_preview_update(current_preview),
             str(current_html_path or ""),
             *_stage_action_updates("none"),
+            *_asset_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             current_revision_history_state or empty_revision_history_state(),
         )
@@ -1381,6 +1659,7 @@ def approve_webpage(
             _visible_preview_update(current_preview),
             str(current_html_path or ""),
             *_stage_action_updates("webpage", revision_history_state=current_revision_history_state),
+            *_asset_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             current_revision_history_state or empty_revision_history_state(),
         )

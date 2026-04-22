@@ -46,6 +46,13 @@ def _load_template_profile_from_artifact(artifact: CoderArtifact | None):
 
 
 def _available_asset_manifest_from_artifact(artifact: CoderArtifact) -> list[dict[str, str]]:
+    if artifact.paper_asset_manifest:
+        return [
+            {str(key): str(value) for key, value in item.items()}
+            for item in artifact.paper_asset_manifest
+            if isinstance(item, dict)
+        ]
+
     site_dir = Path(artifact.site_dir)
     entry_html_parent = Path(artifact.entry_html).parent
     manifest: list[dict[str, str]] = []

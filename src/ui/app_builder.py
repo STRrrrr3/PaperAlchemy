@@ -21,6 +21,8 @@ from src.ui.review_handlers import (
     revise_extraction,
     revise_outline,
     run_extraction,
+    save_asset_confirmation_selection,
+    select_asset_confirmation_target,
     show_next_webpage_version,
     show_previous_webpage_version,
 )
@@ -105,6 +107,35 @@ def build_app() -> gr.Blocks:
                 with gr.Accordion("Reader Extraction Review", open=False) as paper_review_accordion:
                     paper_markdown = gr.Markdown(
                         value="Run Step 1 to extract the paper into a reviewable source pack."
+                    )
+                    overview_asset_confirmation_markdown = gr.Markdown(
+                        value="",
+                        visible=False,
+                    )
+                    overview_asset_confirmation_target = gr.Radio(
+                        choices=[],
+                        label="Pending Asset Confirmation",
+                        interactive=False,
+                        visible=False,
+                    )
+                    overview_asset_confirmation_gallery = gr.Gallery(
+                        value=[],
+                        label="Candidate Paper Assets",
+                        visible=False,
+                        columns=2,
+                        height="auto",
+                    )
+                    overview_asset_confirmation_choice = gr.Radio(
+                        choices=[],
+                        label="Confirmed Asset",
+                        interactive=False,
+                        visible=False,
+                    )
+                    overview_asset_confirmation_save_button = gr.Button(
+                        "Save Asset Confirmation",
+                        variant="secondary",
+                        interactive=False,
+                        visible=False,
                     )
                 with gr.Accordion("Planned Webpage Outline", open=False) as outline_review_accordion:
                     outline_markdown = gr.Markdown(
@@ -323,6 +354,14 @@ def build_app() -> gr.Blocks:
             layout_compose_return_button,
         ]
 
+        overview_confirmation_outputs = [
+            overview_asset_confirmation_markdown,
+            overview_asset_confirmation_target,
+            overview_asset_confirmation_gallery,
+            overview_asset_confirmation_choice,
+            overview_asset_confirmation_save_button,
+        ]
+
         find_templates_button.click(
             fn=find_templates,
             inputs=[background_color, density, navigation, layout],
@@ -340,6 +379,7 @@ def build_app() -> gr.Blocks:
                 workflow_thread_state,
                 current_render_html_state,
                 *stage_action_outputs,
+                *overview_confirmation_outputs,
                 *compose_outputs,
                 revision_history_state,
             ],
@@ -361,6 +401,7 @@ def build_app() -> gr.Blocks:
                 workflow_thread_state,
                 current_render_html_state,
                 *stage_action_outputs,
+                *overview_confirmation_outputs,
                 *compose_outputs,
                 revision_history_state,
             ],
@@ -380,6 +421,7 @@ def build_app() -> gr.Blocks:
                 preview_image,
                 current_render_html_state,
                 *stage_action_outputs,
+                *overview_confirmation_outputs,
                 *compose_outputs,
                 revision_history_state,
             ],
@@ -396,6 +438,7 @@ def build_app() -> gr.Blocks:
                 paper_review_accordion,
                 outline_review_accordion,
                 *stage_action_outputs,
+                *overview_confirmation_outputs,
                 *compose_outputs,
                 revision_history_state,
             ],
@@ -413,6 +456,7 @@ def build_app() -> gr.Blocks:
                 outline_review_accordion,
                 current_render_html_state,
                 *stage_action_outputs,
+                *overview_confirmation_outputs,
                 *compose_outputs,
                 revision_history_state,
             ],
@@ -428,6 +472,7 @@ def build_app() -> gr.Blocks:
                 paper_review_accordion,
                 outline_review_accordion,
                 *stage_action_outputs,
+                *overview_confirmation_outputs,
                 *compose_outputs,
                 revision_history_state,
             ],
@@ -453,6 +498,7 @@ def build_app() -> gr.Blocks:
                 preview_image,
                 current_render_html_state,
                 *stage_action_outputs,
+                *overview_confirmation_outputs,
                 *compose_outputs,
                 revision_history_state,
             ],
@@ -542,6 +588,7 @@ def build_app() -> gr.Blocks:
                 preview_image,
                 current_render_html_state,
                 *stage_action_outputs,
+                *overview_confirmation_outputs,
                 *compose_outputs,
                 revision_history_state,
             ],
@@ -566,6 +613,7 @@ def build_app() -> gr.Blocks:
                 preview_image,
                 current_render_html_state,
                 *stage_action_outputs,
+                *overview_confirmation_outputs,
                 *compose_outputs,
                 revision_history_state,
             ],
@@ -582,6 +630,7 @@ def build_app() -> gr.Blocks:
                 preview_image,
                 current_render_html_state,
                 *stage_action_outputs,
+                *overview_confirmation_outputs,
                 *compose_outputs,
                 revision_history_state,
             ],
@@ -598,10 +647,42 @@ def build_app() -> gr.Blocks:
                 preview_image,
                 current_render_html_state,
                 *stage_action_outputs,
+                *overview_confirmation_outputs,
                 *compose_outputs,
                 revision_history_state,
             ],
             api_name="approve_webpage",
+        )
+
+        overview_asset_confirmation_target.input(
+            fn=select_asset_confirmation_target,
+            inputs=[
+                overview_asset_confirmation_target,
+                workflow_thread_state,
+                system_logs,
+            ],
+            outputs=[
+                system_logs,
+                *overview_confirmation_outputs,
+            ],
+            api_name="select_asset_confirmation_target",
+        )
+
+        overview_asset_confirmation_save_button.click(
+            fn=save_asset_confirmation_selection,
+            inputs=[
+                overview_asset_confirmation_target,
+                overview_asset_confirmation_choice,
+                workflow_thread_state,
+                system_logs,
+            ],
+            outputs=[
+                system_logs,
+                paper_markdown,
+                *overview_confirmation_outputs,
+                *stage_action_outputs,
+            ],
+            api_name="save_asset_confirmation_selection",
         )
 
         previous_version_button.click(

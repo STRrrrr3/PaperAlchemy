@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import gradio as gr
+
 from src.contracts.schemas import LayoutComposeSession, LayoutComposeUpdate, PagePlan, StructuredPaper
 from src.services.artifact_store import get_output_paths, load_cached_structured_data, load_coder_artifact, load_page_plan, save_page_plan
 from src.services.revision_history import build_revision_history_state, empty_revision_history_state, reset_revision_history_for_draft
@@ -25,6 +27,16 @@ from src.workflows.hitl_nodes import (
     normalize_coder_artifact,
     normalize_layout_compose_session,
 )
+
+
+def _overview_confirmation_ui_hidden() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    return (
+        gr.update(value="", visible=False),
+        gr.update(choices=[], value=None, interactive=False, visible=False),
+        gr.update(value=[], visible=False),
+        gr.update(choices=[], value=None, interactive=False, visible=False),
+        gr.update(interactive=False, visible=False),
+    )
 
 
 def _load_snapshot_page_plan(snapshot_values: dict[str, Any]) -> PagePlan:
@@ -142,7 +154,7 @@ def select_layout_compose_block(
 def save_layout_compose_block(
     active_block_id: str | None,
     selected_selector_hint: str | None,
-    selected_figure_paths: list[str] | None,
+    selected_asset_ids: list[str] | None,
     workflow_thread_id: str,
     current_logs: str,
 ) -> tuple[Any, ...]:
@@ -164,7 +176,7 @@ def save_layout_compose_block(
             LayoutComposeUpdate(
                 active_block_id=target_block_id,
                 selected_selector_hint=selected_selector_hint,
-                selected_figure_paths=list(selected_figure_paths or []),
+                selected_asset_ids=list(selected_asset_ids or []),
                 action="save_block",
             ),
         )
@@ -183,7 +195,7 @@ def _move_layout_compose_block(
     order_action: str,
     active_block_id: str | None,
     selected_selector_hint: str | None,
-    selected_figure_paths: list[str] | None,
+    selected_asset_ids: list[str] | None,
     workflow_thread_id: str,
     current_logs: str,
 ) -> tuple[Any, ...]:
@@ -205,7 +217,7 @@ def _move_layout_compose_block(
             LayoutComposeUpdate(
                 active_block_id=target_block_id,
                 selected_selector_hint=selected_selector_hint,
-                selected_figure_paths=list(selected_figure_paths or []),
+                selected_asset_ids=list(selected_asset_ids or []),
                 order_action=order_action,  # type: ignore[arg-type]
                 action=order_action,
             ),
@@ -224,7 +236,7 @@ def _move_layout_compose_block(
 def move_layout_compose_block_up(
     active_block_id: str | None,
     selected_selector_hint: str | None,
-    selected_figure_paths: list[str] | None,
+    selected_asset_ids: list[str] | None,
     workflow_thread_id: str,
     current_logs: str,
 ) -> tuple[Any, ...]:
@@ -232,7 +244,7 @@ def move_layout_compose_block_up(
         "move_up",
         active_block_id,
         selected_selector_hint,
-        selected_figure_paths,
+        selected_asset_ids,
         workflow_thread_id,
         current_logs,
     )
@@ -240,7 +252,7 @@ def move_layout_compose_block_up(
 def move_layout_compose_block_down(
     active_block_id: str | None,
     selected_selector_hint: str | None,
-    selected_figure_paths: list[str] | None,
+    selected_asset_ids: list[str] | None,
     workflow_thread_id: str,
     current_logs: str,
 ) -> tuple[Any, ...]:
@@ -248,7 +260,7 @@ def move_layout_compose_block_down(
         "move_down",
         active_block_id,
         selected_selector_hint,
-        selected_figure_paths,
+        selected_asset_ids,
         workflow_thread_id,
         current_logs,
     )
@@ -256,7 +268,7 @@ def move_layout_compose_block_down(
 def continue_layout_compose_to_draft(
     active_block_id: str | None,
     selected_selector_hint: str | None,
-    selected_figure_paths: list[str] | None,
+    selected_asset_ids: list[str] | None,
     workflow_thread_id: str,
     current_logs: str,
     current_outline_overview: str,
@@ -279,7 +291,7 @@ def continue_layout_compose_to_draft(
         update = LayoutComposeUpdate(
             active_block_id=target_block_id,
             selected_selector_hint=selected_selector_hint,
-            selected_figure_paths=list(selected_figure_paths or []),
+            selected_asset_ids=list(selected_asset_ids or []),
             action="continue_to_draft",
         )
         updated_session = _persist_layout_compose_update(config, compose_session, update)
@@ -292,6 +304,7 @@ def continue_layout_compose_to_draft(
                 _hidden_preview_update(),
                 "",
                 *_stage_action_updates("none"),
+                *_overview_confirmation_ui_hidden(),
                 *_layout_compose_ui_active(updated_session),
                 empty_revision_history_state(),
             )
@@ -363,6 +376,7 @@ def continue_layout_compose_to_draft(
                 "webpage",
                 revision_history_state=revision_history_state,
             ),
+            *_overview_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             revision_history_state,
         )
@@ -380,6 +394,7 @@ def continue_layout_compose_to_draft(
             _hidden_preview_update(),
             str(current_html_path or ""),
             *_stage_action_updates("none"),
+            *_overview_confirmation_ui_hidden(),
             *compose_ui,
             current_revision_history_state or empty_revision_history_state(),
         )
@@ -430,6 +445,7 @@ def return_to_outline_review_from_layout_compose(
                 "outline",
                 manual_layout_compose_enabled=manual_layout_compose_enabled,
             ),
+            *_overview_confirmation_ui_hidden(),
             *_layout_compose_ui_hidden(),
             empty_revision_history_state(),
         )
@@ -447,6 +463,7 @@ def return_to_outline_review_from_layout_compose(
             _hidden_preview_update(),
             str(current_html_path or ""),
             *_stage_action_updates("none"),
+            *_overview_confirmation_ui_hidden(),
             *compose_ui,
             current_revision_history_state or empty_revision_history_state(),
         )

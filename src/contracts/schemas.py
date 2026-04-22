@@ -4,12 +4,54 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 GlobalAnchorId = Literal["header_brand", "header_primary_action", "header_nav", "footer_meta"]
 SlotId = Literal["title", "summary", "body", "media", "meta", "actions"]
+RevisionIntent = Literal["patch", "non_patch", "asset_rebind"]
+
+PARSED_DATA_SCHEMA_VERSION = "2.0"
+STRUCTURED_PAPER_SCHEMA_VERSION = "2.0"
+SEMANTIC_PLAN_SCHEMA_VERSION = "3.0"
+PAGE_PLAN_SCHEMA_VERSION = "3.0"
+ASSET_CONFIRMATION_NONE_ID = "__none__"
 
 
-class FigureInfo(BaseModel):
+class PaperAsset(BaseModel):
+    asset_id: str = Field(description="Stable asset identifier, e.g. 'figure_p3_1'.")
     image_path: str = Field(description="Relative path in assets folder, e.g., 'assets/element_1.png'.")
+    page_image: str = Field(default="", description="Relative page screenshot path for the source page.")
+    page_number: int = Field(default=0, description="1-indexed source page number.")
+    asset_order_on_page: int = Field(default=0, description="Top-to-bottom asset order on the source page.")
+    bbox: List[float] = Field(default_factory=list, description="Source page bounding box for the cropped asset.")
     caption: Optional[str] = Field(default=None, description="Caption text if available.")
-    type: str = Field(description="Asset type, e.g., 'chart', 'table', 'photo'.")
+    type: str = Field(description="Asset type, e.g., 'figure', 'table', 'photo'.")
+    nearby_markdown_excerpt: str = Field(default="", description="Nearby markdown excerpt used to ground the asset.")
+    visual_summary: str = Field(default="", description="Vision-model summary of the asset content.")
+    is_probably_decorative: bool = Field(
+        default=False,
+        description="Whether the asset is likely decorative front matter rather than a core paper figure/table.",
+    )
+
+
+class SectionAssetBinding(BaseModel):
+    asset_id: str = Field(description="Bound asset id from StructuredPaper.asset_registry.")
+    confidence: float = Field(default=0.0, description="Binding confidence in [0, 1].")
+    rationale: str = Field(default="", description="Why this asset belongs to the section.")
+
+
+class AssetConfirmationItem(BaseModel):
+    section_title: str
+    proposed_asset_id: Optional[str] = None
+    candidate_asset_ids: List[str] = Field(default_factory=list)
+    selection_reason: str = ""
+    selected_asset_id: Optional[str] = None
+
+
+class AssetConfirmationSession(BaseModel):
+    items: List[AssetConfirmationItem] = Field(default_factory=list)
+    is_complete: bool = False
+
+    @model_validator(mode="after")
+    def sync_complete(self) -> "AssetConfirmationSession":
+        self.is_complete = all(item.selected_asset_id is not None for item in self.items)
+        return self
 
 
 class PaperSection(BaseModel):
@@ -17,17 +59,43 @@ class PaperSection(BaseModel):
     rich_web_content: str = Field(
         description="Dense Markdown narrative for webpage generation, preserving core technical paragraphs, equations, and results."
     )
-    related_figures: List[FigureInfo] = Field(description="Figures and tables linked to this section.")
+    asset_bindings: List[SectionAssetBinding] = Field(
+        default_factory=list,
+        description="Figures and tables linked to this section via stable asset ids.",
+    )
 
 
 class StructuredPaper(BaseModel):
+    schema_version: str = Field(default=STRUCTURED_PAPER_SCHEMA_VERSION, description="Structured paper schema version.")
     paper_title: str = Field(description="Paper title.")
     overall_summary: str = Field(description="Brief summary of the entire paper.")
+    asset_registry: List[PaperAsset] = Field(
+        default_factory=list,
+        description="Registry of extracted paper assets with page-local evidence and visual summaries.",
+    )
+    asset_confirmation_session: Optional[AssetConfirmationSession] = Field(
+        default=None,
+        description="Low-confidence asset bindings that require human confirmation before planning.",
+    )
     sections: List[PaperSection] = Field(
         description=(
             "Ordered list of selected landing-page sections. If an Abstract exists, it must be first."
         )
     )
+
+    @model_validator(mode="after")
+    def validate_assets(self) -> "StructuredPaper":
+        asset_ids = [asset.asset_id for asset in self.asset_registry if str(asset.asset_id or "").strip()]
+        if len(asset_ids) != len(set(asset_ids)):
+            raise ValueError("StructuredPaper.asset_registry contains duplicate asset_id values.")
+        valid_asset_ids = set(asset_ids)
+        for section in self.sections:
+            for binding in section.asset_bindings:
+                if str(binding.asset_id or "").strip() not in valid_asset_ids:
+                    raise ValueError(
+                        f"Section '{section.section_title}' references unknown asset_id '{binding.asset_id}'."
+                    )
+        return self
 
 
 class CriticReport(BaseModel):
@@ -36,7 +104,7 @@ class CriticReport(BaseModel):
 
 
 class SemanticPlanMeta(BaseModel):
-    plan_version: str = Field(description="Semantic planner schema version, e.g., '2.0'.")
+    plan_version: str = Field(default=SEMANTIC_PLAN_SCHEMA_VERSION, description="Semantic planner schema version.")
     planning_mode: Literal["semantic_only"] = Field(description="Semantic-only planner mode identifier.")
     confidence: float = Field(description="Planner confidence in [0, 1].")
 
@@ -190,7 +258,7 @@ class TemplateProfile(BaseModel):
 
 
 class PlanMeta(BaseModel):
-    plan_version: str = Field(description="Planner schema version, e.g., '1.1'.")
+    plan_version: str = Field(default=PAGE_PLAN_SCHEMA_VERSION, description="Planner schema version.")
     planning_mode: Literal["autopage_template_first", "hybrid_template_bind"] = Field(
         description="Planning mode identifier."
     )
@@ -272,7 +340,7 @@ class ContentContract(BaseModel):
 
 
 class AssetBinding(BaseModel):
-    figure_paths: List[str]
+    asset_ids: List[str] = Field(default_factory=list)
     template_asset_fallback: Optional[str] = None
 
 
@@ -371,6 +439,10 @@ class CoderArtifact(BaseModel):
     entry_html: str = Field(description="Generated entry html path.")
     selected_template_id: str = Field(description="Template used for generation.")
     copied_assets: List[str] = Field(description="Copied paper asset paths relative to site_dir.")
+    paper_asset_manifest: List[Dict[str, str]] = Field(
+        default_factory=list,
+        description="Copied paper assets with asset_id, web_path, caption, type, and source metadata.",
+    )
     edited_files: List[str] = Field(description="Edited file paths relative to site_dir.")
     notes: str = Field(description="Short build summary.")
     render_mode: Optional[Literal["compiled_block_assembly", "legacy_fullpage"]] = Field(
@@ -523,6 +595,7 @@ class LayoutSectionOption(BaseModel):
 
 
 class LayoutFigureOption(BaseModel):
+    asset_id: str
     image_path: str
     caption: Optional[str] = None
     type: str
@@ -536,7 +609,7 @@ class LayoutComposeBlock(BaseModel):
     source_sections: List[str] = Field(default_factory=list)
     current_order: int
     selected_selector_hint: str = ""
-    selected_figure_paths: List[str] = Field(default_factory=list)
+    selected_asset_ids: List[str] = Field(default_factory=list)
     section_options: List[LayoutSectionOption] = Field(default_factory=list)
     figure_options: List[LayoutFigureOption] = Field(default_factory=list)
 
@@ -552,7 +625,7 @@ class LayoutComposeSession(BaseModel):
 class LayoutComposeUpdate(BaseModel):
     active_block_id: Optional[str] = None
     selected_selector_hint: Optional[str] = None
-    selected_figure_paths: Optional[List[str]] = None
+    selected_asset_ids: Optional[List[str]] = None
     order_action: Optional[Literal["move_up", "move_down"]] = None
     action: str = ""
 

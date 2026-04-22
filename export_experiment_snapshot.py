@@ -5,13 +5,19 @@ import json
 
 from src.services.experiment_export import export_live_experiment_snapshot
 
+DEFAULT_EXPORT_NAME = "clean_export"
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Export the current live draft as a clean experiment snapshot."
     )
     parser.add_argument("--paper-folder-name", required=True, help="Paper output folder name under data/output.")
-    parser.add_argument("--export-name", required=True, help="Experiment snapshot directory name.")
+    parser.add_argument(
+        "--export-name",
+        default=DEFAULT_EXPORT_NAME,
+        help=f"Experiment snapshot directory name. Defaults to '{DEFAULT_EXPORT_NAME}'.",
+    )
     args = parser.parse_args()
 
     try:

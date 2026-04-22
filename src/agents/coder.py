@@ -23,6 +23,7 @@ from src.utils.html_utils import (
     read_text_with_fallback,
 )
 from src.services.human_feedback import extract_human_feedback_text, normalize_human_feedback
+from src.services.paper_assets import asset_lookup, asset_target_filename, collect_page_plan_asset_ids, resolved_asset_source_path
 from src.utils.json_utils import to_pretty_json
 from src.services.llm import get_llm
 from src.validators.page_manifest import (
@@ -50,6 +51,7 @@ from src.contracts.schemas import (
     BlockRenderSpec,
     BlockShellContract,
     CoderArtifact,
+    PaperAsset,
     PagePlan,
     ResolvedBlockBinding,
     StructuredPaper,
@@ -57,6 +59,21 @@ from src.contracts.schemas import (
 )
 from src.contracts.state import CoderState
 from src.template.template_ir import resolve_shell_node
+
+_AFFILIATION_KEYWORDS = (
+    "university",
+    "institute",
+    "college",
+    "school",
+    "department",
+    "lab",
+    "laboratory",
+    "research",
+    "academy",
+    "company",
+    "center",
+    "centre",
+)
 
 
 def _normalize_page_plan(plan: Any) -> PagePlan | None:
@@ -109,6 +126,143 @@ def _safe_slug(text: str) -> str:
     return slug or "asset"
 
 
+def _dedupe_clean_strings(values: list[str]) -> list[str]:
+    results: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        cleaned = " ".join(str(value or "").split()).strip(" ,;")
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            results.append(cleaned)
+    return results
+
+
+def _split_metadata_segments(blob: str) -> list[str]:
+    text = re.sub(r"\s+(?:and|&)\s+", ", ", str(blob or "").strip(), flags=re.IGNORECASE)
+    if not text:
+        return []
+
+    segments: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for char in text:
+        if char == "(":
+            depth += 1
+        elif char == ")" and depth > 0:
+            depth -= 1
+
+        if char in {",", ";"} and depth == 0:
+            segment = "".join(current).strip()
+            if segment:
+                segments.append(segment)
+            current = []
+            continue
+        current.append(char)
+
+    tail = "".join(current).strip()
+    if tail:
+        segments.append(tail)
+    return segments
+
+
+def _extract_labeled_metadata(text: str, labels: tuple[str, ...]) -> str:
+    normalized = " ".join(str(text or "").split())
+    if not normalized:
+        return ""
+    label_pattern = "|".join(re.escape(label) for label in labels)
+    next_label_pattern = r"(?:authors?|affiliations?|institutions?)\s*:"
+    match = re.search(
+        rf"(?:{label_pattern})\s*:\s*(.+?)(?=\b{next_label_pattern}|\Z)",
+        normalized,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        return ""
+    return match.group(1).strip(" .;")
+
+
+def _looks_like_author_name(value: str) -> bool:
+    words = [item for item in str(value or "").split() if item]
+    if not 2 <= len(words) <= 5:
+        return False
+    lowered = value.lower()
+    if any(keyword in lowered for keyword in _AFFILIATION_KEYWORDS):
+        return False
+    return all(re.match(r"^[A-Z][A-Za-z.'`-]*$", word) for word in words)
+
+
+def _parse_author_blob(blob: str) -> tuple[list[str], list[str]]:
+    authors: list[str] = []
+    affiliations: list[str] = []
+    for segment in _split_metadata_segments(blob):
+        normalized = " ".join(segment.split()).strip(" .;")
+        if not normalized:
+            continue
+
+        for paren_value in re.findall(r"\(([^)]+)\)", normalized):
+            candidate_affiliation = " ".join(paren_value.split()).strip(" .;")
+            if candidate_affiliation:
+                affiliations.append(candidate_affiliation)
+
+        candidate = re.sub(r"\([^)]*\)", "", normalized)
+        candidate = re.sub(r"\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b", "", candidate)
+        candidate = re.sub(r"^[^A-Za-z]+|[^A-Za-z]+$", "", candidate).strip()
+        if not candidate:
+            continue
+        if any(keyword in candidate.lower() for keyword in _AFFILIATION_KEYWORDS):
+            affiliations.append(candidate)
+            continue
+        if _looks_like_author_name(candidate):
+            authors.append(candidate)
+
+    return _dedupe_clean_strings(authors), _dedupe_clean_strings(affiliations)
+
+
+def _extract_front_matter_metadata(structured_paper: StructuredPaper | None) -> tuple[list[str], list[str]]:
+    if structured_paper is None:
+        return [], []
+
+    overall_summary = str(structured_paper.overall_summary or "").strip()
+    early_section_text = "\n".join(
+        str(section.rich_web_content or "").strip()
+        for section in list(structured_paper.sections or [])[:2]
+        if str(section.rich_web_content or "").strip()
+    )
+    combined_text = "\n".join(part for part in [overall_summary, early_section_text] if part)
+
+    explicit_authors = _extract_labeled_metadata(combined_text, ("Authors", "Author"))
+    explicit_affiliations = _extract_labeled_metadata(combined_text, ("Affiliations", "Affiliation", "Institutions"))
+    authors, author_affiliations = _parse_author_blob(explicit_authors) if explicit_authors else ([], [])
+    affiliations = _dedupe_clean_strings(_split_metadata_segments(explicit_affiliations)) if explicit_affiliations else []
+    affiliations.extend(author_affiliations)
+
+    paper_title = str(structured_paper.paper_title or "").strip()
+    short_title = paper_title.split(":")[0].strip() if paper_title else ""
+    if not authors:
+        contributor_patterns = [
+            rf"\b(?:Developed|Authored|Written|Proposed|Presented|Introduced|Created)\s+by\s+(.+?)(?=(?:,\s*)?{re.escape(short_title)}\b|\b(?:this paper|the paper)\b|\b(?:addresses|presents|proposes|introduces|studies|explores|describes|shows|evaluates)\b|\Z)",
+            r"\bAuthors?\s*[:\-]\s*(.+?)(?=\b(?:Affiliations?|Institutions?)\s*:|\Z)",
+        ]
+        for pattern in contributor_patterns:
+            match = re.search(pattern, overall_summary, flags=re.IGNORECASE)
+            if not match:
+                continue
+            parsed_authors, parsed_affiliations = _parse_author_blob(match.group(1))
+            authors.extend(parsed_authors)
+            affiliations.extend(parsed_affiliations)
+            if authors:
+                break
+
+    if not affiliations:
+        for text in (overall_summary, early_section_text):
+            for sentence in re.split(r"(?<=[.!?])\s+|\n+", text):
+                normalized = " ".join(sentence.split()).strip(" .;")
+                if normalized and any(keyword in normalized.lower() for keyword in _AFFILIATION_KEYWORDS):
+                    affiliations.append(normalized)
+
+    return _dedupe_clean_strings(authors)[:8], _dedupe_clean_strings(affiliations)[:6]
+
+
 def _to_html_relative_path(target_path: Path, base_dir: Path) -> str:
     rel_path = os.path.relpath(target_path, start=base_dir)
     web_path = str(rel_path).replace("\\", "/")
@@ -149,39 +303,29 @@ def _normalize_asset_key(value: str) -> str:
     return str(value or "").strip().replace("\\", "/")
 
 
-def _collect_figure_paths(page_plan: PagePlan, structured_paper: StructuredPaper) -> list[str]:
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for block in page_plan.blocks:
-        for path in block.asset_binding.figure_paths:
-            clean = _normalize_asset_key(path)
-            if clean and clean not in seen:
-                seen.add(clean)
-                ordered.append(clean)
-    if ordered:
-        return ordered
-
-    for section in structured_paper.sections:
-        for fig in section.related_figures:
-            clean = _normalize_asset_key(fig.image_path)
-            if clean and clean not in seen:
-                seen.add(clean)
-                ordered.append(clean)
-    return ordered
+def _collect_asset_ids(page_plan: PagePlan, structured_paper: StructuredPaper) -> list[str]:
+    return collect_page_plan_asset_ids(page_plan, structured_paper)
 
 
 def _build_asset_lookup(structured_paper: StructuredPaper) -> dict[str, dict[str, str]]:
-    lookup: dict[str, dict[str, str]] = {}
+    registry_lookup = asset_lookup(structured_paper)
+    section_by_asset_id: dict[str, str] = {}
     for section in structured_paper.sections:
-        for fig in section.related_figures:
-            key = _normalize_asset_key(fig.image_path)
-            if not key or key in lookup:
-                continue
-            lookup[key] = {
-                "caption": str(fig.caption or "").strip(),
-                "type": str(fig.type or "").strip(),
-                "section_title": str(section.section_title or "").strip(),
-            }
+        for binding in section.asset_bindings:
+            asset_id = str(binding.asset_id or "").strip()
+            if asset_id and asset_id not in section_by_asset_id:
+                section_by_asset_id[asset_id] = str(section.section_title or "").strip()
+
+    lookup: dict[str, dict[str, str]] = {}
+    for asset_id, asset in registry_lookup.items():
+        lookup[asset_id] = {
+            "asset_id": asset_id,
+            "caption": str(asset.caption or "").strip(),
+            "type": str(asset.type or "").strip(),
+            "section_title": section_by_asset_id.get(asset_id, ""),
+            "image_path": str(asset.image_path or "").strip(),
+            "page_number": str(asset.page_number or ""),
+        }
     return lookup
 
 
@@ -191,28 +335,34 @@ def _copy_paper_assets(
     site_dir: Path,
     entry_html_path: Path,
     structured_paper: StructuredPaper,
-    figure_paths: list[str],
+    asset_ids: list[str],
 ) -> tuple[list[dict[str, str]], list[str]]:
     asset_manifest: list[dict[str, str]] = []
     copied_assets: list[str] = []
-    if not figure_paths:
+    if not asset_ids:
         return asset_manifest, copied_assets
 
-    source_root = project_root / "data" / "output" / paper_folder_name
     target_dir = site_dir / "assets" / "paper"
     target_dir.mkdir(parents=True, exist_ok=True)
-    asset_lookup = _build_asset_lookup(structured_paper)
+    asset_metadata_lookup = _build_asset_lookup(structured_paper)
+    registry_lookup = asset_lookup(structured_paper)
     used_names: set[str] = set()
 
-    for rel_path in figure_paths:
-        clean_rel_path = _normalize_asset_key(rel_path)
-        source_path = source_root / clean_rel_path
+    for asset_id in asset_ids:
+        clean_asset_id = str(asset_id or "").strip()
+        if not clean_asset_id:
+            continue
+        asset = registry_lookup.get(clean_asset_id)
+        metadata = asset_metadata_lookup.get(clean_asset_id, {})
+        if asset is None:
+            continue
+        source_path = resolved_asset_source_path(project_root, paper_folder_name, asset)
         if not source_path.exists() or not source_path.is_file():
             continue
 
-        base_name = _safe_slug(source_path.stem)[:60]
-        suffix = source_path.suffix or ".png"
-        target_name = f"{base_name}{suffix}"
+        target_name = asset_target_filename(asset)
+        base_name = _safe_slug(Path(target_name).stem)[:60]
+        suffix = Path(target_name).suffix or source_path.suffix or ".png"
         disambiguation = 2
         while target_name in used_names:
             target_name = f"{base_name}-{disambiguation}{suffix}"
@@ -223,15 +373,16 @@ def _copy_paper_assets(
         shutil.copy2(source_path, target_path)
         copied_rel_path = str(target_path.relative_to(site_dir)).replace("\\", "/")
         web_path = _to_html_relative_path(target_path, entry_html_path.parent)
-        metadata = asset_lookup.get(clean_rel_path, {})
         asset_manifest.append(
             {
-                "source_path": clean_rel_path,
+                "asset_id": clean_asset_id,
+                "source_path": str(asset.image_path or "").strip(),
                 "web_path": web_path,
                 "filename": target_name,
                 "caption": str(metadata.get("caption") or ""),
                 "type": str(metadata.get("type") or ""),
                 "section_title": str(metadata.get("section_title") or ""),
+                "page_number": str(metadata.get("page_number") or ""),
             }
         )
         copied_assets.append(copied_rel_path)
@@ -685,12 +836,190 @@ def _update_global_elements(
     footer = _find_global_element(soup, template_profile, "footer_meta")
     if footer is not None:
         footer["data-pa-global"] = "footer_meta"
-        # Find the deepest text-bearing element
+        footer_text = f"(c) 2025. {short_title} Authors."
         text_el = footer.find("a") or footer.find(string=True)
         if text_el and isinstance(text_el, Tag):
-            text_el.string = f"(c) 2025. {short_title} Authors."
+            text_el.string = footer_text
         elif text_el:
-            text_el.replace_with(f"(c) 2025. {short_title} Authors.")
+            text_el.replace_with(footer_text)
+
+
+def _inject_front_matter_metadata(
+    soup: BeautifulSoup,
+    structured_paper: StructuredPaper | None,
+) -> None:
+    authors, affiliations = _extract_front_matter_metadata(structured_paper)
+    if not authors and not affiliations:
+        return
+
+    page_text = soup.get_text(" ", strip=True)
+    if authors and authors[0] in page_text:
+        return
+
+    first_block = next((tag for tag in soup.select("[data-pa-block]") if isinstance(tag, Tag)), None)
+    if first_block is None:
+        return
+
+    existing_meta = first_block.select_one('[data-pa-slot="meta"]')
+    if isinstance(existing_meta, Tag) and "authors:" in existing_meta.get_text(" ", strip=True).lower():
+        return
+
+    meta_block = soup.new_tag(
+        "div",
+        attrs={
+            "data-pa-slot": "meta",
+            "class": "paperalchemy-front-matter",
+            "style": "margin: 0.75rem 0 1.25rem; color: #4b5563; font-size: 0.95rem; line-height: 1.6;",
+        },
+    )
+    if authors:
+        authors_line = soup.new_tag("p", attrs={"style": "margin: 0;"})
+        authors_line.append(soup.new_tag("strong"))
+        authors_line.strong.string = "Authors: "
+        authors_line.append(", ".join(authors))
+        meta_block.append(authors_line)
+    if affiliations:
+        affiliations_line = soup.new_tag("p", attrs={"style": "margin: 0.35rem 0 0;"})
+        affiliations_line.append(soup.new_tag("strong"))
+        affiliations_line.strong.string = "Affiliations: "
+        affiliations_line.append("; ".join(affiliations))
+        meta_block.append(affiliations_line)
+
+    title_slot = first_block.select_one('[data-pa-slot="title"]')
+    if isinstance(title_slot, Tag):
+        title_slot.insert_after(meta_block)
+    elif first_block.contents:
+        first_block.insert(0, meta_block)
+    else:
+        first_block.append(meta_block)
+
+
+def _inject_math_fallback_script(soup: BeautifulSoup) -> None:
+    if soup.find("script", attrs={"id": "paperalchemy-math-fallback"}):
+        return
+
+    html_blob = str(soup)
+    if "$" not in html_blob and "\\(" not in html_blob and "MathJax" not in html_blob and "katex" not in html_blob.lower():
+        return
+
+    mathjax_script = soup.find("script", attrs={"id": "MathJax-script"})
+    if isinstance(mathjax_script, Tag):
+        mathjax_script.attrs.pop("async", None)
+        mathjax_script["defer"] = ""
+
+    fallback_script = soup.new_tag("script", attrs={"id": "paperalchemy-math-fallback"})
+    fallback_script.string = """
+(function () {
+  function normalizeMathExpression(expr) {
+    return String(expr || "")
+      .replace(/\\\\mathcal\\{([^}]+)\\}/g, "$1")
+      .replace(/\\\\mathbb\\{([^}]+)\\}/g, "$1")
+      .replace(/\\\\mathrm\\{([^}]+)\\}/g, "$1")
+      .replace(/\\\\operatorname\\{([^}]+)\\}/g, "$1")
+      .replace(/\\\\text\\{([^}]+)\\}/g, "$1")
+      .replace(/\\\\langle/g, "<")
+      .replace(/\\\\rangle/g, ">")
+      .replace(/\\\\leq/g, "≤")
+      .replace(/\\\\geq/g, "≥")
+      .replace(/\\\\neq/g, "≠")
+      .replace(/\\\\cdot/g, "·")
+      .replace(/\\\\times/g, "×")
+      .replace(/\\\\rightarrow/g, "→")
+      .replace(/\\\\to/g, "→")
+      .replace(/\\\\sigma/g, "sigma")
+      .replace(/\\\\tau/g, "tau")
+      .replace(/\\\\phi/g, "phi")
+      .replace(/\\\\psi/g, "psi")
+      .replace(/\\\\lambda/g, "lambda")
+      .replace(/\\\\alpha/g, "alpha")
+      .replace(/\\\\beta/g, "beta")
+      .replace(/\\\\gamma/g, "gamma")
+      .replace(/\\\\,/g, " ")
+      .replace(/\\^\\{([^}]+)\\}/g, "^$1")
+      .replace(/_\\{([^}]+)\\}/g, "_$1")
+      .replace(/\\\\([A-Za-z]+)/g, "$1")
+      .replace(/[{}]/g, "")
+      .replace(/\\s+/g, " ")
+      .trim();
+  }
+
+  function replaceInlineMath(text) {
+    return String(text || "").replace(/\\$\\$([^$]+)\\$\\$|\\$([^$]+)\\$/g, function (_, blockExpr, inlineExpr) {
+      return normalizeMathExpression(blockExpr || inlineExpr);
+    });
+  }
+
+  function applyFallback() {
+    if (window.__paperalchemyMathFallbackApplied || !document.body) {
+      return;
+    }
+    var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
+      acceptNode: function (node) {
+        if (!node || !node.nodeValue || node.nodeValue.indexOf("$") === -1) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        var parent = node.parentElement;
+        if (!parent) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        var tagName = parent.tagName;
+        if (tagName === "SCRIPT" || tagName === "STYLE" || tagName === "TEXTAREA") {
+          return NodeFilter.FILTER_REJECT;
+        }
+        if (parent.closest("mjx-container, .MathJax")) {
+          return NodeFilter.FILTER_REJECT;
+        }
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    var nodes = [];
+    var current;
+    while ((current = walker.nextNode())) {
+      nodes.push(current);
+    }
+    nodes.forEach(function (node) {
+      node.nodeValue = replaceInlineMath(node.nodeValue);
+    });
+    window.__paperalchemyMathFallbackApplied = true;
+  }
+
+  function tryTypesetOrFallback() {
+    if (window.MathJax && typeof window.MathJax.typesetPromise === "function") {
+      window.MathJax.typesetPromise().catch(function () {
+        applyFallback();
+      });
+      return;
+    }
+    applyFallback();
+  }
+
+  window.addEventListener("load", function () {
+    var mathScript = document.getElementById("MathJax-script");
+    if (mathScript) {
+      mathScript.addEventListener("error", applyFallback, { once: true });
+    }
+    window.setTimeout(tryTypesetOrFallback, 1200);
+  });
+})();
+""".strip()
+
+    target = soup.body or soup
+    target.append(fallback_script)
+
+
+def _postprocess_generated_html(
+    html_text: str,
+    *,
+    structured_paper: StructuredPaper | None,
+    page_plan: PagePlan,
+    template_profile: TemplateProfile | None,
+) -> str:
+    soup = BeautifulSoup(str(html_text or ""), "html.parser")
+    if template_profile is not None and structured_paper is not None:
+        _update_global_elements(soup, structured_paper, page_plan, template_profile)
+    _inject_front_matter_metadata(soup, structured_paper)
+    _inject_math_fallback_script(soup)
+    return normalize_html_document_whitespace(_ensure_doctype(str(soup)))
 
 
 def _assemble_page(
@@ -741,6 +1070,8 @@ def _assemble_page(
 
     # Update global elements (header brand, nav, footer) with paper content
     _update_global_elements(soup, structured_paper, page_plan, template_profile)
+    _inject_front_matter_metadata(soup, structured_paper)
+    _inject_math_fallback_script(soup)
 
     # Remove unsafe widget selectors not bound to any block
     bound_selectors = {artifact.selector for artifact in block_artifacts}
@@ -797,6 +1128,7 @@ def _build_compiled_artifact(
     template_profile_path: str | None,
     page_manifest_path: str,
     copied_assets: list[str],
+    paper_asset_manifest: list[dict[str, str]],
 ) -> CoderArtifact:
     edited_files = ["index.html"]
     mirrored_entry_path = site_dir / template_entry_rel if template_entry_rel else generated_entry_html_path
@@ -807,6 +1139,7 @@ def _build_compiled_artifact(
         entry_html=str(generated_entry_html_path),
         selected_template_id=page_plan.template_selection.selected_template_id,
         copied_assets=copied_assets,
+        paper_asset_manifest=paper_asset_manifest,
         edited_files=edited_files,
         notes=(
             "v8-compiled-block-assembly: rendered block specs, assembled template shells programmatically, "
@@ -845,14 +1178,14 @@ def _run_compiled_block_assembly(
 
     template_reference_html = read_text_with_fallback(template_entry_path)
     shutil.copytree(template_root, site_dir)
-    figure_paths = _collect_figure_paths(page_plan, structured_paper)
+    asset_ids = _collect_asset_ids(page_plan, structured_paper)
     available_paper_assets, copied_assets = _copy_paper_assets(
         project_root=project_root,
         paper_folder_name=paper_folder_name,
         site_dir=site_dir,
         entry_html_path=generated_entry_html_path,
         structured_paper=structured_paper,
-        figure_paths=figure_paths,
+        asset_ids=asset_ids,
     )
 
     block_render_specs, updated_page_plan = _build_render_specs(
@@ -912,6 +1245,7 @@ def _run_compiled_block_assembly(
         template_profile_path=template_profile_path,
         page_manifest_path=page_manifest_path,
         copied_assets=copied_assets,
+        paper_asset_manifest=available_paper_assets,
     )
     return artifact, updated_page_plan, block_render_specs, block_render_artifacts
 
@@ -946,14 +1280,14 @@ def _run_legacy_fullpage_render(
     page_plan = _with_shell_enriched_page_plan(page_plan, template_profile)
     shutil.copytree(template_root, site_dir)
 
-    figure_paths = _collect_figure_paths(page_plan, structured_paper)
+    asset_ids = _collect_asset_ids(page_plan, structured_paper)
     asset_manifest, copied_assets = _copy_paper_assets(
         project_root=project_root,
         paper_folder_name=paper_folder_name,
         site_dir=site_dir,
         entry_html_path=generated_entry_html_path,
         structured_paper=structured_paper,
-        figure_paths=figure_paths,
+        asset_ids=asset_ids,
     )
 
     llm = get_llm(temperature=0.2, use_smart_model=True)
@@ -993,6 +1327,12 @@ def _run_legacy_fullpage_render(
         raise ValueError("Legacy fullpage coder did not return a valid HTML document.")
     generated_html = _ensure_body_markers(generated_html)
     generated_html = normalize_html_document_whitespace(generated_html)
+    generated_html = _postprocess_generated_html(
+        generated_html,
+        structured_paper=structured_paper,
+        page_plan=page_plan,
+        template_profile=template_profile,
+    )
     generated_html = annotate_global_anchors(generated_html, page_plan, template_profile=template_profile)
 
     asset_critiques = validate_local_image_references(
@@ -1030,6 +1370,7 @@ def _run_legacy_fullpage_render(
         entry_html=str(generated_entry_html_path),
         selected_template_id=page_plan.template_selection.selected_template_id,
         copied_assets=copied_assets,
+        paper_asset_manifest=asset_manifest,
         edited_files=edited_files,
         notes=(
             "v8-legacy-fullpage-fallback: generated shell-constrained HTML via fullpage coder and "

@@ -4,7 +4,15 @@ import json
 from pathlib import Path
 from typing import Any
 
-from src.contracts.schemas import BlockRenderArtifact, CoderArtifact, PagePlan, StructuredPaper, TemplateProfile
+from src.contracts.schemas import (
+    BlockRenderArtifact,
+    CoderArtifact,
+    PAGE_PLAN_SCHEMA_VERSION,
+    PagePlan,
+    STRUCTURED_PAPER_SCHEMA_VERSION,
+    StructuredPaper,
+    TemplateProfile,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 OUTPUT_DIR = PROJECT_ROOT / "data" / "output"
@@ -18,6 +26,11 @@ def load_cached_structured_data(path: Path) -> StructuredPaper | None:
         with open(path, "r", encoding="utf-8") as file:
             data_dict = json.load(file)
         structured_data = StructuredPaper(**data_dict)
+        if str(structured_data.schema_version or "").strip() != STRUCTURED_PAPER_SCHEMA_VERSION:
+            raise ValueError(
+                "Structured paper schema mismatch: "
+                f"expected {STRUCTURED_PAPER_SCHEMA_VERSION}, got {structured_data.schema_version}."
+            )
         print(f"[PaperAlchemy] Structured paper loaded: {structured_data.paper_title}")
         return structured_data
     except Exception as exc:
@@ -70,7 +83,16 @@ def get_template_profile_output_path(paper_folder_name: str) -> Path:
 
 
 def load_page_plan(path: Path) -> PagePlan | None:
-    return _load_model_artifact(path, PagePlan, "page plan")
+    page_plan = _load_model_artifact(path, PagePlan, "page plan")
+    if page_plan is None:
+        return None
+    plan_version = str(page_plan.plan_meta.plan_version or "").strip()
+    if plan_version != PAGE_PLAN_SCHEMA_VERSION:
+        print(
+            f"[PaperAlchemy] Cached page plan schema mismatch: expected {PAGE_PLAN_SCHEMA_VERSION}, got {plan_version}."
+        )
+        return None
+    return page_plan
 
 
 def load_coder_artifact(path: Path) -> CoderArtifact | None:

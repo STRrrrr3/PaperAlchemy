@@ -44,6 +44,22 @@ EVAL_SECTION_KEYWORDS = (
 
 RELATED_WORK_SECTION_KEYWORDS = ("related work", "related")
 CONCLUSION_SECTION_KEYWORDS = ("conclusion", "discussion", "future work")
+_AUTHOR_SIGNAL_KEYWORDS = (
+    "authors:",
+    "author:",
+    "developed by",
+    "written by",
+    "proposed by",
+    "presented by",
+    "affiliations:",
+    "affiliation:",
+    "university",
+    "institute",
+    "college",
+    "department",
+    "laboratory",
+    "lab",
+)
 
 
 def _text_len(text: str | None) -> int:
@@ -147,6 +163,18 @@ def _word_count(text: str | None) -> int:
     return len(re.findall(r"\b\w+\b", text or ""))
 
 
+def _contains_front_matter_signal(text: str | None) -> bool:
+    lowered = str(text or "").lower()
+    return any(keyword in lowered for keyword in _AUTHOR_SIGNAL_KEYWORDS)
+
+
+def _has_explicit_front_matter_labels(text: str | None) -> bool:
+    lowered = str(text or "").lower()
+    has_author = "authors:" in lowered or "author:" in lowered
+    has_affiliation = "affiliations:" in lowered or "affiliation:" in lowered
+    return has_author and has_affiliation
+
+
 def _nonempty_lines(text: str | None) -> list[str]:
     return [line.strip() for line in (text or "").splitlines() if line.strip()]
 
@@ -179,6 +207,14 @@ def _run_density_checks(
         critiques.append(
             "overall_summary is too short "
             f"({overall_len} chars, recommended >= 420). Add method novelty, key results, and limitations."
+        )
+
+    if _contains_front_matter_signal(structured_paper.overall_summary) and not _has_explicit_front_matter_labels(
+        structured_paper.overall_summary
+    ):
+        critiques.append(
+            "overall_summary contains paper identity metadata but does not use explicit `Authors:` and "
+            "`Affiliations:` labels. Preserve front matter in a human-recoverable format."
         )
 
     has_method_like_section = False
@@ -244,6 +280,18 @@ def _run_density_checks(
     if not has_eval_like_section:
         critiques.append("Missing a clear evaluation/results section. Extract Evaluation/Results as a standalone section.")
 
+    if _has_explicit_front_matter_labels(structured_paper.overall_summary):
+        early_section_blob = "\n".join(
+            str(section.rich_web_content or "").strip()
+            for section in list(structured_paper.sections or [])[:2]
+            if str(section.rich_web_content or "").strip()
+        )
+        if not _contains_front_matter_signal(early_section_blob):
+            critiques.append(
+                "Front-matter metadata appears in overall_summary but is missing from the first relevant section text. "
+                "Repeat author / affiliation information near the beginning of the first section so it survives downstream planning."
+            )
+
     return critiques
 
 
@@ -306,18 +354,38 @@ def run_code_critic(
         critiques.append("Reader failed: structured_paper is empty. Check source parsing or LLM truncation.")
         return critiques
 
-    valid_asset_paths = {
-        str(asset.get("image_path"))
-        for asset in assets_list
-        if isinstance(asset, dict) and asset.get("image_path")
+    asset_lookup = {
+        str(asset.asset_id or "").strip(): asset
+        for asset in structured_paper.asset_registry
+        if str(asset.asset_id or "").strip()
     }
 
     for sec in structured_paper.sections:
-        for fig in sec.related_figures:
-            if fig.image_path not in valid_asset_paths:
+        for binding in sec.asset_bindings:
+            asset_id = str(binding.asset_id or "").strip()
+            if asset_id not in asset_lookup:
                 critiques.append(
-                    f"Hallucination warning: section '{sec.section_title}' references missing asset path '{fig.image_path}'."
+                    f"Hallucination warning: section '{sec.section_title}' references missing asset_id '{asset_id}'."
                 )
+                continue
+
+            asset_meta = asset_lookup.get(asset_id)
+            page_number = asset_meta.page_number if asset_meta is not None else None
+            bbox = asset_meta.bbox if asset_meta is not None else None
+            if (
+                page_number == 1
+                and isinstance(bbox, list)
+                and len(bbox) == 4
+                and "abstract" not in str(sec.section_title or "").strip().lower()
+            ):
+                bbox_width = abs(float(bbox[2]) - float(bbox[0]))
+                bbox_height = abs(float(bbox[3]) - float(bbox[1]))
+                if bbox_width < 220 and bbox_height < 120:
+                    critiques.append(
+                        f"Suspicious asset grounding: section '{sec.section_title}' selected page-1 asset "
+                        f"'{asset_id}' with a very small bounding box ({bbox_width:.1f}x{bbox_height:.1f}). "
+                        "This often indicates a decorative front-matter icon, badge, or license mark rather than a core paper figure."
+                    )
 
     critiques.extend(_run_density_checks(structured_paper, human_directives=human_directives))
     return critiques

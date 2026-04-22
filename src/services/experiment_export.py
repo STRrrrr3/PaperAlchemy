@@ -6,11 +6,12 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 import uuid
+import zipfile
 
 from bs4 import BeautifulSoup, Comment, Tag
 
 from src.contracts.schemas import CoderArtifact
-from src.services.artifact_store import get_output_paths, load_coder_artifact
+from src.services.artifact_store import get_output_paths, load_cached_structured_data, load_coder_artifact
 from src.services.preview_service import take_local_screenshot
 from src.utils.html_utils import read_text_with_fallback
 
@@ -18,6 +19,7 @@ EXPERIMENT_EXPORTS_DIRNAME = "experiments"
 EXPORT_METADATA_FILENAME = "export_metadata.json"
 EXPORT_SCREENSHOT_FILENAME = "clean_page.png"
 _EXPORT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
+_INVALID_FILENAME_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]+')
 _BODY_MARKERS = {
     "PaperAlchemy Generated Body Start",
     "PaperAlchemy Generated Body End",
@@ -50,10 +52,14 @@ def export_live_experiment_snapshot(paper_folder_name: str, export_name: str) ->
         raise ValueError("paper_folder_name is required.")
     clean_export_name = _validate_export_name(export_name)
 
-    output_dir, _, _, coder_json_path = get_output_paths(clean_paper_folder_name)
+    output_dir, structured_json_path, _, coder_json_path = get_output_paths(clean_paper_folder_name)
     artifact = load_coder_artifact(coder_json_path)
     if artifact is None:
         raise FileNotFoundError(f"Live coder_artifact.json is missing or invalid: {coder_json_path}")
+    site_zip_filename = _build_site_zip_filename(
+        paper_folder_name=clean_paper_folder_name,
+        structured_json_path=structured_json_path,
+    )
 
     live_site_dir = _resolve_artifact_path(str(artifact.site_dir or ""), output_dir=output_dir)
     live_entry_html = _resolve_artifact_path(str(artifact.entry_html or ""), output_dir=output_dir)
@@ -114,6 +120,12 @@ def export_live_experiment_snapshot(paper_folder_name: str, export_name: str) ->
                 + ", ".join(remaining_anchor_files)
             )
 
+        _build_site_zip(
+            export_root_dir=temp_export_dir,
+            export_site_dir=export_site_dir,
+            zip_filename=site_zip_filename,
+        )
+
         temp_export_dir.replace(final_export_dir)
         committed_export_dir = final_export_dir
 
@@ -124,6 +136,7 @@ def export_live_experiment_snapshot(paper_folder_name: str, export_name: str) ->
             "source_entry_html": str(live_entry_html.resolve()),
             "exported_entry_html": Path("site") / entry_relative_path,
             "screenshot_path": Path(EXPORT_SCREENSHOT_FILENAME),
+            "site_zip_path": Path(site_zip_filename),
             "sanitized_html_files": [Path("site") / Path(item) for item in sanitized_html_relative_paths],
             "rewritten_css_files": [Path("site") / Path(item) for item in rewritten_css_relative_paths],
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -164,6 +177,31 @@ def _create_temp_export_dir(*, experiments_dir: Path, export_name: str) -> Path:
     raise FileExistsError(
         f"Could not allocate a temporary export directory under {experiments_dir}."
     )
+
+
+def _build_site_zip(*, export_root_dir: Path, export_site_dir: Path, zip_filename: str) -> Path:
+    zip_path = export_root_dir / zip_filename
+    with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in sorted(export_site_dir.rglob("*")):
+            if not path.is_file():
+                continue
+            archive.write(path, arcname=path.resolve().relative_to(export_root_dir.resolve()).as_posix())
+    return zip_path
+
+
+def _build_site_zip_filename(*, paper_folder_name: str, structured_json_path: Path) -> str:
+    paper_title = ""
+    structured_paper = load_cached_structured_data(structured_json_path)
+    if structured_paper is not None:
+        paper_title = str(structured_paper.paper_title or "").strip()
+    filename_stem = _sanitize_export_filename_stem(paper_title or paper_folder_name)
+    return f"{filename_stem}.zip"
+
+
+def _sanitize_export_filename_stem(value: str) -> str:
+    cleaned = _INVALID_FILENAME_CHARS.sub("_", str(value or "").strip())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    return cleaned or "site"
 
 
 def _resolve_artifact_path(raw_path: str, *, output_dir: Path) -> Path:

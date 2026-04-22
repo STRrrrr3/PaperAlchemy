@@ -175,10 +175,9 @@ def run_semantic_plan_validation(
 
     valid_sections = {sec.section_title for sec in structured_paper.sections}
     valid_assets = {
-        fig.image_path
-        for sec in structured_paper.sections
-        for fig in sec.related_figures
-        if fig.image_path
+        asset.asset_id
+        for asset in structured_paper.asset_registry
+        if str(asset.asset_id or "").strip()
     }
 
     outline_block_ids: set[str] = set()
@@ -211,10 +210,10 @@ def run_semantic_plan_validation(
             critiques.append(
                 f"semantic_blocks item '{block.block_id}' does not exist in page_outline."
             )
-        for asset_path in block.asset_binding.figure_paths:
-            if asset_path not in valid_assets:
+        for asset_id in block.asset_binding.asset_ids:
+            if asset_id not in valid_assets:
                 critiques.append(
-                    f"semantic block '{block.block_id}' references unknown figure path '{asset_path}'."
+                    f"semantic block '{block.block_id}' references unknown asset_id '{asset_id}'."
                 )
 
     if outline_block_ids != semantic_block_ids:

@@ -91,6 +91,11 @@ def format_paper_to_markdown(structured_paper_dict: dict[str, Any]) -> str:
     paper_title = str(structured_paper_dict.get("paper_title") or "Untitled Paper").strip()
     overall_summary = str(structured_paper_dict.get("overall_summary") or "").strip()
     sections = list(structured_paper_dict.get("sections") or [])
+    asset_registry = {
+        str(asset.get("asset_id") or "").strip(): asset
+        for asset in list(structured_paper_dict.get("asset_registry") or [])
+        if isinstance(asset, dict) and str(asset.get("asset_id") or "").strip()
+    }
     authors, affiliations = _extract_front_matter_candidates(structured_paper_dict)
 
     lines = [
@@ -125,21 +130,33 @@ def format_paper_to_markdown(structured_paper_dict: dict[str, Any]) -> str:
     for index, section in enumerate(sections, start=1):
         section_title = str(section.get("section_title") or f"Section {index}").strip()
         rich_web_content = str(section.get("rich_web_content") or "").strip()
-        related_figures = list(section.get("related_figures") or [])
+        asset_bindings = list(section.get("asset_bindings") or [])
 
         lines.extend(["", f"### {index}. {section_title}"])
         lines.append(_trim_review_text(rich_web_content) or "No rich web content was extracted.")
 
-        if related_figures:
+        if asset_bindings:
             lines.extend(["", "Linked assets:"])
-            for figure in related_figures[:3]:
-                image_path = str(figure.get("image_path") or "").strip()
-                caption = str(figure.get("caption") or "").strip()
-                figure_label = f"`{image_path}`" if image_path else "`(missing path)`"
+            for binding in asset_bindings[:3]:
+                asset_id = str(binding.get("asset_id") or "").strip()
+                asset = asset_registry.get(asset_id, {})
+                image_path = str(asset.get("image_path") or "").strip()
+                caption = str(asset.get("caption") or "").strip()
+                figure_label = f"`{asset_id}`" if asset_id else "`(missing asset id)`"
                 if caption:
-                    lines.append(f"- {figure_label}: {caption}")
+                    lines.append(f"- {figure_label}: {caption} ({image_path})")
                 else:
-                    lines.append(f"- {figure_label}")
+                    lines.append(f"- {figure_label}: {image_path or '(missing path)'}")
+
+    confirmation_session = structured_paper_dict.get("asset_confirmation_session") or {}
+    pending_items = list(confirmation_session.get("items") or []) if isinstance(confirmation_session, dict) else []
+    if pending_items:
+        lines.extend(["", "## Pending Asset Confirmations"])
+        for item in pending_items:
+            section_title = str(item.get("section_title") or "").strip() or "(unknown section)"
+            proposed_asset_id = str(item.get("proposed_asset_id") or "").strip() or "(none)"
+            selection_reason = str(item.get("selection_reason") or "").strip() or "Low-confidence asset binding."
+            lines.append(f"- {section_title}: `{proposed_asset_id}` — {selection_reason}")
 
     return "\n".join(lines)
 

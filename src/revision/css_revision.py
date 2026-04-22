@@ -14,7 +14,6 @@ from src.patching.patch_pipeline import (
     _apply_block_replacement,
     _apply_global_replacement,
     _apply_slot_replacement,
-    _available_asset_manifest_from_artifact,
     _build_patch_target_paths,
     _ensure_override_style_tag,
     _merge_unique_strings,
@@ -35,6 +34,7 @@ from src.services.human_feedback import (
     has_human_feedback,
 )
 from src.services.llm import get_llm
+from src.services.paper_assets import build_asset_manifest, ensure_manifest_assets_present
 from src.revision.request_intent import classify_revision_request, has_explicit_content_change
 from src.services.preview_service import (
     build_page_screenshot_path,
@@ -98,14 +98,46 @@ def _load_template_profile_from_artifact(artifact: CoderArtifact | None):
     return load_template_profile(Path(template_profile_path))
 
 
-def _available_assets_json(artifact: CoderArtifact | None) -> str:
-    if artifact is None:
-        return "[]"
-    return json.dumps(
-        _available_asset_manifest_from_artifact(artifact),
-        indent=2,
-        ensure_ascii=False,
+def _load_workflow_structured_paper(state: WorkflowState):
+    structured_paper = state.get("structured_paper")
+    if structured_paper is not None:
+        try:
+            from src.contracts.schemas import StructuredPaper
+
+            return StructuredPaper.model_validate(structured_paper)
+        except Exception:
+            pass
+    paper_folder_name = str(state.get("paper_folder_name") or "").strip()
+    if not paper_folder_name:
+        return None
+    _, structured_json_path, _, _ = get_output_paths(paper_folder_name)
+    from src.services.artifact_store import load_cached_structured_data
+
+    return load_cached_structured_data(structured_json_path)
+
+
+def _available_assets_manifest(
+    artifact: CoderArtifact | None,
+    structured_paper: Any,
+    paper_folder_name: str,
+) -> list[dict[str, str]]:
+    if artifact is None or structured_paper is None or not paper_folder_name:
+        return []
+    project_root = Path(__file__).resolve().parents[2]
+    return build_asset_manifest(
+        project_root=project_root,
+        paper_folder_name=paper_folder_name,
+        structured_paper=structured_paper,
+        site_dir=Path(artifact.site_dir),
+        entry_html_path=Path(artifact.entry_html),
     )
+
+
+def _available_assets_json(artifact: CoderArtifact | None, structured_paper: Any, paper_folder_name: str) -> str:
+    manifest = _available_assets_manifest(artifact, structured_paper, paper_folder_name)
+    if not manifest:
+        return "[]"
+    return json.dumps(manifest, indent=2, ensure_ascii=False)
 
 
 def _read_current_page_manifest(artifact: CoderArtifact | None) -> PageManifest | None:
@@ -190,6 +222,8 @@ def _build_css_revision_prompt(
     has_explicit_content_change: bool,
     retry_guidance: str,
     artifact: CoderArtifact,
+    structured_paper: Any,
+    paper_folder_name: str,
     manifest: PageManifest,
     current_html: str,
     style_context_json: str,
@@ -205,7 +239,7 @@ def _build_css_revision_prompt(
         current_page_manifest_json=current_page_manifest_json,
         current_html=current_html,
         template_style_context_json=style_context_json,
-        available_paper_assets_json=_available_assets_json(artifact),
+        available_paper_assets_json=_available_assets_json(artifact, structured_paper, paper_folder_name),
     )
 
 
@@ -216,6 +250,8 @@ def _invoke_css_revision_plan(
     has_explicit_content_change: bool,
     retry_guidance: str,
     artifact: CoderArtifact,
+    structured_paper: Any,
+    paper_folder_name: str,
     manifest: PageManifest,
     current_html: str,
     style_context_json: str,
@@ -234,6 +270,8 @@ def _invoke_css_revision_plan(
                         has_explicit_content_change=has_explicit_content_change,
                         retry_guidance=retry_guidance,
                         artifact=artifact,
+                        structured_paper=structured_paper,
+                        paper_folder_name=paper_folder_name,
                         manifest=manifest,
                         current_html=current_html,
                         style_context_json=style_context_json,
@@ -317,11 +355,12 @@ def arbiter_autofix_node(state: WorkflowState) -> dict[str, Any]:
 def css_revision_agent_node(state: WorkflowState) -> dict[str, Any]:
     artifact = _load_workflow_coder_artifact(state)
     page_plan = _load_workflow_page_plan(state)
+    structured_paper = _load_workflow_structured_paper(state)
     manifest = _read_current_page_manifest(artifact)
     feedback = state.get("human_directives")
     current_html = read_current_page_html(artifact, missing_value="")
 
-    if artifact is None or page_plan is None or not current_html:
+    if artifact is None or page_plan is None or structured_paper is None or not current_html:
         message = "CSS Revision Agent could not run because coder_artifact, page_plan, or current HTML is missing."
         print(f"[CSSRevisionAgent] {message}")
         return {"css_revision_plan": None, "css_revision_summary": "", "patch_error": message}
@@ -341,6 +380,7 @@ def css_revision_agent_node(state: WorkflowState) -> dict[str, Any]:
 
     human_feedback = extract_human_feedback_text(feedback) or "(no text feedback provided)"
     feedback_images = extract_human_feedback_images(feedback)
+    paper_folder_name = str(state.get("paper_folder_name") or "").strip()
     request_intent_category = classify_revision_request(human_feedback, bool(feedback_images))
     explicit_content_change = has_explicit_content_change(human_feedback)
     style_context_json = load_style_context_json(Path(artifact.entry_html).resolve())
@@ -357,6 +397,8 @@ def css_revision_agent_node(state: WorkflowState) -> dict[str, Any]:
             has_explicit_content_change=explicit_content_change,
             retry_guidance="",
             artifact=artifact,
+            structured_paper=structured_paper,
+            paper_folder_name=paper_folder_name,
             manifest=manifest,
             current_html=current_html,
             style_context_json=style_context_json,
@@ -381,6 +423,8 @@ def css_revision_agent_node(state: WorkflowState) -> dict[str, Any]:
                 has_explicit_content_change=explicit_content_change,
                 retry_guidance=retry_guidance,
                 artifact=artifact,
+                structured_paper=structured_paper,
+                paper_folder_name=paper_folder_name,
                 manifest=manifest,
                 current_html=current_html,
                 style_context_json=style_context_json,
@@ -460,7 +504,9 @@ def css_revision_executor_node(state: WorkflowState) -> dict[str, Any]:
         print(f"[CSSRevisionExecutor] {message}")
         return {"patch_error": message}
 
-    asset_manifest = _available_asset_manifest_from_artifact(artifact)
+    structured_paper = _load_workflow_structured_paper(state)
+    paper_folder_name = str(state.get("paper_folder_name") or "").strip()
+    asset_manifest = _available_assets_manifest(artifact, structured_paper, paper_folder_name)
     allowed_asset_web_paths = collect_allowed_asset_web_paths(asset_manifest)
     allowed_existing_local_sources = set(collect_local_image_sources(current_html))
     soup = BeautifulSoup(current_html, "html.parser")
@@ -515,6 +561,11 @@ def css_revision_executor_node(state: WorkflowState) -> dict[str, Any]:
         style_tag.string = combined
 
     updated_html = str(soup)
+    ensure_manifest_assets_present(
+        html_text=updated_html,
+        asset_manifest=asset_manifest,
+        site_dir=Path(artifact.site_dir),
+    )
     strict_validation = str(manifest.schema_version or "").strip() != "1.0"
     if strict_validation:
         asset_critiques = validate_local_image_references(

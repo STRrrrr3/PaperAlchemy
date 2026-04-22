@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 from typing import Any
 
 from src.parsing.parser import parse_pdf
+from src.contracts.schemas import PARSED_DATA_SCHEMA_VERSION
 from src.template.resources import SyncedTemplateAssets, ensure_autopage_template_assets
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -15,8 +17,18 @@ def ensure_parsed_output(pdf_filename: str, output_dir: Path) -> bool:
     output_md_path = output_dir / "full_paper.md"
     parsed_json_path = output_dir / "parsed_data.json"
     if output_md_path.exists() and parsed_json_path.exists():
-        print("[PaperAlchemy] Parsed PDF assets already exist, skipping parser.")
-        return True
+        try:
+            payload = json.loads(parsed_json_path.read_text(encoding="utf-8"))
+            version = str(((payload.get("metadata") or {}).get("schema_version")) or "").strip()
+        except Exception:
+            version = ""
+        if version == PARSED_DATA_SCHEMA_VERSION:
+            print("[PaperAlchemy] Parsed PDF assets already exist, skipping parser.")
+            return True
+        print(
+            "[PaperAlchemy] Parsed PDF assets schema mismatch, reparsing: "
+            f"expected {PARSED_DATA_SCHEMA_VERSION}, got {version or '(missing)'}."
+        )
 
     print("[PaperAlchemy] Parsing PDF...")
     parse_pdf(pdf_filename)

@@ -20,6 +20,7 @@ from src.contracts.schemas import (
     TargetedReplacementPlan,
     TemplateCandidate,
     TemplateProfile,
+    RevisionIntent,
 )
 
 
@@ -29,6 +30,11 @@ class ReaderState(TypedDict):
     human_directives: HumanFeedbackPayload
     previous_structured_paper: Optional[StructuredPaper]
     feedback_history: Annotated[List[str], operator.add]
+    text_structured_paper: Optional[dict[str, Any]]
+    text_reader_feedback: str
+    asset_registry: List[dict[str, Any]]
+    asset_binding_candidates: dict[str, list[dict[str, Any]]]
+    asset_binding_feedback: str
     structured_paper: Optional[StructuredPaper]
     critic_passed: bool
     retry_count: int
@@ -75,7 +81,7 @@ class WorkflowState(TypedDict):
     manual_layout_compose_enabled: bool
     human_directives: HumanFeedbackPayload
     coder_instructions: str
-    edit_intent: Literal["patch", "non_patch"] | None
+    edit_intent: RevisionIntent | None
     edit_intent_reason: str
     patch_agent_output: str
     revision_plan: RevisionPlan | None

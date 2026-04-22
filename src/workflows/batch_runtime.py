@@ -21,6 +21,7 @@ from src.services.artifact_store import (
     save_template_profile,
 )
 from src.services.human_feedback import empty_human_feedback
+from src.services.paper_assets import confirmation_pending
 from src.services.preview_service import (
     build_final_preview_path,
     build_style_context_path,
@@ -90,6 +91,11 @@ def run_langgraph_batch(
         log(f"[Reader] Saved structured paper to {structured_json_path}")
     else:
         log(f"[Reader] Reused cached structured paper from {structured_json_path}")
+
+    if confirmation_pending(structured_data):
+        raise RuntimeError(
+            "Reader produced pending asset confirmations. Use the HITL overview stage to confirm low-confidence assets before planning."
+        )
 
     generation_constraints = build_generation_constraints(
         synced_assets=synced_assets,

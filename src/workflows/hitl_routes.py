@@ -35,7 +35,7 @@ def webpage_review_router(state: WorkflowState) -> str:
 
 
 def translated_revision_router(state: WorkflowState) -> str:
-    if str(state.get("edit_intent") or "").strip() == "patch":
+    if str(state.get("edit_intent") or "").strip() in {"patch", "asset_rebind"}:
         return "patch_agent"
     return "css_revision_agent"
 

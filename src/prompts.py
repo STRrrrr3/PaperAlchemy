@@ -75,7 +75,14 @@ When that happens, follow the human directive as long as the output remains grou
 
 ### INPUT DATA
 1. Raw markdown (full paper text)
-2. Assets list (figures/tables with file paths)
+2. Assets list (figures/tables with file paths, page_number, page_image, bbox, and page-local order)
+
+### ASSET GROUNDING RULES
+- The markdown may contain generic placeholders such as `<!-- image -->` instead of explicit asset filenames.
+- When that happens, align figures/tables conservatively using the nearby caption text in markdown together with `page_number`, `asset_order_on_page`, and `bbox` from the assets list.
+- Prefer the asset that appears on the same page as the nearby `Figure N.` / `Table N.` caption and in the matching top-to-bottom order.
+- Treat small decorative crops in front matter conservatively. Do not map title-page icons, publisher badges, license marks, logos, or other marginal decorations as key technical figures unless the source clearly proves they are the intended paper figure.
+- If the figure/table mapping is ambiguous, leave the section `asset_bindings` empty rather than guessing.
 
 ### EXTRACTION TARGET (EDITORIALLY SELECTIVE)
 1. `paper_title`: exact title.
@@ -123,6 +130,7 @@ When that happens, follow the human directive as long as the output remains grou
 
 ### ASSET MAPPING
 - Map figures/tables to relevant sections based on local context and references.
+- Use page-local evidence first: nearby `Figure/Table` captions in markdown, matching `page_number`, and top-to-bottom order on that page.
 - Only use file paths from provided assets list.
 - Prefer a small number of high-impact assets rather than exhaustive attachment.
 - If uncertain, prefer empty list over hallucinated mapping.
@@ -215,6 +223,7 @@ If HUMAN_DIRECTIVES is present, it overrides default editorial preferences such 
 - The candidate output only keeps the technical summary and loses the paper's identity metadata needed for human review.
 - Explicit institutions in source are replaced by vague wording instead of recoverable names.
 - Section figure paths are invented or inconsistent with assets list.
+- The extraction maps a decorative title-page crop, publisher badge, license mark, or unrelated marginal icon to a technical section figure.
 - Method/evaluation sections have weak detail density, omit concrete setup, or skip metrics/baselines that exist in source.
 - The `rich_web_content` is too short, heavily summarized, or reads like a dry bulleted list instead of a rich academic narrative.
 - The extraction behaves like a PDF browser dump by preserving too many low-value sections instead of selecting the most webpage-worthy material.
@@ -677,7 +686,7 @@ The downstream deterministic binder will attach the semantic plan to canonical T
 1. Grounded content only:
    - Do not invent facts, metrics, claims, or figure paths.
 2. Grounded assets only:
-   - figure_paths must come from STRUCTURED_PAPER_JSON.sections[].related_figures[].image_path.
+   - asset_ids must come from STRUCTURED_PAPER_JSON.asset_registry[].asset_id.
 3. Grounded modules only:
    - If MODULE_INDEX_JSON is provided, module/component/style/token ids must exist in inventory.
    - If unknown, set id fields to null and explain in open_questions.
@@ -725,7 +734,7 @@ The downstream deterministic binder will attach the semantic plan to canonical T
 ## Required output JSON schema
 {
   "plan_meta": {
-    "plan_version": "2.0",
+    "plan_version": "3.0",
     "planning_mode": "semantic_only",
     "confidence": 0.0
   },
@@ -788,7 +797,7 @@ The downstream deterministic binder will attach the semantic plan to canonical T
         "cta": "string or null"
       },
       "asset_binding": {
-        "figure_paths": ["string"],
+        "asset_ids": ["string"],
         "template_asset_fallback": "string or null"
       },
       "interaction": {
@@ -873,7 +882,7 @@ You must audit the candidate SemanticPagePlan with a strict pass/fail decision.
    - The candidate is valid JSON and follows the expected SemanticPagePlan schema.
 2. Semantic grounding:
    - source_sections must exist in STRUCTURED_PAPER_JSON.sections[].section_title.
-   - figure_paths must exist in STRUCTURED_PAPER_JSON.sections[].related_figures[].image_path.
+   - asset_ids must exist in STRUCTURED_PAPER_JSON.asset_registry[].asset_id.
    - outline block_ids and semantic_blocks block_ids must align one-to-one.
 3. Template context sanity:
    - SELECTED_TEMPLATE_JSON must exist in TEMPLATE_CATALOG_JSON as context.

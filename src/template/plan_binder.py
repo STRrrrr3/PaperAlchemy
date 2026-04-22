@@ -95,7 +95,7 @@ def _role_compatibility_score(preferred_role: str, actual_role: str) -> float:
 
 
 def _media_compatibility_score(block: SemanticBlockPlan, shell_node: Any) -> float:
-    has_media = bool(block.asset_binding.figure_paths or block.asset_binding.template_asset_fallback)
+    has_media = bool(block.asset_binding.asset_ids or block.asset_binding.template_asset_fallback)
     if not has_media:
         return -0.8 if shell_node.region_role in {"gallery", "table"} else 0.0
 
@@ -186,7 +186,7 @@ def _choose_shell_node(
 
 
 def _derive_operation(block: SemanticBlockPlan, shell_node: Any) -> str:
-    if shell_node.region_role in {"gallery", "table"} and block.asset_binding.figure_paths:
+    if shell_node.region_role in {"gallery", "table"} and block.asset_binding.asset_ids:
         return "replace_media"
     if block.interaction.pattern != "none" and shell_node.region_role == "section":
         return "append_child"
@@ -205,7 +205,7 @@ def _derive_desktop_layout(block: SemanticBlockPlan, shell_node: Any) -> str:
         return "table_focus"
     if block.interaction.pattern != "none":
         return "interactive_stack"
-    if block.asset_binding.figure_paths:
+    if block.asset_binding.asset_ids:
         return "media_split"
     return "stack"
 
@@ -332,7 +332,7 @@ def bind_semantic_plan(
     hard_constraints = [
         "Preserve canonical TemplateIR shell selectors and contracts.",
         "Preserve global anchors from dom_mapping.",
-        "Use only grounded figure_paths from StructuredPaper.",
+        "Use only grounded asset_ids from StructuredPaper.asset_registry.",
     ]
 
     return PagePlan(

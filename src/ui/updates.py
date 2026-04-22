@@ -124,6 +124,7 @@ def _stage_action_updates(
     feedback_images_value: Any = None,
     manual_layout_compose_enabled: bool = False,
     revision_history_state: Any = None,
+    overview_approve_enabled: bool = True,
 ) -> tuple[dict[str, Any], ...]:
     normalized_stage = str(stage or "").strip().lower()
     is_overview = normalized_stage == "overview"
@@ -164,7 +165,7 @@ def _stage_action_updates(
             interactive=is_outline,
         ),
         gr.update(interactive=is_overview, visible=is_overview),
-        gr.update(interactive=is_overview, visible=is_overview),
+        gr.update(interactive=is_overview and overview_approve_enabled, visible=is_overview),
         gr.update(interactive=is_outline, visible=is_outline),
         gr.update(interactive=is_outline, visible=is_outline),
         gr.update(interactive=is_webpage, visible=is_webpage),
@@ -199,7 +200,7 @@ def _format_layout_compose_block_summary(session: LayoutComposeSession) -> str:
                 "- Source sections: "
                 + (", ".join(block.source_sections) if block.source_sections else "(none)"),
                 f"- Selected section: `{selected_section}`",
-                f"- Selected images: {len(block.selected_figure_paths)}",
+                f"- Selected images: {len(block.selected_asset_ids)}",
                 "",
             ]
         )
@@ -219,7 +220,7 @@ def _format_layout_compose_editor(block: Any | None) -> str:
         lines.append(f"- Saved section: `{block.selected_selector_hint}`")
     else:
         lines.append("- Saved section: `(unselected)`")
-    lines.append(f"- Saved image count: {len(block.selected_figure_paths)}")
+    lines.append(f"- Saved image count: {len(block.selected_asset_ids)}")
     return "\n".join(lines)
 
 def _format_layout_compose_validation(session: LayoutComposeSession) -> str:
@@ -302,10 +303,10 @@ def _layout_compose_ui_active(session: LayoutComposeSession) -> tuple[dict[str, 
             if str(option.preview_image_path or "").strip()
         ]
         figure_choices = [
-            (_layout_compose_figure_caption(option), option.image_path)
+            (_layout_compose_figure_caption(option), option.asset_id)
             for option in active_block.figure_options
         ]
-        figure_values = list(active_block.selected_figure_paths)
+        figure_values = list(active_block.selected_asset_ids)
         figure_gallery_items = [
             (option.preview_image_path, _layout_compose_figure_caption(option))
             for option in active_block.figure_options

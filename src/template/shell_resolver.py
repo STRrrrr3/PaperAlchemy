@@ -14,6 +14,7 @@ from src.services.preview_service import (
     take_local_screenshot,
     take_selector_screenshot,
 )
+from src.services.paper_assets import asset_lookup
 from src.contracts.schemas import (
     BlockPlan,
     CanonicalShellNode,
@@ -130,7 +131,7 @@ def _candidate_role_for_block(block_role: str, candidate: _CandidateRoot) -> tup
 
 def _content_fit_score(block: BlockPlan, candidate: _CandidateRoot) -> float:
     score = 0.0
-    has_figures = bool(block.asset_binding.figure_paths)
+    has_figures = bool(block.asset_binding.asset_ids)
     interaction_pattern = str(block.interaction.pattern or "")
     if has_figures and candidate.has_media:
         score += 2.0
@@ -396,25 +397,31 @@ def _build_figure_options_for_block(
     paper_folder_name: str,
 ) -> list[LayoutFigureOption]:
     wanted_sections = {section_title.strip() for section_title in source_sections if section_title.strip()}
-    seen_paths: set[str] = set()
+    seen_asset_ids: set[str] = set()
     figure_options: list[LayoutFigureOption] = []
+    registry_lookup = asset_lookup(structured_paper)
 
     for section in structured_paper.sections:
         section_title = str(section.section_title or "").strip()
         if section_title not in wanted_sections:
             continue
-        for figure in section.related_figures:
-            image_path = str(figure.image_path or "").strip().replace("\\", "/")
-            if not image_path or image_path in seen_paths:
+        for binding in section.asset_bindings:
+            asset_id = str(binding.asset_id or "").strip()
+            asset = registry_lookup.get(asset_id)
+            if not asset_id or asset_id in seen_asset_ids or asset is None:
                 continue
-            seen_paths.add(image_path)
+            seen_asset_ids.add(asset_id)
             figure_options.append(
                 LayoutFigureOption(
-                    image_path=image_path,
-                    caption=str(figure.caption or "").strip() or None,
-                    type=str(figure.type or "").strip(),
+                    asset_id=asset_id,
+                    image_path=str(asset.image_path or "").strip().replace("\\", "/"),
+                    caption=str(asset.caption or "").strip() or None,
+                    type=str(asset.type or "").strip(),
                     source_section=section_title,
-                    preview_image_path=build_paper_figure_preview_path(paper_folder_name, image_path),
+                    preview_image_path=build_paper_figure_preview_path(
+                        paper_folder_name,
+                        str(asset.image_path or "").strip(),
+                    ),
                 )
             )
     return figure_options
@@ -473,14 +480,14 @@ def apply_layout_compose_update(
             if update.selected_selector_hint is not None:
                 block.selected_selector_hint = str(update.selected_selector_hint or "").strip()
 
-            if update.selected_figure_paths is not None:
-                valid_figure_paths = {
-                    option.image_path for option in block.figure_options if option.image_path
+            if update.selected_asset_ids is not None:
+                valid_asset_ids = {
+                    option.asset_id for option in block.figure_options if option.asset_id
                 }
-                block.selected_figure_paths = [
-                    image_path
-                    for image_path in update.selected_figure_paths
-                    if image_path in valid_figure_paths
+                block.selected_asset_ids = [
+                    asset_id
+                    for asset_id in update.selected_asset_ids
+                    if asset_id in valid_asset_ids
                 ]
 
             if update.order_action == "move_up" and index > 0:
@@ -621,11 +628,11 @@ def build_layout_compose_session(
             structured_paper,
             paper_folder_name,
         )
-        valid_figure_paths = {option.image_path for option in figure_options}
-        selected_figure_paths = [
-            image_path
-            for image_path in block.asset_binding.figure_paths
-            if image_path in valid_figure_paths
+        valid_asset_ids = {option.asset_id for option in figure_options}
+        selected_asset_ids = [
+            asset_id
+            for asset_id in block.asset_binding.asset_ids
+            if asset_id in valid_asset_ids
         ]
 
         compose_blocks.append(
@@ -635,7 +642,7 @@ def build_layout_compose_session(
                 source_sections=list(outline_item.source_sections),
                 current_order=int(outline_item.order),
                 selected_selector_hint=selected_selector_hint,
-                selected_figure_paths=selected_figure_paths,
+                selected_asset_ids=selected_asset_ids,
                 section_options=section_options,
                 figure_options=figure_options,
             )
@@ -701,7 +708,7 @@ def apply_layout_compose_session_to_page_plan(
             resolved_block.model_copy(
                 update={
                     "asset_binding": resolved_block.asset_binding.model_copy(
-                        update={"figure_paths": list(compose_block.selected_figure_paths)},
+                        update={"asset_ids": list(compose_block.selected_asset_ids)},
                         deep=True,
                     ),
                     "responsive_rules": resolved_block.responsive_rules.model_copy(

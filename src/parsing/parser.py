@@ -11,12 +11,20 @@ from docling.datamodel.pipeline_options import (
     AcceleratorDevice
 )
 from docling_core.types.doc import ImageRefMode, PictureItem, TableItem
+from src.contracts.schemas import PARSED_DATA_SCHEMA_VERSION
 
 # 瀹氫箟杈撳叆杈撳嚭璺緞
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 INPUT_DIR = PROJECT_ROOT / "data" / "input"
 OUTPUT_DIR = PROJECT_ROOT / "data" / "output"
 IMAGE_SCALE = 2.0 
+
+
+def _sort_key_for_bbox(item: dict) -> tuple[float, float, str]:
+    bbox = item.get("bbox") or [0, 0, 0, 0]
+    top = float(bbox[1]) if len(bbox) > 1 and bbox[1] is not None else 0.0
+    left = float(bbox[0]) if len(bbox) > 0 and bbox[0] is not None else 0.0
+    return top, left, str(item.get("image_path") or "")
 
 def get_pipeline_options():
     pipeline_options = PdfPipelineOptions()
@@ -66,8 +74,10 @@ def parse_pdf(pdf_filename):
         "metadata": {
             "filename": pdf_filename,
             "page_count": len(doc.pages),
+            "schema_version": PARSED_DATA_SCHEMA_VERSION,
             "parse_time": time.strftime("%Y-%m-%d %H:%M:%S")
         },
+        "asset_registry": [],
         "pages": [] # 鎸夐〉闈㈢粍缁囨暟鎹?
     }
 
@@ -116,7 +126,14 @@ def parse_pdf(pdf_filename):
                 "type": "table" if isinstance(element, TableItem) else "figure",
                 "image_path": f"assets/{elem_filename}",
                 "caption": "",
-                "bbox": element.prov[0].bbox.as_tuple() if element.prov else None
+                "bbox": list(element.prov[0].bbox.as_tuple()) if element.prov else [],
+                "page_number": int(page_idx) if page_idx != -1 else 0,
+                "page_image": f"assets/page_{page_idx}.png" if page_idx != -1 else "",
+                "asset_order_on_page": 0,
+                "asset_id": "",
+                "nearby_markdown_excerpt": "",
+                "visual_summary": "",
+                "is_probably_decorative": False,
             }
             
             # 鎵惧埌瀵瑰簲椤甸潰鐨?list 骞?append
@@ -127,6 +144,31 @@ def parse_pdf(pdf_filename):
                     else:
                         p["figures"].append(item_data)
                     break
+
+    normalized_asset_registry: list[dict] = []
+    for page in structured_data["pages"]:
+        ordered_items = sorted(
+            list(page.get("figures", [])) + list(page.get("tables", [])),
+            key=_sort_key_for_bbox,
+        )
+        item_lookup = {str(item.get("image_path") or ""): item for item in ordered_items}
+        for asset_order_on_page, item in enumerate(ordered_items, start=1):
+            item["asset_order_on_page"] = asset_order_on_page
+            page_number = int(item.get("page_number") or page.get("page_number") or 0)
+            item["asset_id"] = f"{item['type']}_p{page_number}_{asset_order_on_page}"
+            normalized_asset_registry.append(dict(item))
+
+        page["figures"] = [
+            item_lookup[str(item.get("image_path") or "")]
+            for item in ordered_items
+            if str(item.get("type") or "") != "table"
+        ]
+        page["tables"] = [
+            item_lookup[str(item.get("image_path") or "")]
+            for item in ordered_items
+            if str(item.get("type") or "") == "table"
+        ]
+    structured_data["asset_registry"] = normalized_asset_registry
 
     # 鐢熸垚鍏ㄦ枃 Markdown (浣滀负 Agent 鐨勪富瑕侀槄璇绘潗鏂?
     # 浣跨敤 REFERENCED 妯″紡锛岃繖鏍?Markdown 閲屼細鏈?![image](assets/xxx.png)

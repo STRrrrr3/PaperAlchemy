@@ -25,6 +25,7 @@ from src.services.artifact_store import (
     load_page_plan,
     load_template_profile,
 )
+from src.services.paper_assets import build_asset_manifest, ensure_manifest_assets_present
 from src.services.llm import get_llm
 from src.validators.page_manifest import (
     GLOBAL_ATTR,
@@ -960,6 +961,12 @@ def _load_style_context_json(artifact: CoderArtifact | None) -> str:
 
 
 def _available_asset_manifest_from_artifact(artifact: CoderArtifact) -> list[dict[str, str]]:
+    if artifact.paper_asset_manifest:
+        return [
+            {str(key): str(value) for key, value in item.items()}
+            for item in artifact.paper_asset_manifest
+            if isinstance(item, dict)
+        ]
     site_dir = Path(artifact.site_dir)
     entry_html_parent = Path(artifact.entry_html).parent
     manifest: list[dict[str, str]] = []
@@ -1055,7 +1062,13 @@ def _regenerate_block_html(
                             ensure_ascii=False,
                         ),
                         available_paper_assets_json=json.dumps(
-                            _available_asset_manifest_from_artifact(artifact),
+                            build_asset_manifest(
+                                project_root=Path(__file__).resolve().parents[2],
+                                paper_folder_name=Path(artifact.site_dir).resolve().parent.name,
+                                structured_paper=structured_paper,
+                                site_dir=Path(artifact.site_dir),
+                                entry_html_path=Path(artifact.entry_html),
+                            ),
                             indent=2,
                             ensure_ascii=False,
                         ),
@@ -1130,7 +1143,13 @@ def patch_agent_node(state: WorkflowState) -> dict[str, Any]:
         print(f"[PatchAgent] {message}")
         return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
 
-    asset_manifest = _available_asset_manifest_from_artifact(artifact)
+    asset_manifest = build_asset_manifest(
+        project_root=Path(__file__).resolve().parents[2],
+        paper_folder_name=str(state.get("paper_folder_name") or "").strip(),
+        structured_paper=structured_paper,
+        site_dir=Path(artifact.site_dir),
+        entry_html_path=Path(artifact.entry_html),
+    )
     allowed_asset_web_paths = collect_allowed_asset_web_paths(asset_manifest)
     allowed_existing_local_sources = set(collect_local_image_sources(current_html))
 
@@ -1411,7 +1430,13 @@ def patch_executor_node(state: WorkflowState) -> dict[str, Any]:
         return {"patch_error": message}
 
     strict_validation = _strict_revision_validation_enabled(manifest)
-    asset_manifest = _available_asset_manifest_from_artifact(artifact)
+    asset_manifest = build_asset_manifest(
+        project_root=Path(__file__).resolve().parents[2],
+        paper_folder_name=str(state.get("paper_folder_name") or "").strip(),
+        structured_paper=structured_paper,
+        site_dir=Path(artifact.site_dir),
+        entry_html_path=entry_html_path,
+    )
     allowed_asset_web_paths = collect_allowed_asset_web_paths(asset_manifest)
     allowed_existing_local_sources = set(collect_local_image_sources(current_html))
 
@@ -1583,6 +1608,11 @@ def patch_executor_node(state: WorkflowState) -> dict[str, Any]:
         return {"patch_error": message}
 
     updated_html = str(soup)
+    ensure_manifest_assets_present(
+        html_text=updated_html,
+        asset_manifest=asset_manifest,
+        site_dir=Path(artifact.site_dir),
+    )
 
     if strict_validation:
         asset_critiques = validate_local_image_references(

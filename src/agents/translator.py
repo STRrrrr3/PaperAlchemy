@@ -110,6 +110,21 @@ def _classify_edit_intent(feedback: Any, revision_plan: RevisionPlan | None) -> 
     if revision_plan is None or not revision_plan.edits:
         return "non_patch", "current feedback was not translated into an actionable anchored patch"
 
+    asset_rebind_keywords = (
+        "image",
+        "figure",
+        "chart",
+        "diagram",
+        "logo",
+        "配图",
+        "换图",
+        "图片",
+        "图表",
+        "架构图",
+    )
+    if any(keyword in lowered_feedback for keyword in asset_rebind_keywords):
+        return "asset_rebind", "feedback requests a media swap that should prefer anchored asset rebinding"
+
     return "patch", "feedback maps to local anchored edits that the patch path can handle"
 
 

@@ -66,7 +66,7 @@ def _score_template(template_item: dict[str, Any], semantic_plan: SemanticPagePl
             reasons.append("cap_miss:needs_interactivity")
 
     high_media_blocks = [
-        blk for blk in semantic_plan.semantic_blocks if blk.asset_binding.figure_paths
+        blk for blk in semantic_plan.semantic_blocks if blk.asset_binding.asset_ids
     ]
     if high_media_blocks and bool(template_item.get("has_image_info")):
         score += 0.15

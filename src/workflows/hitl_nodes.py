@@ -41,6 +41,7 @@ from src.services.artifact_store import (
     save_template_profile,
 )
 from src.services.human_feedback import extract_human_feedback_text, normalize_human_feedback
+from src.services.paper_assets import confirmation_pending
 from src.template.catalog import build_template_catalog, load_module_index, load_template_link_map
 from src.template.compile import prepare_template_compile_bundle
 from src.template.resources import ensure_autopage_template_assets
@@ -406,6 +407,8 @@ def planner_phase_node(state: WorkflowState) -> dict[str, Any]:
         raise ValueError("paper_folder_name is missing for planner phase.")
 
     structured_data = _load_structured_paper_for_state(state)
+    if confirmation_pending(structured_data):
+        raise RuntimeError("Structured paper still has pending asset confirmations. Resolve them before planning.")
     generation_constraints = dict(state.get("generation_constraints") or {})
     user_constraints = dict(state.get("user_constraints") or {})
     template_candidates = _normalize_template_candidates(state.get("template_candidates"))

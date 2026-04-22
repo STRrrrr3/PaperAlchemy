@@ -112,6 +112,27 @@ def take_local_screenshot(html_absolute_path: str, output_image_path: str) -> st
                 except Exception:
                     pass
 
+            try:
+                page.evaluate(
+                    """
+                    async () => {
+                      if (window.MathJax && typeof window.MathJax.typesetPromise === "function") {
+                        try {
+                          await window.MathJax.typesetPromise();
+                        } catch (err) {
+                        }
+                      }
+                    }
+                    """
+                )
+            except Exception:
+                pass
+
+            try:
+                page.wait_for_timeout(1400)
+            except Exception:
+                pass
+
             page.screenshot(path=str(image_path), full_page=True)
             context.close()
             browser.close()
