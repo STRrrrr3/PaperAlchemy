@@ -9,6 +9,7 @@ from src.utils.json_utils import to_pretty_json
 from src.services.llm import get_llm
 from src.prompts import PLANNER_CRITIC_SYSTEM_PROMPT, PLANNER_CRITIC_USER_PROMPT_TEMPLATE
 from src.contracts.schemas import (
+    FULLPAGE_RENDER_STRATEGY,
     PagePlan,
     PlannerCriticReport,
     SemanticPagePlan,
@@ -288,7 +289,7 @@ def run_bound_plan_validation(
         )
 
     render_strategy = str(page_plan.plan_meta.render_strategy or "").strip()
-    if render_strategy not in {"compiled_block_assembly", "legacy_fullpage"}:
+    if render_strategy not in {"compiled_block_assembly", FULLPAGE_RENDER_STRATEGY}:
         critiques.append("plan_meta.render_strategy must be a supported planner output.")
 
     return critiques
@@ -301,7 +302,7 @@ def run_planner_semantic_critic(
     selected_template: TemplateCandidate | None = None,
 ) -> PlannerCriticReport:
     print("[PaperAlchemy-PlannerCritic] using Gemini-Flash for semantic planning audit...")
-    llm = get_llm(temperature=0, use_smart_model=False)
+    llm = get_llm(temperature=0, use_smart_model=False, thinking_level="high")
     structured_llm = llm.with_structured_output(PlannerCriticReport)
 
     user_msg = PLANNER_CRITIC_USER_PROMPT_TEMPLATE.format(

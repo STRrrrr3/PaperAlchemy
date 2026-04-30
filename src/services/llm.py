@@ -25,6 +25,12 @@ DEFAULT_VERTEX_SMART_MODEL = "gemini-3.1-pro-preview"
 DEFAULT_VERTEX_FAST_MODEL = "gemini-3-flash-preview"
 DEFAULT_API_KEY_SMART_MODEL = "gemini-3.1-pro-preview"
 DEFAULT_API_KEY_FAST_MODEL = "gemini-3-flash-preview"
+DEFAULT_SMART_THINKING_LEVEL = "high"
+DEFAULT_FAST_THINKING_LEVEL = "high"
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 500.0
+DEFAULT_MAX_RETRIES = 3
+SUPPORTED_THINKING_LEVELS = frozenset({"minimal", "low", "medium", "high"})
+DISABLED_THINKING_LEVEL_VALUES = frozenset({"", "default", "auto", "unset", "none", "off"})
 
 proxy_url = os.getenv("HTTPS_PROXY") or "http://127.0.0.1:7890"
 os.environ["http_proxy"] = proxy_url
@@ -132,12 +138,119 @@ def _resolve_effective_temperature(
     model_name: str,
     use_smart_model: bool,
 ) -> float:
-    if provider == "vertex" and use_smart_model and model_name == DEFAULT_VERTEX_SMART_MODEL:
+    if "gemini-3.1-pro" in str(model_name or "").lower():
         return 1
     return temperature
 
 
-def get_llm(temperature: float = 0, use_smart_model: bool = True):
+def _configured_env_value(*names: str) -> str | None:
+    for name in names:
+        if name in os.environ:
+            return os.environ.get(name)
+    return None
+
+
+def _resolve_timeout_setting(request_timeout: float | None) -> float:
+    if request_timeout is not None:
+        return float(request_timeout)
+    env_value = _configured_env_value("PAPERALCHEMY_LLM_TIMEOUT_SECONDS")
+    if env_value is not None and str(env_value).strip():
+        return float(env_value)
+    return DEFAULT_REQUEST_TIMEOUT_SECONDS
+
+
+def _resolve_max_retries(retries: int | None) -> int:
+    if retries is not None:
+        return int(retries)
+    env_value = _configured_env_value("PAPERALCHEMY_LLM_MAX_RETRIES")
+    if env_value is not None and str(env_value).strip():
+        return int(env_value)
+    return DEFAULT_MAX_RETRIES
+
+
+def _supports_thinking_level(model_name: str) -> bool:
+    return "gemini-3" in model_name.lower()
+
+
+def _allowed_thinking_levels_for_model(model_name: str) -> frozenset[str]:
+    normalized = model_name.lower()
+    if not _supports_thinking_level(model_name):
+        return frozenset()
+    if "pro-image" in normalized:
+        return frozenset({"high"})
+    if "flash-image" in normalized:
+        return frozenset({"minimal", "high"})
+    if "pro" in normalized:
+        return frozenset({"low", "medium", "high"})
+    if "flash" in normalized:
+        return SUPPORTED_THINKING_LEVELS
+    return SUPPORTED_THINKING_LEVELS
+
+
+def _normalize_thinking_level(raw_value: str | None, *, source: str) -> str | None:
+    if raw_value is None:
+        return None
+
+    value = str(raw_value).strip().lower()
+    if value in DISABLED_THINKING_LEVEL_VALUES:
+        return None
+    if value not in SUPPORTED_THINKING_LEVELS:
+        allowed = ", ".join(sorted(SUPPORTED_THINKING_LEVELS))
+        raise ValueError(f"{source} must be one of {allowed}, or 'default' to use the provider default.")
+    return value
+
+
+def _resolve_thinking_level(
+    *,
+    model_name: str,
+    use_smart_model: bool,
+    thinking_level: str | None,
+) -> str | None:
+    env_source_name = (
+        "PAPERALCHEMY_SMART_THINKING_LEVEL"
+        if use_smart_model
+        else "PAPERALCHEMY_FAST_THINKING_LEVEL"
+    )
+    env_value = _configured_env_value("PAPERALCHEMY_THINKING_LEVEL", env_source_name)
+
+    if not _supports_thinking_level(model_name):
+        configured_value = thinking_level if thinking_level is not None else env_value
+        normalized = _normalize_thinking_level(configured_value, source="thinking_level")
+        if normalized is not None:
+            raise ValueError(
+                "thinking_level is only supported for Gemini 3 and later models; "
+                "use the provider default for older Gemini models."
+            )
+        return None
+
+    default_level = DEFAULT_SMART_THINKING_LEVEL if use_smart_model else DEFAULT_FAST_THINKING_LEVEL
+    raw_value = thinking_level if thinking_level is not None else env_value
+    if raw_value is None:
+        raw_value = default_level
+
+    normalized = _normalize_thinking_level(raw_value, source="thinking_level")
+    if normalized is None:
+        return None
+
+    allowed_levels = _allowed_thinking_levels_for_model(model_name)
+    if normalized not in allowed_levels:
+        allowed = ", ".join(sorted(allowed_levels))
+        raise ValueError(
+            f"thinking_level={normalized!r} is not supported by {model_name!r}; "
+            f"allowed values: {allowed}."
+        )
+    return normalized
+
+
+def get_llm(
+    temperature: float = 0,
+    use_smart_model: bool = True,
+    *,
+    request_timeout: float | None = None,
+    retries: int | None = None,
+    streaming: bool | None = None,
+    thinking_level: str | None = None,
+):
     vertex_runtime = _load_vertex_runtime()
     provider = "vertex" if vertex_runtime is not None else "api_key"
     model_name = _resolve_model_name(use_smart_model=use_smart_model, provider=provider)
@@ -147,19 +260,27 @@ def get_llm(temperature: float = 0, use_smart_model: bool = True):
         model_name=model_name,
         use_smart_model=use_smart_model,
     )
-    timeout_setting = 500.0
+    timeout_setting = _resolve_timeout_setting(request_timeout)
+    max_retries = _resolve_max_retries(retries)
+    resolved_thinking_level = _resolve_thinking_level(
+        model_name=model_name,
+        use_smart_model=use_smart_model,
+        thinking_level=thinking_level,
+    )
 
     print(
         f"[PaperAlchemy] Initializing Gemini via {provider}: "
-        f"{model_name} (temp={effective_temperature})"
+        f"{model_name} (temp={effective_temperature}, "
+        f"thinking_level={resolved_thinking_level or 'default'}, "
+        f"timeout={timeout_setting:g}s, retries={max_retries})"
     )
 
     common_kwargs = {
         "model": model_name,
         "temperature": effective_temperature,
-        "retries": 3,
-        "request_timeout": timeout_setting,
-        "streaming": True,
+        "max_retries": max_retries,
+        "timeout": timeout_setting,
+        "streaming": True if streaming is None else bool(streaming),
         "safety_settings": {
             "HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
             "HARM_CATEGORY_HATE_SPEECH": "BLOCK_NONE",
@@ -168,6 +289,8 @@ def get_llm(temperature: float = 0, use_smart_model: bool = True):
         },
         "convert_system_message_to_human": True,
     }
+    if resolved_thinking_level is not None:
+        common_kwargs["thinking_level"] = resolved_thinking_level
 
     if vertex_runtime is not None:
         os.environ.setdefault("GOOGLE_CLOUD_PROJECT", str(vertex_runtime["project_id"]))

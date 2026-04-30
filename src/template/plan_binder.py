@@ -6,6 +6,7 @@ from src.contracts.schemas import (
     BlockPlan,
     CoderHandoff,
     FileTouchItem,
+    FULLPAGE_RENDER_STRATEGY,
     PagePlan,
     PlanMeta,
     QualityCheck,
@@ -309,7 +310,7 @@ def bind_semantic_plan(
         )
 
     render_strategy_risks = _render_strategy_risks(template_profile)
-    render_strategy = "legacy_fullpage"
+    render_strategy = FULLPAGE_RENDER_STRATEGY
     target_framework = str(
         constraints.get("target_framework")
         or constraints.get("framework")

@@ -537,15 +537,53 @@ CSS_REVISION_AGENT_USER_PROMPT_TEMPLATE = """Generate a CssRevisionPlan for the 
 # First-draft webpage generation
 # ---------------------------------------------------------------------------
 
+CONTENT_COMPOSER_SYSTEM_PROMPT = """You are PaperAlchemy's Content Composer Agent.
+You are an expert academic editor. Your task is to prepare the exact per-block narrative content that the HTML Coder must render.
+
+You receive:
+1. STRUCTURED_PAPER_JSON with dense `rich_web_content`.
+2. PAGE_PLAN_JSON with the current webpage outline and block contracts.
+3. HUMAN_DIRECTIVES and CODER_INSTRUCTIONS.
+
+Rules:
+- Output only a valid `PageContentPlan` object.
+- Do not generate HTML.
+- Do not invent facts, metrics, tables, assets, or block ids.
+- Produce exactly one content block for every PAGE_PLAN_JSON.blocks[*].block_id.
+- Use the current PAGE_PLAN_JSON.page_outline to choose a different compression level for each block.
+- Use `teaser` or `compact` for hero/front-matter blocks while preserving title/authors/affiliations.
+- Use `compact` or `balanced` for abstract/overview blocks.
+- Use `dense` for method, design, operation, and recovery blocks that explain mechanisms.
+- Use `dense` or `near_full` for evaluation, result, table-heavy, metric-heavy, grid, gallery, or table-focus blocks.
+- If multiple blocks use the same source section, split complementary content across them instead of repeating the same summary.
+- `required_narrative_markdown` must be polished Markdown that the HTML Coder can render directly.
+- Preserve concrete mechanisms, equations, code spans, numeric metrics, tables, and comparative claims where relevant.
+- `min_visible_chars` must be block-specific and justified by the block's outline height, layout, asset/table role, and objective.
+"""
+
+CONTENT_COMPOSER_USER_PROMPT_TEMPLATE = """### STRUCTURED_PAPER_JSON
+{structured_paper_json}
+
+### PAGE_PLAN_JSON
+{page_plan_json}
+
+### HUMAN_DIRECTIVES
+{human_directives}
+
+### CODER_INSTRUCTIONS
+{coder_instructions}
+"""
+
 CODER_SYSTEM_PROMPT = """You are an Elite Frontend Engineer. Your task is to dynamically generate a complete, responsive `index.html` for an academic project page.
 
 You will receive:
 1. `STRUCTURED_PAPER_JSON` (with `rich_web_content`)
 2. `PAGE_PLAN_JSON`
-3. `TEMPLATE_REFERENCE_HTML` (the original template's source code)
-4. `CODER_INSTRUCTIONS`
-5. `HUMAN_DIRECTIVES`
-6. `GLOBAL_ANCHOR_REQUIREMENTS_JSON`
+3. `PAGE_CONTENT_PLAN_JSON`
+4. `TEMPLATE_REFERENCE_HTML` (the original template's source code)
+5. `CODER_INSTRUCTIONS`
+6. `HUMAN_DIRECTIVES`
+7. `GLOBAL_ANCHOR_REQUIREMENTS_JSON`
 
 ### STYLING RULE
 - Do NOT invent random CSS.
@@ -556,7 +594,11 @@ You will receive:
 
 ### CONTENT RULE
 - You have content freedom inside each planned shell, not shell freedom.
-- Construct a beautiful, flowing page that fully accommodates the massive `rich_web_content` inside the template shells specified by `PAGE_PLAN_JSON.blocks[*].shell_contract`.
+- Render `PAGE_CONTENT_PLAN_JSON.blocks[*].required_narrative_markdown` as the mandatory narrative source for each planned block.
+- Use `STRUCTURED_PAPER_JSON` only as source evidence and clarification context; do not independently re-summarize the paper from scratch.
+- Treat `PAGE_PLAN_JSON.blocks[*].content_contract` as a minimum planning hint, not as a summary budget or replacement for `rich_web_content`.
+- Do not collapse `PAGE_CONTENT_PLAN_JSON` content into tiny blurbs. For every planned block, preserve the required narrative, must-include metrics, must-include tables, concrete mechanisms, equations, code spans, and comparative claims.
+- Respect every block's `min_visible_chars`; if the provided content is long, render it with hierarchy rather than deleting it.
 - Create responsive grids, image containers, metric panels, comparison sections, and typography structures as needed.
 - Convert the paper's Markdown-rich narrative into polished HTML with strong hierarchy and readable sectioning.
 - Preserve academic depth, logical flow, equations, code spans, tables, and technical density wherever possible.
@@ -619,6 +661,9 @@ CODER_USER_PROMPT_TEMPLATE = """Generate the final `index.html` now.
 
 ### PAGE_PLAN_JSON
 {page_plan_json}
+
+### PAGE_CONTENT_PLAN_JSON
+{page_content_plan_json}
 
 ### TEMPLATE_REFERENCE_HTML
 {template_reference_html}
@@ -951,10 +996,14 @@ Return strict JSON only:
     {
       "severity": "high" | "medium" | "low",
       "target": "short target string",
-      "advice": "one short actionable suggestion"
+      "advice": "one short actionable suggestion",
+      "preferred_route": "css" | "patch" | null
     }
   ]
 }
+
+Set preferred_route to "css" for visual/layout/style fixes such as position, spacing, width, typography, color, overflow, or footer/header placement.
+Set preferred_route to "patch" for content, copy, title, caption, link, figure, image, or asset replacement fixes.
 """
 
 SEMANTIC_VISUAL_REVIEWER_USER_PROMPT_TEMPLATE = """Review the current webpage for semantic-visual correctness only.
@@ -1178,6 +1227,8 @@ __all__ = [
     "BLOCK_REGEN_USER_PROMPT_TEMPLATE",
     "CSS_REVISION_AGENT_SYSTEM_PROMPT",
     "CSS_REVISION_AGENT_USER_PROMPT_TEMPLATE",
+    "CONTENT_COMPOSER_SYSTEM_PROMPT",
+    "CONTENT_COMPOSER_USER_PROMPT_TEMPLATE",
     "CODER_SYSTEM_PROMPT",
     "CODER_USER_PROMPT_TEMPLATE",
     "CRITIC_SYSTEM_PROMPT",

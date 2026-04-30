@@ -339,7 +339,7 @@ def _run_text_reader_extraction(
     previous_structured_paper: Any,
     feedback_history: list[str] | None = None,
 ) -> TextReaderOutput:
-    llm = get_llm(temperature=0.4, use_smart_model=True)
+    llm = get_llm(temperature=0.4, use_smart_model=True, thinking_level="high")
     structured_llm = llm.with_structured_output(TextReaderOutput)
     user_msg = TEXT_READER_USER_PROMPT_TEMPLATE.format(
         human_directives=human_directives or "(none)",
@@ -362,7 +362,7 @@ def _run_text_reader_extraction(
 
 def _run_asset_vision_pass(output_dir: Path, seeded_registry: list[PaperAsset]) -> list[PaperAsset]:
     updated_registry: list[PaperAsset] = []
-    llm = get_llm(temperature=0.1, use_smart_model=True)
+    llm = get_llm(temperature=0.1, use_smart_model=True, thinking_level="high")
     structured_llm = llm.with_structured_output(AssetVisionOutput)
 
     for asset in seeded_registry:
@@ -421,7 +421,7 @@ def _run_asset_binding_planner(
     *,
     human_directives: str,
 ) -> AssetBindingPlan:
-    llm = get_llm(temperature=0.2, use_smart_model=True)
+    llm = get_llm(temperature=0.2, use_smart_model=True, thinking_level="high")
     structured_llm = llm.with_structured_output(AssetBindingPlan)
     response = structured_llm.invoke(
         [
@@ -569,7 +569,7 @@ def _run_asset_binding_check(
     pending_items: list[AssetConfirmationItem] = list(
         structured_paper.asset_confirmation_session.items if structured_paper.asset_confirmation_session else []
     )
-    llm = get_llm(temperature=0, use_smart_model=False)
+    llm = get_llm(temperature=0, use_smart_model=False, thinking_level="high")
     structured_llm = llm.with_structured_output(AssetBindingCheck)
 
     for section in structured_paper.sections:

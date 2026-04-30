@@ -8,6 +8,7 @@ from src.contracts.schemas import (
     BlockRenderArtifact,
     CoderArtifact,
     PAGE_PLAN_SCHEMA_VERSION,
+    PageContentPlan,
     PagePlan,
     STRUCTURED_PAPER_SCHEMA_VERSION,
     StructuredPaper,
@@ -60,6 +61,11 @@ def save_page_plan(path: Path, page_plan: PagePlan) -> None:
     with open(path, "w", encoding="utf-8") as file:
         json.dump(page_plan.model_dump(), file, indent=2, ensure_ascii=False)
 
+def save_page_content_plan(path: Path, content_plan: PageContentPlan) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as file:
+        json.dump(content_plan.model_dump(), file, indent=2, ensure_ascii=False)
+
 def save_coder_artifact(path: Path, artifact: CoderArtifact) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as file:
@@ -82,6 +88,11 @@ def get_template_profile_output_path(paper_folder_name: str) -> Path:
     return output_dir / "template_profile.json"
 
 
+def get_page_content_plan_output_path(paper_folder_name: str) -> Path:
+    output_dir = OUTPUT_DIR / paper_folder_name
+    return output_dir / "page_content_plan.json"
+
+
 def load_page_plan(path: Path) -> PagePlan | None:
     page_plan = _load_model_artifact(path, PagePlan, "page plan")
     if page_plan is None:
@@ -97,6 +108,10 @@ def load_page_plan(path: Path) -> PagePlan | None:
 
 def load_coder_artifact(path: Path) -> CoderArtifact | None:
     return _load_model_artifact(path, CoderArtifact, "coder artifact")
+
+
+def load_page_content_plan(path: Path) -> PageContentPlan | None:
+    return _load_model_artifact(path, PageContentPlan, "page content plan")
 
 
 def load_template_profile(path: Path) -> TemplateProfile | None:

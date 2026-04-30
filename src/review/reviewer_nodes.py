@@ -229,7 +229,7 @@ def semantic_visual_reviewer_node(state: WorkflowState) -> dict[str, Any]:
         return {"semantic_visual_review": ReviewerReport(reviewer="semantic_visual", items=[])}
 
     try:
-        llm = get_llm(temperature=0.1, use_smart_model=True)
+        llm = get_llm(temperature=0.1, use_smart_model=True, thinking_level="medium")
         structured_llm = llm.with_structured_output(ReviewerReport)
         response = structured_llm.invoke(
             [
@@ -283,7 +283,7 @@ def layout_rhythm_reviewer_node(state: WorkflowState) -> dict[str, Any]:
     layout_intent_json = _build_layout_intent_json(page_plan)
 
     try:
-        llm = get_llm(temperature=0.1, use_smart_model=True)
+        llm = get_llm(temperature=0.1, use_smart_model=True, thinking_level="medium")
         structured_llm = llm.with_structured_output(ReviewerReport)
         response = structured_llm.invoke(
             [
@@ -326,7 +326,7 @@ def review_arbiter_node(state: WorkflowState) -> dict[str, Any]:
         return {"arbiter_review": ArbiterReport(items=[])}
 
     try:
-        llm = get_llm(temperature=0, use_smart_model=True)
+        llm = get_llm(temperature=0, use_smart_model=True, thinking_level="high")
         structured_llm = llm.with_structured_output(ArbiterReport)
         response = structured_llm.invoke(
             [

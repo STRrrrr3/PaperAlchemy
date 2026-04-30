@@ -12,6 +12,7 @@ from src.contracts.schemas import (
     LayoutComposeUpdate,
     PagePlan,
     ReviewerReport,
+    RevisionRouteDecision,
     SemanticPagePlan,
     RevisionPlan,
     ShellBindingReview,
@@ -84,6 +85,8 @@ class WorkflowState(TypedDict):
     edit_intent: RevisionIntent | None
     edit_intent_reason: str
     patch_agent_output: str
+    patch_applied_summary: str
+    revision_route_decision: RevisionRouteDecision | None
     revision_plan: RevisionPlan | None
     targeted_replacement_plan: TargetedReplacementPlan | None
     css_revision_plan: CssRevisionPlan | None

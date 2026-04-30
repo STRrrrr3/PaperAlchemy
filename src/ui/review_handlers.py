@@ -7,7 +7,14 @@ from uuid import uuid4
 
 import gradio as gr
 
-from src.contracts.schemas import ASSET_CONFIRMATION_NONE_ID, AssetConfirmationItem, PagePlan, SectionAssetBinding, StructuredPaper
+from src.contracts.schemas import (
+    ASSET_CONFIRMATION_NONE_ID,
+    AssetConfirmationItem,
+    AssetConfirmationSession,
+    PagePlan,
+    SectionAssetBinding,
+    StructuredPaper,
+)
 from src.contracts.state import WorkflowState
 from src.services.artifact_store import (
     get_output_paths,
@@ -94,6 +101,40 @@ def _confirmation_item_key(item: AssetConfirmationItem) -> str:
     return f"{str(item.section_title or '').strip()}::{str(item.proposed_asset_id or '').strip()}"
 
 
+def _pending_confirmation_items(session: AssetConfirmationSession) -> list[AssetConfirmationItem]:
+    return [item for item in session.items if item.selected_asset_id is None]
+
+
+def _next_pending_confirmation_key(
+    session: AssetConfirmationSession | None,
+    current_key: str | None,
+) -> str | None:
+    if session is None or not session.items:
+        return None
+
+    item_keys = [_confirmation_item_key(item) for item in session.items]
+    pending_keys = {
+        _confirmation_item_key(item)
+        for item in session.items
+        if item.selected_asset_id is None
+    }
+    if not pending_keys:
+        return None
+
+    clean_current_key = str(current_key or "").strip()
+    if clean_current_key in item_keys:
+        start_index = item_keys.index(clean_current_key)
+        for offset in range(1, len(session.items) + 1):
+            candidate_key = item_keys[(start_index + offset) % len(session.items)]
+            if candidate_key in pending_keys:
+                return candidate_key
+
+    for item_key in item_keys:
+        if item_key in pending_keys:
+            return item_key
+    return None
+
+
 def _asset_confirmation_ui_hidden() -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     return (
         gr.update(value="", visible=False),
@@ -112,6 +153,9 @@ def _asset_confirmation_ui_active(
     session = structured_paper.asset_confirmation_session
     if session is None or not session.items:
         return _asset_confirmation_ui_hidden()
+    pending_items = _pending_confirmation_items(session)
+    if not pending_items:
+        return _asset_confirmation_ui_hidden()
 
     registry_lookup = {
         str(asset.asset_id or "").strip(): asset
@@ -122,7 +166,7 @@ def _asset_confirmation_ui_active(
     item_map = {_confirmation_item_key(item): item for item in items}
     selected_key = str(active_key or "").strip()
     if selected_key not in item_map:
-        selected_key = _confirmation_item_key(items[0])
+        selected_key = _confirmation_item_key(pending_items[0])
     active_item = item_map[selected_key]
 
     choices = []
@@ -131,6 +175,7 @@ def _asset_confirmation_ui_active(
         proposed_asset_id = str(item.proposed_asset_id or "").strip()
         if proposed_asset_id:
             label += f" -> {proposed_asset_id}"
+        label += " [saved]" if item.selected_asset_id is not None else " [pending]"
         choices.append((label, _confirmation_item_key(item)))
 
     gallery_items: list[tuple[str, str]] = []
@@ -150,7 +195,7 @@ def _asset_confirmation_ui_active(
     selected_asset_id = str(active_item.selected_asset_id or "").strip() or None
     summary_lines = [
         "### Asset Confirmation",
-        f"- Pending items: {len(items)}",
+        f"- Pending items: {len(pending_items)} / {len(items)}",
         f"- Section: {active_item.section_title}",
     ]
     proposed_asset_id = str(active_item.proposed_asset_id or "").strip()
@@ -212,6 +257,8 @@ def _build_cached_resume_state(
         "edit_intent": None,
         "edit_intent_reason": "",
         "patch_agent_output": "",
+        "patch_applied_summary": "",
+        "revision_route_decision": None,
         "revision_plan": None,
         "targeted_replacement_plan": None,
         "css_revision_plan": None,
@@ -432,7 +479,7 @@ def save_asset_confirmation_selection(
         updated_paper = structured_paper.model_copy(
             update={
                 "sections": updated_sections,
-                "asset_confirmation_session": session.model_copy(update={"items": updated_items}, deep=True),
+                "asset_confirmation_session": AssetConfirmationSession(items=updated_items),
             },
             deep=True,
         )
@@ -450,10 +497,16 @@ def save_asset_confirmation_selection(
             as_node="overview",
         )
         log(f"[Overview] Saved asset confirmation for `{active_item.section_title}` -> `{selected_value}`.")
+        next_confirmation_key = _next_pending_confirmation_key(
+            updated_paper.asset_confirmation_session,
+            target_key,
+        )
+        if next_confirmation_key is None:
+            log("[Overview] All asset confirmations resolved. Approve Extraction is now enabled.")
         return (
             "\n".join(run_log_lines),
             format_paper_to_markdown(updated_paper.model_dump()),
-            *_asset_confirmation_ui_active(updated_paper, paper_folder_name, confirmation_target_key),
+            *_asset_confirmation_ui_active(updated_paper, paper_folder_name, next_confirmation_key),
             *_stage_action_updates(
                 "overview",
                 overview_approve_enabled=not confirmation_pending(updated_paper),
@@ -773,6 +826,8 @@ def run_extraction(
             "edit_intent": None,
             "edit_intent_reason": "",
             "patch_agent_output": "",
+            "patch_applied_summary": "",
+            "revision_route_decision": None,
             "revision_plan": None,
             "targeted_replacement_plan": None,
             "css_revision_plan": None,
@@ -894,6 +949,8 @@ def revise_extraction(
                 "edit_intent": None,
                 "edit_intent_reason": "",
                 "patch_agent_output": "",
+                "patch_applied_summary": "",
+                "revision_route_decision": None,
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
                 "css_revision_plan": None,
@@ -984,6 +1041,8 @@ def approve_extraction_and_plan_outline(
                 "human_directives": empty_human_feedback(),
                 "coder_instructions": "",
                 "patch_agent_output": "",
+                "patch_applied_summary": "",
+                "revision_route_decision": None,
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
                 "css_revision_plan": None,
@@ -1100,6 +1159,8 @@ def revise_outline(
                 "approved_page_plan": None,
                 "coder_artifact": None,
                 "patch_agent_output": "",
+                "patch_applied_summary": "",
+                "revision_route_decision": None,
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
                 "css_revision_plan": None,
@@ -1190,6 +1251,8 @@ def approve_outline_and_generate_draft(
                 "human_directives": empty_human_feedback(),
                 "coder_instructions": "",
                 "patch_agent_output": "",
+                "patch_applied_summary": "",
+                "revision_route_decision": None,
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
                 "css_revision_plan": None,
@@ -1323,12 +1386,23 @@ def _patch_revision_summary(paused_values: dict[str, Any]) -> str:
 
 
 def _patch_route_was_used(paused_values: dict[str, Any]) -> bool:
+    route_decision = _model_dump_or_dict(paused_values.get("revision_route_decision"))
+    if str(route_decision.get("route") or "").strip() in {"patch", "mixed"}:
+        return True
     if str(paused_values.get("edit_intent") or "").strip() in {"patch", "asset_rebind"}:
         return True
     if str(paused_values.get("patch_agent_output") or "").strip():
         return True
     targeted_plan = _model_dump_or_dict(paused_values.get("targeted_replacement_plan"))
     return bool(targeted_plan)
+
+
+def _mixed_css_followup_was_requested(paused_values: dict[str, Any]) -> bool:
+    route_decision = _model_dump_or_dict(paused_values.get("revision_route_decision"))
+    return (
+        str(route_decision.get("route") or "").strip() == "mixed"
+        and bool(str(route_decision.get("css_text") or "").strip())
+    )
 
 
 def request_webpage_revision(
@@ -1376,6 +1450,8 @@ def request_webpage_revision(
                 "edit_intent": None,
                 "edit_intent_reason": "",
                 "patch_agent_output": "",
+                "patch_applied_summary": "",
+                "revision_route_decision": None,
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
                 "css_revision_plan": None,
@@ -1392,6 +1468,7 @@ def request_webpage_revision(
         paused_values = dict(paused_state.values or {})
         patch_error = str(paused_values.get("patch_error") or "").strip()
         patch_summary = _patch_revision_summary(paused_values)
+        patch_applied_summary = str(paused_values.get("patch_applied_summary") or "").strip()
         patch_route_used = _patch_route_was_used(paused_values)
         css_revision_summary = str(paused_values.get("css_revision_summary") or "").strip()
         css_revision_plan = paused_values.get("css_revision_plan")
@@ -1403,56 +1480,63 @@ def request_webpage_revision(
             css_rule_count = 0
             replacement_count = 0
 
+        draft_modified = False
         if patch_error:
-            if patch_route_used:
+            if patch_applied_summary:
+                log(f"[Patch] Applied: {patch_applied_summary}")
+                if _mixed_css_followup_was_requested(paused_values):
+                    log(f"[CSSRevision] Safe fail: {patch_error}")
+                elif patch_route_used:
+                    log(f"[Patch] Safe fail after applying earlier changes: {patch_error}")
+                else:
+                    log(f"[Revision] Safe fail after applying earlier changes: {patch_error}")
+                paper_folder_name, page_plan, coder_artifact = _resolve_live_webpage_artifacts(paused_values)
+                revision_history = append_revision_version(
+                    paper_folder_name=paper_folder_name,
+                    artifact=coder_artifact,
+                    page_plan=page_plan,
+                    source="webpage_revision",
+                    summary=patch_applied_summary,
+                )
+                revision_history_state = _refresh_revision_history_state(paper_folder_name, revision_history)
+                draft_modified = True
+            elif patch_route_used:
                 log(f"[Patch] Safe fail: {patch_error}")
+                revision_history_state = current_revision_history_state or empty_revision_history_state()
             else:
                 log(f"[CSSRevision] Safe fail: {patch_error}")
-            revision_history_state = current_revision_history_state or empty_revision_history_state()
-        elif patch_route_used:
-            log(f"[Patch] Applied: {patch_summary or 'anchored patch applied.'}")
+                revision_history_state = current_revision_history_state or empty_revision_history_state()
+        elif patch_route_used or css_rule_count or replacement_count or css_revision_summary:
+            summary_parts: list[str] = []
+            if patch_route_used:
+                patch_message = patch_applied_summary or patch_summary or "anchored patch applied."
+                log(f"[Patch] Applied: {patch_message}")
+                summary_parts.append(patch_message)
+            if css_rule_count or replacement_count:
+                css_message = f"{css_rule_count} css rule(s), {replacement_count} content replacement(s)."
+                log(f"[CSSRevision] Applied: {css_message}")
+                summary_parts.append(css_revision_summary or f"Applied {css_message}")
+            elif css_revision_summary:
+                log(f"[CSSRevision] Applied: {css_revision_summary}")
+                summary_parts.append(css_revision_summary)
             paper_folder_name, page_plan, coder_artifact = _resolve_live_webpage_artifacts(paused_values)
             revision_history = append_revision_version(
                 paper_folder_name=paper_folder_name,
                 artifact=coder_artifact,
                 page_plan=page_plan,
                 source="webpage_revision",
-                summary=patch_summary or "Applied anchored patch revision.",
+                summary=" | ".join(part for part in summary_parts if part) or "Applied webpage revision.",
             )
             revision_history_state = _refresh_revision_history_state(paper_folder_name, revision_history)
-        elif css_rule_count or replacement_count:
-            log(
-                "[CSSRevision] Applied: "
-                f"{css_rule_count} css rule(s), "
-                f"{replacement_count} content replacement(s)."
-            )
-            paper_folder_name, page_plan, coder_artifact = _resolve_live_webpage_artifacts(paused_values)
-            revision_history = append_revision_version(
-                paper_folder_name=paper_folder_name,
-                artifact=coder_artifact,
-                page_plan=page_plan,
-                source="webpage_revision",
-                summary=css_revision_summary
-                or f"Applied {css_rule_count} css rule(s) and {replacement_count} content replacement(s).",
-            )
-            revision_history_state = _refresh_revision_history_state(paper_folder_name, revision_history)
-        elif css_revision_summary:
-            log(f"[CSSRevision] Applied: {css_revision_summary}")
-            paper_folder_name, page_plan, coder_artifact = _resolve_live_webpage_artifacts(paused_values)
-            revision_history = append_revision_version(
-                paper_folder_name=paper_folder_name,
-                artifact=coder_artifact,
-                page_plan=page_plan,
-                source="webpage_revision",
-                summary=css_revision_summary,
-            )
-            revision_history_state = _refresh_revision_history_state(paper_folder_name, revision_history)
+            draft_modified = True
         else:
             revision_history_state = current_revision_history_state or empty_revision_history_state()
         preview_image_path, entry_html_path = render_current_workflow_preview(paused_values)
         log(f"[Preview] Rendered revised webpage screenshot from {entry_html_path}")
-        if patch_error:
+        if patch_error and not draft_modified:
             log("[Webpage] The current draft was not modified. Review it, then approve it or request another revision.")
+        elif patch_error:
+            log("[Webpage] Revised draft ready with partial changes. Review it, then approve it or request another revision.")
         else:
             log("[Webpage] Revised draft ready. Review it, then approve it or request another revision.")
         return (
@@ -1628,6 +1712,8 @@ def approve_webpage(
                 "human_directives": empty_human_feedback(),
                 "coder_instructions": "",
                 "patch_agent_output": "",
+                "patch_applied_summary": "",
+                "revision_route_decision": None,
                 "revision_plan": None,
                 "targeted_replacement_plan": None,
                 "css_revision_plan": None,

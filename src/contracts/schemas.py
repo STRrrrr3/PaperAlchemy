@@ -5,12 +5,23 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 GlobalAnchorId = Literal["header_brand", "header_primary_action", "header_nav", "footer_meta"]
 SlotId = Literal["title", "summary", "body", "media", "meta", "actions"]
 RevisionIntent = Literal["patch", "non_patch", "asset_rebind"]
+RenderStrategy = Literal["compiled_block_assembly", "template_guided_fullpage"]
+CompressionLevel = Literal["teaser", "compact", "balanced", "dense", "near_full"]
 
 PARSED_DATA_SCHEMA_VERSION = "2.0"
 STRUCTURED_PAPER_SCHEMA_VERSION = "2.0"
 SEMANTIC_PLAN_SCHEMA_VERSION = "3.0"
 PAGE_PLAN_SCHEMA_VERSION = "3.0"
+PAGE_CONTENT_PLAN_SCHEMA_VERSION = "1.0"
 ASSET_CONFIRMATION_NONE_ID = "__none__"
+FULLPAGE_RENDER_STRATEGY = "template_guided_fullpage"
+LEGACY_FULLPAGE_RENDER_STRATEGY = "legacy_fullpage"
+
+
+def _normalize_render_strategy(value: object) -> object:
+    if isinstance(value, str) and value.strip() == LEGACY_FULLPAGE_RENDER_STRATEGY:
+        return FULLPAGE_RENDER_STRATEGY
+    return value
 
 
 class PaperAsset(BaseModel):
@@ -264,10 +275,15 @@ class PlanMeta(BaseModel):
     )
     target_framework: str = Field(description="Target framework, e.g., 'static-html', 'react', 'vue'.")
     confidence: float = Field(description="Planner confidence in [0, 1].")
-    render_strategy: Literal["compiled_block_assembly", "legacy_fullpage"] = Field(
+    render_strategy: RenderStrategy = Field(
         default="compiled_block_assembly",
         description="Preferred coder execution path for this plan.",
     )
+
+    @field_validator("render_strategy", mode="before")
+    @classmethod
+    def normalize_render_strategy(cls, value: object) -> object:
+        return _normalize_render_strategy(value)
 
 
 class TemplateSelection(BaseModel):
@@ -429,6 +445,41 @@ class PagePlan(BaseModel):
     open_questions: List[str]
 
 
+class PageContentBlock(BaseModel):
+    block_id: str
+    source_sections: List[str] = Field(default_factory=list)
+    headline: str
+    lead: str = ""
+    compression_level: CompressionLevel
+    compression_rationale: str = ""
+    required_narrative_markdown: str
+    must_include_claims: List[str] = Field(default_factory=list)
+    must_include_metrics: List[str] = Field(default_factory=list)
+    must_include_tables: List[str] = Field(default_factory=list)
+    asset_ids: List[str] = Field(default_factory=list)
+    min_visible_chars: int = Field(default=0, ge=0)
+    rendering_notes: str = ""
+
+
+class PageContentPlan(BaseModel):
+    schema_version: str = Field(default=PAGE_CONTENT_PLAN_SCHEMA_VERSION)
+    paper_title: str
+    source_char_count: int = Field(default=0, ge=0)
+    target_visible_chars: int = Field(default=0, ge=0)
+    coverage_ratio: float = Field(default=0.0, ge=0.0)
+    blocks: List[PageContentBlock]
+
+    @model_validator(mode="after")
+    def validate_unique_blocks(self) -> "PageContentPlan":
+        block_ids = [str(block.block_id or "").strip() for block in self.blocks]
+        duplicate_ids = sorted({block_id for block_id in block_ids if block_ids.count(block_id) > 1})
+        if duplicate_ids:
+            raise ValueError("PageContentPlan contains duplicate block_id values: " + ", ".join(duplicate_ids))
+        if any(not block_id for block_id in block_ids):
+            raise ValueError("PageContentPlan contains an empty block_id.")
+        return self
+
+
 class PlannerCriticReport(BaseModel):
     is_plan_valid: bool = Field(description="Whether planner output passed semantic review.")
     plan_feedback: str = Field(description="Actionable feedback when plan is invalid.")
@@ -445,10 +496,15 @@ class CoderArtifact(BaseModel):
     )
     edited_files: List[str] = Field(description="Edited file paths relative to site_dir.")
     notes: str = Field(description="Short build summary.")
-    render_mode: Optional[Literal["compiled_block_assembly", "legacy_fullpage"]] = Field(
+    render_mode: Optional[RenderStrategy] = Field(
         default=None,
         description="Actual coder render mode used for this artifact.",
     )
+
+    @field_validator("render_mode", mode="before")
+    @classmethod
+    def normalize_render_mode(cls, value: object) -> object:
+        return _normalize_render_strategy(value)
     template_profile_path: Optional[str] = Field(
         default=None,
         description="Saved TemplateProfile path used for the build.",
@@ -464,6 +520,10 @@ class CoderArtifact(BaseModel):
     fullpage_context_dir: Optional[str] = Field(
         default=None,
         description="Directory containing structure-guided fullpage digest artifacts when fullpage rendering is used.",
+    )
+    page_content_plan_path: Optional[str] = Field(
+        default=None,
+        description="Saved PageContentPlan path used by template-guided fullpage rendering.",
     )
 
 
@@ -515,7 +575,12 @@ class BlockRenderArtifact(BaseModel):
     order: int
     selector: str
     match_index: int = 0
-    render_mode: Literal["compiled_block_assembly", "legacy_fullpage"] = "compiled_block_assembly"
+    render_mode: RenderStrategy = "compiled_block_assembly"
+
+    @field_validator("render_mode", mode="before")
+    @classmethod
+    def normalize_render_mode(cls, value: object) -> object:
+        return _normalize_render_strategy(value)
     html: str = ""
     html_path: str = ""
     metadata_path: str = ""
@@ -634,6 +699,7 @@ class ReviewItem(BaseModel):
     severity: Literal["high", "medium", "low"]
     target: str
     advice: str
+    preferred_route: Optional[Literal["css", "patch"]] = None
 
 
 class ReviewerReport(BaseModel):
@@ -643,6 +709,15 @@ class ReviewerReport(BaseModel):
 
 class ArbiterReport(BaseModel):
     items: List[ReviewItem] = Field(default_factory=list)
+
+
+class RevisionRouteDecision(BaseModel):
+    route: Literal["css", "patch", "mixed", "none"] = "none"
+    source: Literal["user", "arbiter", "none"] = "none"
+    patch_text: str = ""
+    css_text: str = ""
+    reason: str = ""
+    confidence: float = 0.0
 
 
 class AnchorChildStyle(BaseModel):

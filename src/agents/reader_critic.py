@@ -316,7 +316,7 @@ def run_semantic_critic(
     """Run Gemini-Flash semantic audit for Reader output."""
     print("[PaperAlchemy-Critic] Running Gemini-Flash semantic audit...")
 
-    llm = get_llm(temperature=0, use_smart_model=False)
+    llm = get_llm(temperature=0, use_smart_model=False, thinking_level="high")
     structured_llm = llm.with_structured_output(CriticReport)
 
     user_msg = READER_CRITIC_USER_PROMPT_TEMPLATE.format(

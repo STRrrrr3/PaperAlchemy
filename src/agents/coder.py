@@ -14,6 +14,7 @@ from src.agents.coder_critic import (
     build_coder_critic_router,
     coder_critic_node,
 )
+from src.agents.content_composer import run_content_composer_agent
 from src.utils.html_utils import (
     extract_html_document,
     extract_html_fragment,
@@ -23,6 +24,7 @@ from src.utils.html_utils import (
     read_text_with_fallback,
 )
 from src.services.human_feedback import extract_human_feedback_text, normalize_human_feedback
+from src.services.artifact_store import save_page_content_plan
 from src.services.paper_assets import asset_lookup, asset_target_filename, collect_page_plan_asset_ids, resolved_asset_source_path
 from src.utils.json_utils import to_pretty_json
 from src.services.llm import get_llm
@@ -51,8 +53,10 @@ from src.contracts.schemas import (
     BlockRenderSpec,
     BlockShellContract,
     CoderArtifact,
+    FULLPAGE_RENDER_STRATEGY,
     PaperAsset,
     PagePlan,
+    PageContentPlan,
     ResolvedBlockBinding,
     StructuredPaper,
     TemplateProfile,
@@ -74,6 +78,31 @@ _AFFILIATION_KEYWORDS = (
     "center",
     "centre",
 )
+
+_BLOCK_LAYOUT_BASELINE_STYLE_ID = "paperalchemy-block-layout-baseline"
+MIN_FULLPAGE_CONTENT_COVERAGE_RATIO = 0.52
+MIN_FULLPAGE_VISIBLE_TEXT_CHARS = 4200
+MIN_SOURCE_CHARS_FOR_FULLPAGE_VISIBLE_FLOOR = 5000
+_BLOCK_LAYOUT_BASELINE_CSS = """[data-pa-block] {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 1000px;
+  margin-left: auto;
+  margin-right: auto;
+}"""
+_BLOCK_ROOT_INLINE_LAYOUT_PROPS = {
+    "width",
+    "min-width",
+    "max-width",
+    "inline-size",
+    "min-inline-size",
+    "max-inline-size",
+    "margin-left",
+    "margin-right",
+    "margin-inline",
+    "margin-inline-start",
+    "margin-inline-end",
+}
 
 
 def _normalize_page_plan(plan: Any) -> PagePlan | None:
@@ -401,6 +430,112 @@ def _format_feedback_block(value: Any) -> str:
     return "\n".join(lines) if lines else "(none)"
 
 
+def _visible_text_char_count(html_text: str) -> int:
+    soup = BeautifulSoup(str(html_text or ""), "html.parser")
+    text = " ".join(soup.get_text(" ", strip=True).split())
+    return len(text)
+
+
+def _structured_source_char_count(structured_paper: StructuredPaper | None) -> int:
+    if structured_paper is None:
+        return 0
+    parts = [str(structured_paper.overall_summary or "").strip()]
+    parts.extend(
+        str(section.rich_web_content or "").strip()
+        for section in list(structured_paper.sections or [])
+        if str(section.rich_web_content or "").strip()
+    )
+    return sum(len(part) for part in parts if part)
+
+
+def _validate_fullpage_content_density(
+    html_text: str,
+    *,
+    structured_paper: StructuredPaper | None,
+    page_plan: PagePlan,
+    page_content_plan: PageContentPlan | None = None,
+) -> list[str]:
+    critiques: list[str] = []
+    soup = BeautifulSoup(str(html_text or ""), "html.parser")
+    rendered_blocks = {
+        str(tag.get("data-pa-block") or "").strip()
+        for tag in soup.select("[data-pa-block]")
+        if str(tag.get("data-pa-block") or "").strip()
+    }
+    expected_blocks = {
+        str(block.block_id or "").strip()
+        for block in page_plan.blocks
+        if str(block.block_id or "").strip()
+    }
+    missing_blocks = sorted(expected_blocks - rendered_blocks)
+    if missing_blocks:
+        critiques.append("Fullpage draft omitted planned block(s): " + ", ".join(missing_blocks) + ".")
+
+    if page_content_plan is not None:
+        block_tags = {
+            str(tag.get("data-pa-block") or "").strip(): tag
+            for tag in soup.select("[data-pa-block]")
+            if str(tag.get("data-pa-block") or "").strip()
+        }
+        for content_block in page_content_plan.blocks:
+            block_id = str(content_block.block_id or "").strip()
+            block_tag = block_tags.get(block_id)
+            if block_tag is None:
+                continue
+            block_text = " ".join(block_tag.get_text(" ", strip=True).split())
+            if len(block_text) < int(content_block.min_visible_chars or 0):
+                critiques.append(
+                    f"Block '{block_id}' is too compressed: visible text has {len(block_text)} chars, "
+                    f"but PageContentPlan requires at least {content_block.min_visible_chars}."
+                )
+            lowered = block_text.lower()
+            missing_metrics = [
+                metric
+                for metric in content_block.must_include_metrics
+                if str(metric or "").strip() and str(metric or "").strip().lower() not in lowered
+            ]
+            if missing_metrics:
+                critiques.append(
+                    f"Block '{block_id}' is missing required metric(s): "
+                    + ", ".join(missing_metrics[:8])
+                    + "."
+                )
+            missing_tables = []
+            for table in content_block.must_include_tables:
+                clean_table = str(table or "").strip()
+                if not clean_table:
+                    continue
+                if clean_table.lower() in lowered:
+                    continue
+                numeric_tokens = re.findall(r"\d+(?:\.\d+)?", clean_table)
+                if block_tag.find("table") or any(token in lowered for token in numeric_tokens[:6]):
+                    continue
+                missing_tables.append(clean_table)
+            if missing_tables:
+                critiques.append(f"Block '{block_id}' is missing required table evidence from PageContentPlan.")
+        return critiques
+
+    source_chars = _structured_source_char_count(structured_paper)
+    if source_chars <= 0:
+        return critiques
+
+    visible_chars = _visible_text_char_count(html_text)
+    expected_chars = int(source_chars * MIN_FULLPAGE_CONTENT_COVERAGE_RATIO)
+    if source_chars >= MIN_SOURCE_CHARS_FOR_FULLPAGE_VISIBLE_FLOOR:
+        expected_chars = max(MIN_FULLPAGE_VISIBLE_TEXT_CHARS, expected_chars)
+    if visible_chars < expected_chars:
+        critiques.append(
+            "Fullpage draft is too compressed: "
+            f"visible text has {visible_chars} chars, but source narrative has {source_chars} chars. "
+            f"Regenerate with at least {expected_chars} visible chars by expanding each planned block "
+            "with concrete material from STRUCTURED_PAPER_JSON.sections[*].rich_web_content. "
+            "Do not treat content_contract.body_points as a maximum length; preserve mechanisms, "
+            "numeric results, tables, equations, and comparisons in polished HTML."
+        )
+
+    return critiques
+
+
 def _read_previous_generated_html(state: CoderState) -> str:
     artifact = _normalize_coder_artifact(state.get("coder_artifact"))
     if not artifact:
@@ -558,7 +693,7 @@ def _render_block_fragment(
     human_directives: str,
     retry_feedback: str = "",
 ) -> str:
-    llm = get_llm(temperature=0.15, use_smart_model=True)
+    llm = get_llm(temperature=0.15, use_smart_model=True, thinking_level="high")
     effective_instructions = coder_instructions
     if retry_feedback:
         effective_instructions = (effective_instructions + "\n\nRetry feedback:\n" + retry_feedback).strip()
@@ -844,6 +979,100 @@ def _update_global_elements(
             text_el.replace_with(footer_text)
 
 
+def _split_inline_style_declarations(style_text: str) -> list[tuple[str, str]]:
+    declarations: list[tuple[str, str]] = []
+    for raw_declaration in str(style_text or "").split(";"):
+        if ":" not in raw_declaration:
+            continue
+        raw_name, raw_value = raw_declaration.split(":", 1)
+        name = raw_name.strip()
+        value = raw_value.strip()
+        if name and value:
+            declarations.append((name, value))
+    return declarations
+
+
+def _split_css_value_tokens(value: str) -> list[str]:
+    tokens: list[str] = []
+    current: list[str] = []
+    depth = 0
+    for char in str(value or "").strip():
+        if char == "(":
+            depth += 1
+        elif char == ")" and depth > 0:
+            depth -= 1
+
+        if char.isspace() and depth == 0:
+            token = "".join(current).strip()
+            if token:
+                tokens.append(token)
+            current = []
+            continue
+        current.append(char)
+
+    token = "".join(current).strip()
+    if token:
+        tokens.append(token)
+    return tokens
+
+
+def _vertical_margin_declarations(value: str) -> list[tuple[str, str]]:
+    tokens = _split_css_value_tokens(value)
+    if not tokens:
+        return []
+    if len(tokens) == 1:
+        top = bottom = tokens[0]
+    elif len(tokens) == 2:
+        top = bottom = tokens[0]
+    else:
+        top = tokens[0]
+        bottom = tokens[2]
+    return [("margin-top", top), ("margin-bottom", bottom)]
+
+
+def _normalize_block_root_inline_layout(soup: BeautifulSoup) -> None:
+    for block in soup.select("[data-pa-block]"):
+        if not isinstance(block, Tag):
+            continue
+        declarations = _split_inline_style_declarations(str(block.get("style") or ""))
+        if not declarations:
+            continue
+
+        kept: list[tuple[str, str]] = []
+        for name, value in declarations:
+            normalized_name = name.lower()
+            if normalized_name in _BLOCK_ROOT_INLINE_LAYOUT_PROPS:
+                continue
+            if normalized_name == "margin":
+                kept.extend(_vertical_margin_declarations(value))
+                continue
+            kept.append((name, value))
+
+        if kept:
+            block["style"] = " ".join(f"{name}: {value};" for name, value in kept)
+        else:
+            block.attrs.pop("style", None)
+
+
+def _inject_block_layout_baseline_style(soup: BeautifulSoup) -> None:
+    if soup.head is None:
+        head = soup.new_tag("head")
+        if soup.html is not None:
+            soup.html.insert(0, head)
+        else:
+            soup.insert(0, head)
+
+    existing = soup.head.select_one(f'style[id="{_BLOCK_LAYOUT_BASELINE_STYLE_ID}"]')
+    if isinstance(existing, Tag):
+        existing.string = _BLOCK_LAYOUT_BASELINE_CSS
+        return
+
+    baseline_tag = soup.new_tag("style", attrs={"id": _BLOCK_LAYOUT_BASELINE_STYLE_ID})
+    baseline_tag.string = _BLOCK_LAYOUT_BASELINE_CSS
+    # Keep template links before this baseline; revision overrides are appended later and must win by source order.
+    soup.head.append(baseline_tag)
+
+
 def _inject_front_matter_metadata(
     soup: BeautifulSoup,
     structured_paper: StructuredPaper | None,
@@ -1017,6 +1246,8 @@ def _postprocess_generated_html(
     soup = BeautifulSoup(str(html_text or ""), "html.parser")
     if template_profile is not None and structured_paper is not None:
         _update_global_elements(soup, structured_paper, page_plan, template_profile)
+    _normalize_block_root_inline_layout(soup)
+    _inject_block_layout_baseline_style(soup)
     _inject_front_matter_metadata(soup, structured_paper)
     _inject_math_fallback_script(soup)
     return normalize_html_document_whitespace(_ensure_doctype(str(soup)))
@@ -1250,7 +1481,7 @@ def _run_compiled_block_assembly(
     return artifact, updated_page_plan, block_render_specs, block_render_artifacts
 
 
-def _run_legacy_fullpage_render(
+def _run_template_guided_fullpage_render(
     *,
     paper_folder_name: str,
     structured_paper: StructuredPaper,
@@ -1289,51 +1520,83 @@ def _run_legacy_fullpage_render(
         structured_paper=structured_paper,
         asset_ids=asset_ids,
     )
-
-    llm = get_llm(temperature=0.2, use_smart_model=True)
-    response = llm.invoke(
-        [
-            SystemMessage(content=CODER_SYSTEM_PROMPT),
-            HumanMessage(
-                content=CODER_USER_PROMPT_TEMPLATE.format(
-                    structured_paper_json=to_pretty_json(structured_paper),
-                    page_plan_json=json.dumps(
-                        _sanitized_page_plan_for_prompt(page_plan),
-                        indent=2,
-                        ensure_ascii=False,
-                    ),
-                    template_reference_html=template_reference_html,
-                    coder_instructions=coder_instructions or "(none)",
-                    human_directives=human_directives or "(none)",
-                    available_paper_assets_json=to_pretty_json(asset_manifest),
-                    global_anchor_requirements_json=json.dumps(
-                        build_expected_global_anchors(
-                            page_plan,
-                            template_profile=template_profile,
-                            reference_html_text=template_reference_html,
-                        ),
-                        indent=2,
-                        ensure_ascii=False,
-                    ),
-                    prior_coder_feedback=_format_feedback_block(state.get("coder_feedback_history")),
-                    previous_generated_html=previous_generated_html,
-                )
-            ),
-        ]
-    )
-
-    generated_html = extract_html_document(message_content_to_text(response))
-    if not generated_html:
-        raise ValueError("Legacy fullpage coder did not return a valid HTML document.")
-    generated_html = _ensure_body_markers(generated_html)
-    generated_html = normalize_html_document_whitespace(generated_html)
-    generated_html = _postprocess_generated_html(
-        generated_html,
+    page_content_plan = run_content_composer_agent(
         structured_paper=structured_paper,
         page_plan=page_plan,
-        template_profile=template_profile,
+        human_directives=human_directives,
+        coder_instructions=coder_instructions,
     )
-    generated_html = annotate_global_anchors(generated_html, page_plan, template_profile=template_profile)
+    page_content_plan_path = output_dir / "page_content_plan.json"
+    save_page_content_plan(page_content_plan_path, page_content_plan)
+
+    llm = get_llm(temperature=0.2, use_smart_model=True, thinking_level="high")
+    density_critiques: list[str] = []
+    generated_html = ""
+    for attempt in range(1, 3):
+        prior_feedback_parts = [_format_feedback_block(state.get("coder_feedback_history"))]
+        if density_critiques:
+            prior_feedback_parts.append("\n".join(density_critiques))
+        response = llm.invoke(
+            [
+                SystemMessage(content=CODER_SYSTEM_PROMPT),
+                HumanMessage(
+                    content=CODER_USER_PROMPT_TEMPLATE.format(
+                        structured_paper_json=to_pretty_json(structured_paper),
+                        page_plan_json=json.dumps(
+                            _sanitized_page_plan_for_prompt(page_plan),
+                            indent=2,
+                            ensure_ascii=False,
+                        ),
+                        page_content_plan_json=to_pretty_json(page_content_plan),
+                        template_reference_html=template_reference_html,
+                        coder_instructions=coder_instructions or "(none)",
+                        human_directives=human_directives or "(none)",
+                        available_paper_assets_json=to_pretty_json(asset_manifest),
+                        global_anchor_requirements_json=json.dumps(
+                            build_expected_global_anchors(
+                                page_plan,
+                                template_profile=template_profile,
+                                reference_html_text=template_reference_html,
+                            ),
+                            indent=2,
+                            ensure_ascii=False,
+                        ),
+                        prior_coder_feedback="\n\n".join(
+                            part for part in prior_feedback_parts if str(part or "").strip() and part != "(none)"
+                        )
+                        or "(none)",
+                        previous_generated_html=previous_generated_html,
+                    )
+                ),
+            ]
+        )
+
+        generated_html = extract_html_document(message_content_to_text(response))
+        if not generated_html:
+            raise ValueError("Template-guided fullpage coder did not return a valid HTML document.")
+        generated_html = _ensure_body_markers(generated_html)
+        generated_html = normalize_html_document_whitespace(generated_html)
+        generated_html = _postprocess_generated_html(
+            generated_html,
+            structured_paper=structured_paper,
+            page_plan=page_plan,
+            template_profile=template_profile,
+        )
+        generated_html = annotate_global_anchors(generated_html, page_plan, template_profile=template_profile)
+        density_critiques = _validate_fullpage_content_density(
+            generated_html,
+            structured_paper=structured_paper,
+            page_plan=page_plan,
+            page_content_plan=page_content_plan,
+        )
+        if not density_critiques:
+            break
+        print(
+            "[PaperAlchemy-Coder] template-guided fullpage content density retry "
+            f"{attempt}/2: {' | '.join(density_critiques)}"
+        )
+    if density_critiques:
+        raise ValueError("Template-guided fullpage coder failed content density validation: " + " | ".join(density_critiques))
 
     asset_critiques = validate_local_image_references(
         html_text=generated_html,
@@ -1343,7 +1606,7 @@ def _run_legacy_fullpage_render(
         enforce_paper_asset_whitelist=True,
     )
     if asset_critiques:
-        raise ValueError("Legacy fullpage coder failed local image validation: " + " | ".join(asset_critiques))
+        raise ValueError("Template-guided fullpage coder failed local image validation: " + " | ".join(asset_critiques))
 
     page_manifest = extract_page_manifest(
         html_text=generated_html,
@@ -1373,16 +1636,38 @@ def _run_legacy_fullpage_render(
         paper_asset_manifest=asset_manifest,
         edited_files=edited_files,
         notes=(
-            "v8-legacy-fullpage-fallback: generated shell-constrained HTML via fullpage coder and "
+            "v8-template-guided-fullpage: generated shell-constrained HTML via fullpage coder and "
             "validated stable data-pa-block, data-pa-slot, and data-pa-global anchors."
         ),
-        render_mode="legacy_fullpage",
+        render_mode=FULLPAGE_RENDER_STRATEGY,
         template_profile_path=template_profile_path,
         page_manifest_path=page_manifest_path,
         block_artifact_dir=None,
         fullpage_context_dir=None,
+        page_content_plan_path=str(page_content_plan_path),
     )
     return artifact, page_plan
+
+
+def _run_legacy_fullpage_render(
+    *,
+    paper_folder_name: str,
+    structured_paper: StructuredPaper,
+    page_plan: PagePlan,
+    human_directives: str,
+    coder_instructions: str,
+    state: CoderState,
+    template_profile: TemplateProfile | None,
+) -> tuple[CoderArtifact, PagePlan]:
+    return _run_template_guided_fullpage_render(
+        paper_folder_name=paper_folder_name,
+        structured_paper=structured_paper,
+        page_plan=page_plan,
+        human_directives=human_directives,
+        coder_instructions=coder_instructions,
+        state=state,
+        template_profile=template_profile,
+    )
 
 
 def coder_node(state: CoderState) -> dict[str, Any]:
@@ -1400,7 +1685,7 @@ def coder_node(state: CoderState) -> dict[str, Any]:
         print("[PaperAlchemy-Coder] missing page_plan/structured_paper/paper_folder_name.")
         return {}
 
-    requested_strategy = str(page_plan.plan_meta.render_strategy or "legacy_fullpage").strip()
+    requested_strategy = str(page_plan.plan_meta.render_strategy or FULLPAGE_RENDER_STRATEGY).strip()
     try:
         if requested_strategy == "compiled_block_assembly" and template_profile is not None:
             artifact, resolved_page_plan, block_specs, block_artifacts = _run_compiled_block_assembly(
@@ -1418,7 +1703,7 @@ def coder_node(state: CoderState) -> dict[str, Any]:
                 "block_render_artifacts": block_artifacts,
             }
 
-        artifact, resolved_page_plan = _run_legacy_fullpage_render(
+        artifact, resolved_page_plan = _run_template_guided_fullpage_render(
             paper_folder_name=paper_folder_name,
             structured_paper=structured_paper,
             page_plan=page_plan,
@@ -1435,9 +1720,12 @@ def coder_node(state: CoderState) -> dict[str, Any]:
         }
     except Exception as exc:
         if requested_strategy == "compiled_block_assembly":
-            print(f"[PaperAlchemy-Coder] compiled block assembly failed, falling back to legacy fullpage: {exc}")
+            print(
+                "[PaperAlchemy-Coder] compiled block assembly failed, "
+                f"falling back to template-guided fullpage: {exc}"
+            )
             try:
-                artifact, resolved_page_plan = _run_legacy_fullpage_render(
+                artifact, resolved_page_plan = _run_template_guided_fullpage_render(
                     paper_folder_name=paper_folder_name,
                     structured_paper=structured_paper,
                     page_plan=page_plan,
@@ -1453,7 +1741,7 @@ def coder_node(state: CoderState) -> dict[str, Any]:
                     "block_render_artifacts": [],
                 }
             except Exception as fallback_exc:
-                print(f"[PaperAlchemy-Coder] legacy fallback failed: {fallback_exc}")
+                print(f"[PaperAlchemy-Coder] template-guided fullpage fallback failed: {fallback_exc}")
                 return {}
         print(f"[PaperAlchemy-Coder] build failed: {exc}")
         return {}

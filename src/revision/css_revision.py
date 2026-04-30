@@ -7,7 +7,7 @@ from typing import Any
 from bs4 import BeautifulSoup
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.contracts.schemas import ContentReplacement, CssRevisionPlan, CoderArtifact, PageManifest, PagePlan
+from src.contracts.schemas import ContentReplacement, CssRevisionPlan, CoderArtifact, PageManifest, PagePlan, RevisionRouteDecision
 from src.contracts.state import WorkflowState
 from src.patching.patch_pipeline import (
     LEGACY_PAGE_ERROR,
@@ -62,6 +62,17 @@ def _normalize_css_revision_plan(plan: Any) -> CssRevisionPlan | None:
         return None
     try:
         return CssRevisionPlan.model_validate(plan)
+    except Exception:
+        return None
+
+
+def _normalize_revision_route_decision(value: Any) -> RevisionRouteDecision | None:
+    if isinstance(value, RevisionRouteDecision):
+        return value
+    if value is None:
+        return None
+    try:
+        return RevisionRouteDecision.model_validate(value)
     except Exception:
         return None
 
@@ -257,7 +268,7 @@ def _invoke_css_revision_plan(
     style_context_json: str,
     multimodal_images: list[dict[str, str]],
 ) -> CssRevisionPlan:
-    llm = get_llm(temperature=0.1, use_smart_model=True)
+    llm = get_llm(temperature=0.1, use_smart_model=True, thinking_level="high")
     structured_llm = llm.with_structured_output(CssRevisionPlan)
     response = structured_llm.invoke(
         [
@@ -358,6 +369,7 @@ def css_revision_agent_node(state: WorkflowState) -> dict[str, Any]:
     structured_paper = _load_workflow_structured_paper(state)
     manifest = _read_current_page_manifest(artifact)
     feedback = state.get("human_directives")
+    route_decision = _normalize_revision_route_decision(state.get("revision_route_decision"))
     current_html = read_current_page_html(artifact, missing_value="")
 
     if artifact is None or page_plan is None or structured_paper is None or not current_html:
@@ -367,7 +379,8 @@ def css_revision_agent_node(state: WorkflowState) -> dict[str, Any]:
     if manifest is None:
         print(f"[CSSRevisionAgent] {LEGACY_PAGE_ERROR}")
         return {"css_revision_plan": None, "css_revision_summary": "", "patch_error": LEGACY_PAGE_ERROR}
-    if not has_human_feedback(feedback):
+    routed_css_text = str(route_decision.css_text or "").strip() if route_decision is not None else ""
+    if not has_human_feedback(feedback) and not routed_css_text:
         message = "CSS Revision Agent requires human feedback text or images."
         print(f"[CSSRevisionAgent] {message}")
         return {"css_revision_plan": None, "css_revision_summary": "", "patch_error": message}
@@ -378,11 +391,15 @@ def css_revision_agent_node(state: WorkflowState) -> dict[str, Any]:
         print(f"[CSSRevisionAgent] {message}")
         return {"css_revision_plan": None, "css_revision_summary": "", "patch_error": message}
 
-    human_feedback = extract_human_feedback_text(feedback) or "(no text feedback provided)"
+    human_feedback = routed_css_text or extract_human_feedback_text(feedback) or "(no text feedback provided)"
     feedback_images = extract_human_feedback_images(feedback)
     paper_folder_name = str(state.get("paper_folder_name") or "").strip()
-    request_intent_category = classify_revision_request(human_feedback, bool(feedback_images))
-    explicit_content_change = has_explicit_content_change(human_feedback)
+    if routed_css_text:
+        request_intent_category = "visual"
+        explicit_content_change = False
+    else:
+        request_intent_category = classify_revision_request(human_feedback, bool(feedback_images))
+        explicit_content_change = has_explicit_content_change(human_feedback)
     style_context_json = load_style_context_json(Path(artifact.entry_html).resolve())
     multimodal_images = [page_screenshot, *feedback_images]
 

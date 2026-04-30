@@ -683,7 +683,7 @@ def _calculate_compile_confidence(
 
 def _llm_enrich_profile(summary: dict[str, Any]) -> tuple[list[str], list[str], str | None]:
     try:
-        llm = get_llm(temperature=0, use_smart_model=False)
+        llm = get_llm(temperature=0, use_smart_model=False, thinking_level="high")
         response = llm.invoke(
             [
                 SystemMessage(content=_LLM_ENRICHMENT_SYSTEM_PROMPT),

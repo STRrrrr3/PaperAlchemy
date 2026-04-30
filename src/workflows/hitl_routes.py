@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from src.ui.updates import _normalize_manual_layout_compose_enabled
-from src.contracts.schemas import ArbiterReport
+from src.contracts.schemas import ArbiterReport, RevisionRouteDecision
 from src.contracts.state import WorkflowState
-from src.revision.request_intent import classify_revision_request
 from src.services.human_feedback import extract_human_feedback_images, extract_human_feedback_text
 
 def human_review_router(state: WorkflowState) -> str:
@@ -26,22 +25,37 @@ def webpage_review_router(state: WorkflowState) -> str:
     feedback_text = str(extract_human_feedback_text(feedback) or "").strip()
     feedback_images = extract_human_feedback_images(feedback)
     if not feedback_text and not feedback_images:
-        return "css_revision_agent"
-
-    request_intent = classify_revision_request(feedback_text, bool(feedback_images))
-    if request_intent == "content":
-        return "translator"
-    return "css_revision_agent"
+        return "end"
+    return "revision_classifier"
 
 
-def translated_revision_router(state: WorkflowState) -> str:
-    if str(state.get("edit_intent") or "").strip() in {"patch", "asset_rebind"}:
+def _normalize_route_decision(value: object) -> RevisionRouteDecision:
+    if isinstance(value, RevisionRouteDecision):
+        return value
+    try:
+        return RevisionRouteDecision.model_validate(value)
+    except Exception:
+        return RevisionRouteDecision()
+
+
+def revision_route_router(state: WorkflowState) -> str:
+    decision = _normalize_route_decision(state.get("revision_route_decision"))
+    if decision.route in {"patch", "mixed"}:
         return "patch_agent"
-    return "css_revision_agent"
+    if decision.route == "css":
+        return "css_revision_agent"
+    return "webpage_review"
+
+
+def post_patch_router(state: WorkflowState) -> str:
+    if str(state.get("patch_error") or "").strip():
+        return "webpage_review"
+    decision = _normalize_route_decision(state.get("revision_route_decision"))
+    if decision.route == "mixed" and str(decision.css_text or "").strip():
+        return "css_revision_agent"
+    return "webpage_review"
 
 def post_arbiter_router(state: WorkflowState) -> str:
-    if bool(state.get("arbiter_autofix_applied")):
-        return "webpage_review"
     raw = state.get("arbiter_review")
     if raw is None:
         return "webpage_review"
@@ -51,4 +65,4 @@ def post_arbiter_router(state: WorkflowState) -> str:
         return "webpage_review"
     if not report.items:
         return "webpage_review"
-    return "arbiter_autofix"
+    return "revision_classifier"

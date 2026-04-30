@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.agents.translator import edit_intent_router_node, translator_node
 from src.patching.patch_pipeline import patch_agent_node, patch_executor_node
-from src.revision.css_revision import arbiter_autofix_node, css_revision_agent_node, css_revision_executor_node
+from src.revision.css_revision import css_revision_agent_node, css_revision_executor_node
+from src.revision.revision_classifier import revision_classifier_node
 from src.services.preview_service import PREVIEW_CACHE_DIR
 from src.template.resources import ensure_autopage_template_assets
 from src.ui.app_builder import APP_CSS, build_app as _build_app
@@ -115,8 +115,9 @@ from src.workflows.hitl_nodes import (
 from src.workflows.hitl_routes import (
     human_review_router,
     outline_review_router,
+    post_patch_router,
     post_arbiter_router,
-    translated_revision_router,
+    revision_route_router,
     webpage_review_router,
 )
 
@@ -136,10 +137,8 @@ def build_hitl_workflow():
         semantic_visual_reviewer_node=semantic_visual_reviewer_node,
         layout_rhythm_reviewer_node=layout_rhythm_reviewer_node,
         review_arbiter_node=review_arbiter_node,
-        arbiter_autofix_node=arbiter_autofix_node,
+        revision_classifier_node=revision_classifier_node,
         webpage_review_node=webpage_review_node,
-        translator_node=translator_node,
-        edit_intent_router_node=edit_intent_router_node,
         patch_agent_node=patch_agent_node,
         patch_executor_node=patch_executor_node,
         css_revision_agent_node=css_revision_agent_node,
@@ -148,7 +147,8 @@ def build_hitl_workflow():
         human_review_router=human_review_router,
         outline_review_router=outline_review_router,
         webpage_review_router=webpage_review_router,
-        translated_revision_router=translated_revision_router,
+        revision_route_router=revision_route_router,
+        post_patch_router=post_patch_router,
         post_arbiter_router=post_arbiter_router,
     )
 

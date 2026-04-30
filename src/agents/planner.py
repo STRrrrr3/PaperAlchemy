@@ -117,7 +117,7 @@ def unified_planner_node(state: PlannerState) -> dict[str, Any]:
     human_directives = extract_human_feedback_text(state.get("human_directives"))
     previous_page_plan = _normalize_page_plan(state.get("previous_page_plan"))
 
-    llm = get_llm(temperature=0.2, use_smart_model=True)
+    llm = get_llm(temperature=0.2, use_smart_model=True, thinking_level="high")
     structured_llm = llm.with_structured_output(SemanticPagePlan)
     user_msg = PLANNER_USER_PROMPT_TEMPLATE.format(
         structured_paper_json=to_pretty_json(structured_paper),

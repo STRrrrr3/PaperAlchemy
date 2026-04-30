@@ -161,7 +161,7 @@ def translator_node(state: WorkflowState) -> dict[str, Any]:
 
     print("[Translator] Translating multimodal feedback into a structured revision plan...")
     try:
-        llm = get_llm(temperature=0.1, use_smart_model=True)
+        llm = get_llm(temperature=0.1, use_smart_model=True, thinking_level="high")
         structured_llm = llm.with_structured_output(RevisionPlan)
         response = structured_llm.invoke(
             [

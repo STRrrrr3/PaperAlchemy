@@ -27,6 +27,7 @@ from src.services.artifact_store import (
 )
 from src.services.paper_assets import build_asset_manifest, ensure_manifest_assets_present
 from src.services.llm import get_llm
+from src.services.human_feedback import build_multimodal_message_content, extract_human_feedback_images
 from src.validators.page_manifest import (
     GLOBAL_ATTR,
     SLOT_ATTR,
@@ -52,6 +53,8 @@ from src.prompts import (
     BLOCK_REGEN_USER_PROMPT_TEMPLATE,
     PATCH_AGENT_SYSTEM_PROMPT,
     PATCH_AGENT_USER_PROMPT_TEMPLATE,
+    TRANSLATOR_SYSTEM_PROMPT,
+    TRANSLATOR_USER_PROMPT_TEMPLATE,
 )
 from src.contracts.schemas import (
     AttributeChange,
@@ -60,6 +63,7 @@ from src.contracts.schemas import (
     OverrideCssRule,
     PageManifest,
     PagePlan,
+    RevisionRouteDecision,
     RevisionPlan,
     StructuredPaper,
     StyleChange,
@@ -118,6 +122,17 @@ def _normalize_revision_plan(plan: Any) -> RevisionPlan | None:
         return None
     try:
         return RevisionPlan.model_validate(plan)
+    except Exception:
+        return None
+
+
+def _normalize_revision_route_decision(value: Any) -> RevisionRouteDecision | None:
+    if isinstance(value, RevisionRouteDecision):
+        return value
+    if value is None:
+        return None
+    try:
+        return RevisionRouteDecision.model_validate(value)
     except Exception:
         return None
 
@@ -1038,7 +1053,7 @@ def _regenerate_block_html(
         for outline_item in page_plan.page_outline
     }
     try:
-        llm = get_llm(temperature=0.1, use_smart_model=True)
+        llm = get_llm(temperature=0.1, use_smart_model=True, thinking_level="high")
         response = llm.invoke(
             [
                 SystemMessage(content=BLOCK_REGEN_SYSTEM_PROMPT),
@@ -1093,6 +1108,56 @@ def _strict_revision_validation_enabled(manifest: PageManifest) -> bool:
     return str(manifest.schema_version or "").strip() != "1.0"
 
 
+def _revision_patch_text_from_state(state: WorkflowState) -> str:
+    decision = _normalize_revision_route_decision(state.get("revision_route_decision"))
+    if decision is not None and str(decision.patch_text or "").strip():
+        return str(decision.patch_text or "").strip()
+    return ""
+
+
+def _generate_revision_plan_for_patch(
+    *,
+    state: WorkflowState,
+    artifact: CoderArtifact,
+    manifest: PageManifest,
+    current_html: str,
+    style_context_json: str,
+) -> RevisionPlan | None:
+    patch_text = _revision_patch_text_from_state(state)
+    if not patch_text:
+        return None
+
+    user_prompt = TRANSLATOR_USER_PROMPT_TEMPLATE.format(
+        human_feedback=patch_text,
+        current_entry_html_path=artifact.entry_html,
+        current_template_id=artifact.selected_template_id,
+        current_page_manifest_json=to_pretty_json(manifest),
+        current_html=current_html,
+        template_style_context_json=style_context_json,
+    )
+
+    print("[PatchAgent] Translating patch feedback into anchored revision targets...")
+    try:
+        llm = get_llm(temperature=0.1, use_smart_model=True, thinking_level="high")
+        structured_llm = llm.with_structured_output(RevisionPlan)
+        response = structured_llm.invoke(
+            [
+                SystemMessage(content=TRANSLATOR_SYSTEM_PROMPT),
+                HumanMessage(
+                    content=build_multimodal_message_content(
+                        text=user_prompt,
+                        images=extract_human_feedback_images(state.get("human_directives")),
+                    )
+                ),
+            ]
+        )
+    except Exception as exc:
+        print(f"[PatchAgent] anchored revision translation failed: {exc}")
+        return None
+
+    return _normalize_revision_plan(response)
+
+
 def patch_agent_node(state: WorkflowState) -> dict[str, Any]:
     artifact = _load_workflow_coder_artifact(state)
     page_plan = _load_workflow_page_plan(state)
@@ -1116,7 +1181,15 @@ def patch_agent_node(state: WorkflowState) -> dict[str, Any]:
         print(f"[PatchAgent] {message}")
         return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
     if not revision_plan or not revision_plan.edits:
-        message = "Translator did not produce any actionable anchored edits from the feedback."
+        revision_plan = _generate_revision_plan_for_patch(
+            state=state,
+            artifact=artifact,
+            manifest=manifest,
+            current_html=current_html,
+            style_context_json=style_context_json,
+        )
+    if not revision_plan or not revision_plan.edits:
+        message = "Patch Agent could not translate the patch feedback into actionable anchored edits."
         print(f"[PatchAgent] {message}")
         return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
 
@@ -1155,7 +1228,7 @@ def patch_agent_node(state: WorkflowState) -> dict[str, Any]:
 
     print("[PatchAgent] Building targeted DOM replacement plan...")
     try:
-        llm = get_llm(temperature=0.1, use_smart_model=True)
+        llm = get_llm(temperature=0.1, use_smart_model=True, thinking_level="high")
         response = llm.invoke(
             [
                 SystemMessage(content=PATCH_AGENT_SYSTEM_PROMPT),
@@ -1360,8 +1433,10 @@ def patch_agent_node(state: WorkflowState) -> dict[str, Any]:
         return {"targeted_replacement_plan": None, "patch_agent_output": "", "patch_error": message}
 
     return {
+        "revision_plan": revision_plan,
         "targeted_replacement_plan": targeted_plan,
         "patch_agent_output": _summarize_targeted_plan(targeted_plan),
+        "patch_applied_summary": "",
         "patch_error": "",
     }
 
@@ -1684,8 +1759,11 @@ def patch_executor_node(state: WorkflowState) -> dict[str, Any]:
         f"{applied_override_rules} override rule(s), "
         f"{regenerated_count} regenerated block(s)."
     )
+    patch_summary = _summarize_targeted_plan(targeted_plan)
     return {
+        "coder_artifact": updated_artifact,
         "patch_error": "",
-        "patch_agent_output": _summarize_targeted_plan(targeted_plan),
+        "patch_agent_output": patch_summary,
+        "patch_applied_summary": patch_summary,
     }
 

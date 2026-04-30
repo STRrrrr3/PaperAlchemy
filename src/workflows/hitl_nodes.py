@@ -80,11 +80,13 @@ class CoderPhaseState(CoderState, total=False):
     paper_folder_name: str
     coder_instructions: str
     patch_error: str
+    revision_route_decision: Any
     revision_plan: Any
     targeted_replacement_plan: Any
     css_revision_plan: CssRevisionPlan | None
     css_revision_summary: str
     patch_agent_output: str
+    patch_applied_summary: str
     shell_binding_review: ShellBindingReview | None
     shell_manual_selection: ShellManualSelection | None
     layout_compose_session: LayoutComposeSession | None
@@ -492,11 +494,13 @@ def coder_phase_node(state: WorkflowState) -> dict[str, Any]:
         "approved_page_plan": effective_page_plan,
         "coder_artifact": coder_artifact,
         "patch_error": "",
+        "revision_route_decision": None,
         "revision_plan": None,
         "targeted_replacement_plan": None,
         "css_revision_plan": None,
         "css_revision_summary": "",
         "patch_agent_output": "",
+        "patch_applied_summary": "",
         "shell_binding_review": None,
         "shell_manual_selection": None,
         "layout_compose_session": None,
@@ -585,6 +589,7 @@ def non_patch_feedback_node(state: WorkflowState) -> dict[str, Any]:
     return {
         "patch_error": message,
         "patch_agent_output": "",
+        "patch_applied_summary": "",
         "targeted_replacement_plan": None,
     }
 
@@ -823,11 +828,13 @@ def _coder_phase_finalize_node(state: CoderPhaseState) -> dict[str, Any]:
         "block_render_artifacts": [],
         "human_directives": normalize_human_feedback(state.get("human_directives")),
         "patch_error": "",
+        "revision_route_decision": None,
         "revision_plan": None,
         "targeted_replacement_plan": None,
         "css_revision_plan": None,
         "css_revision_summary": "",
         "patch_agent_output": "",
+        "patch_applied_summary": "",
         "shell_binding_review": None,
         "shell_manual_selection": None,
         "layout_compose_session": None,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import shutil
@@ -26,15 +27,25 @@ _BODY_MARKERS = {
 }
 _TEXT_SCAN_SUFFIXES = {".css", ".html", ".js", ".json", ".md", ".txt"}
 _ANCHOR_ATTR_CONFIG = {
-    "data-pa-block": {"kind": "block", "base_class": "paexp-a1", "offset": 1},
-    "data-pa-slot": {"kind": "slot", "base_class": "paexp-a2", "offset": 101},
-    "data-pa-global": {"kind": "global", "base_class": "paexp-a3", "offset": 201},
+    "data-pa-block": {"kind": "block"},
+    "data-pa-slot": {"kind": "slot"},
+    "data-pa-global": {"kind": "global"},
 }
 _AUXILIARY_FILENAMES = {
     "coder_artifact.json",
     "page_manifest.json",
     "style_context.json",
 }
+
+
+def _base_class_for_anchor_attr(attr_name: str) -> str:
+    digest = hashlib.sha1(f"base::{attr_name}".encode("utf-8")).hexdigest()[:10]
+    return f"paexp-c{digest}"
+
+
+def _specific_class_for_anchor(attr_name: str, value: str) -> str:
+    digest = hashlib.sha1(f"{attr_name}::{value}".encode("utf-8")).hexdigest()[:10]
+    return f"paexp-k{digest}"
 
 
 def build_experiment_exports_dir(paper_folder_name: str) -> Path:
@@ -61,8 +72,8 @@ def export_live_experiment_snapshot(paper_folder_name: str, export_name: str) ->
         structured_json_path=structured_json_path,
     )
 
-    live_site_dir = _resolve_artifact_path(str(artifact.site_dir or ""), output_dir=output_dir)
-    live_entry_html = _resolve_artifact_path(str(artifact.entry_html or ""), output_dir=output_dir)
+    live_site_dir = resolve_artifact_path(str(artifact.site_dir or ""), output_dir=output_dir)
+    live_entry_html = resolve_artifact_path(str(artifact.entry_html or ""), output_dir=output_dir)
     if not live_site_dir.exists() or not live_site_dir.is_dir():
         raise FileNotFoundError(f"Live site_dir does not exist: {live_site_dir}")
     if not live_entry_html.exists() or not live_entry_html.is_file():
@@ -204,7 +215,7 @@ def _sanitize_export_filename_stem(value: str) -> str:
     return cleaned or "site"
 
 
-def _resolve_artifact_path(raw_path: str, *, output_dir: Path) -> Path:
+def resolve_artifact_path(raw_path: str, *, output_dir: Path) -> Path:
     clean_path = str(raw_path or "").strip()
     if not clean_path:
         raise ValueError("Artifact path is empty.")
@@ -212,6 +223,9 @@ def _resolve_artifact_path(raw_path: str, *, output_dir: Path) -> Path:
     if candidate.is_absolute():
         return candidate.resolve()
     return (output_dir / candidate).resolve()
+
+
+_resolve_artifact_path = resolve_artifact_path
 
 
 def _resolve_target_html_relative_paths(
@@ -269,9 +283,8 @@ def _build_specific_class_maps(
     specific_maps: dict[str, dict[str, str]] = {"block": {}, "slot": {}, "global": {}}
     for attr_name, config in _ANCHOR_ATTR_CONFIG.items():
         kind = str(config["kind"])
-        offset = int(config["offset"])
-        for index, value in enumerate(sorted(collected_values[kind]), start=offset):
-            specific_maps[kind][value] = f"paexp-u{index:03d}"
+        for value in sorted(collected_values[kind]):
+            specific_maps[kind][value] = _specific_class_for_anchor(attr_name, value)
     return specific_maps
 
 
@@ -293,7 +306,7 @@ def _sanitize_html_files(
 
         for attr_name, config in _ANCHOR_ATTR_CONFIG.items():
             kind = str(config["kind"])
-            base_class = str(config["base_class"])
+            base_class = _base_class_for_anchor_attr(attr_name)
             specific_map = specific_class_maps[kind]
             for tag in soup.select(f"[{attr_name}]"):
                 if not isinstance(tag, Tag):
@@ -359,7 +372,7 @@ def _rewrite_css_text(
     rewritten = str(css_text or "")
     for attr_name, config in _ANCHOR_ATTR_CONFIG.items():
         kind = str(config["kind"])
-        base_class = str(config["base_class"])
+        base_class = _base_class_for_anchor_attr(attr_name)
         for value, specific_class in specific_class_maps[kind].items():
             rewritten = _replace_attr_selector(
                 rewritten,

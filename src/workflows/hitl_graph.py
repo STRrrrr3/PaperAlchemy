@@ -23,10 +23,8 @@ def build_hitl_workflow(
     semantic_visual_reviewer_node: Callable[[WorkflowState], dict[str, Any]],
     layout_rhythm_reviewer_node: Callable[[WorkflowState], dict[str, Any]],
     review_arbiter_node: Callable[[WorkflowState], dict[str, Any]],
-    arbiter_autofix_node: Callable[[WorkflowState], dict[str, Any]],
+    revision_classifier_node: Callable[[WorkflowState], dict[str, Any]],
     webpage_review_node: Callable[[WorkflowState], dict[str, Any]],
-    translator_node: Callable[[WorkflowState], dict[str, Any]],
-    edit_intent_router_node: Callable[[WorkflowState], dict[str, Any]],
     patch_agent_node: Callable[[WorkflowState], dict[str, Any]],
     patch_executor_node: Callable[[WorkflowState], dict[str, Any]],
     css_revision_agent_node: Callable[[WorkflowState], dict[str, Any]],
@@ -35,7 +33,8 @@ def build_hitl_workflow(
     human_review_router: Callable[[WorkflowState], str],
     outline_review_router: Callable[[WorkflowState], str],
     webpage_review_router: Callable[[WorkflowState], str],
-    translated_revision_router: Callable[[WorkflowState], str],
+    revision_route_router: Callable[[WorkflowState], str],
+    post_patch_router: Callable[[WorkflowState], str],
     post_arbiter_router: Callable[[WorkflowState], str],
 ):
     workflow = StateGraph(WorkflowState)
@@ -50,10 +49,8 @@ def build_hitl_workflow(
     workflow.add_node("reviewer_semantic_visual", semantic_visual_reviewer_node)
     workflow.add_node("reviewer_layout_rhythm", layout_rhythm_reviewer_node)
     workflow.add_node("review_arbiter", review_arbiter_node)
-    workflow.add_node("arbiter_autofix", arbiter_autofix_node)
+    workflow.add_node("revision_classifier", revision_classifier_node)
     workflow.add_node("webpage_review", webpage_review_node)
-    workflow.add_node("translator", translator_node)
-    workflow.add_node("edit_intent_router", edit_intent_router_node)
     workflow.add_node("patch_agent", patch_agent_node)
     workflow.add_node("patch_executor", patch_executor_node)
     workflow.add_node("css_revision_agent", css_revision_agent_node)
@@ -91,31 +88,36 @@ def build_hitl_workflow(
         "review_arbiter",
         post_arbiter_router,
         {
-            "arbiter_autofix": "arbiter_autofix",
+            "revision_classifier": "revision_classifier",
             "webpage_review": "webpage_review",
         },
     )
-    workflow.add_edge("arbiter_autofix", "css_revision_agent")
     workflow.add_conditional_edges(
         "webpage_review",
         webpage_review_router,
         {
-            "translator": "translator",
-            "css_revision_agent": "css_revision_agent",
+            "revision_classifier": "revision_classifier",
             "end": END,
         },
     )
-    workflow.add_edge("translator", "edit_intent_router")
     workflow.add_conditional_edges(
-        "edit_intent_router",
-        translated_revision_router,
+        "revision_classifier",
+        revision_route_router,
         {
             "patch_agent": "patch_agent",
             "css_revision_agent": "css_revision_agent",
+            "webpage_review": "webpage_review",
         },
     )
     workflow.add_edge("patch_agent", "patch_executor")
-    workflow.add_edge("patch_executor", "webpage_review")
+    workflow.add_conditional_edges(
+        "patch_executor",
+        post_patch_router,
+        {
+            "css_revision_agent": "css_revision_agent",
+            "webpage_review": "webpage_review",
+        },
+    )
     workflow.add_edge("css_revision_agent", "css_revision_executor")
     workflow.add_edge("css_revision_executor", "webpage_review")
 
