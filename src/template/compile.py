@@ -30,7 +30,7 @@ from src.template.structural_core import (
     tag_tokens,
 )
 from src.template.template_ir import build_global_anchor_from_tag, selector_global_id
-from src.template.resources import SyncedTemplateAssets, ensure_autopage_template_assets
+from src.template.resources import SyncedTemplateAssets, ensure_template_library_assets
 
 _CACHE_DIR_NAME = ".paperalchemy"
 _CACHE_PROFILE_DIR_NAME = "template_compile_cache"
@@ -166,7 +166,7 @@ def select_template_candidates(
     synced_assets: SyncedTemplateAssets | None = None,
 ) -> tuple[list[TemplateCandidate], TemplateCandidate, SyncedTemplateAssets]:
     constraints = dict(generation_constraints or {})
-    assets = synced_assets or ensure_autopage_template_assets(
+    assets = synced_assets or ensure_template_library_assets(
         project_root=project_root,
         force=bool(constraints.get("force_template_sync")),
     )

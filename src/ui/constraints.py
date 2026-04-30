@@ -6,7 +6,7 @@ from typing import Any
 
 from src.parsing.parser import parse_pdf
 from src.contracts.schemas import PARSED_DATA_SCHEMA_VERSION
-from src.template.resources import SyncedTemplateAssets, ensure_autopage_template_assets
+from src.template.resources import SyncedTemplateAssets, ensure_template_library_assets
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 INPUT_DIR = PROJECT_ROOT / "data" / "input"
@@ -110,4 +110,4 @@ def build_generation_constraints(
     }
 
 def ensure_template_assets() -> SyncedTemplateAssets:
-    return ensure_autopage_template_assets(PROJECT_ROOT)
+    return ensure_template_library_assets(PROJECT_ROOT)

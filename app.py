@@ -6,7 +6,7 @@ from src.patching.patch_pipeline import patch_agent_node, patch_executor_node
 from src.revision.css_revision import css_revision_agent_node, css_revision_executor_node
 from src.revision.revision_classifier import revision_classifier_node
 from src.services.preview_service import PREVIEW_CACHE_DIR
-from src.template.resources import ensure_autopage_template_assets
+from src.template.resources import ensure_template_library_assets
 from src.ui.app_builder import APP_CSS, build_app as _build_app
 from src.ui.constraints import (
     INPUT_DIR,
@@ -164,7 +164,7 @@ def build_app():
 def main() -> None:
     allowed_paths = [str(OUTPUT_DIR.resolve())]
     try:
-        synced_assets = ensure_autopage_template_assets(PROJECT_ROOT)
+        synced_assets = ensure_template_library_assets(PROJECT_ROOT)
         allowed_paths.append(str(synced_assets.templates_dir.resolve()))
     except Exception:
         pass

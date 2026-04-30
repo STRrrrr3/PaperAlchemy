@@ -7,6 +7,7 @@ SlotId = Literal["title", "summary", "body", "media", "meta", "actions"]
 RevisionIntent = Literal["patch", "non_patch", "asset_rebind"]
 RenderStrategy = Literal["compiled_block_assembly", "template_guided_fullpage"]
 CompressionLevel = Literal["teaser", "compact", "balanced", "dense", "near_full"]
+TemplatePlanningMode = Literal["template_library_first", "hybrid_template_bind"]
 
 PARSED_DATA_SCHEMA_VERSION = "2.0"
 STRUCTURED_PAPER_SCHEMA_VERSION = "2.0"
@@ -270,7 +271,7 @@ class TemplateProfile(BaseModel):
 
 class PlanMeta(BaseModel):
     plan_version: str = Field(default=PAGE_PLAN_SCHEMA_VERSION, description="Planner schema version.")
-    planning_mode: Literal["autopage_template_first", "hybrid_template_bind"] = Field(
+    planning_mode: TemplatePlanningMode = Field(
         description="Planning mode identifier."
     )
     target_framework: str = Field(description="Target framework, e.g., 'static-html', 'react', 'vue'.")

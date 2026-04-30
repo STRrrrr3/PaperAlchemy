@@ -26,7 +26,7 @@ from src.contracts.schemas import (
 )
 from src.contracts.state import PlannerState
 from src.template.compile import prepare_template_compile_bundle
-from src.template.resources import ensure_autopage_template_assets
+from src.template.resources import ensure_template_library_assets
 
 
 def _normalize_structured_paper(paper: Any) -> StructuredPaper | None:
@@ -231,7 +231,7 @@ def run_planner_agent(
     project_root = current_file.parents[2]
     constraints = dict(generation_constraints or {})
 
-    synced_assets = ensure_autopage_template_assets(
+    synced_assets = ensure_template_library_assets(
         project_root=project_root,
         force=bool(constraints.get("force_template_sync")),
     )

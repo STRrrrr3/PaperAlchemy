@@ -44,7 +44,7 @@ from src.services.human_feedback import extract_human_feedback_text, normalize_h
 from src.services.paper_assets import confirmation_pending
 from src.template.catalog import build_template_catalog, load_module_index, load_template_link_map
 from src.template.compile import prepare_template_compile_bundle
-from src.template.resources import ensure_autopage_template_assets
+from src.template.resources import ensure_template_library_assets
 from src.template.shell_resolver import build_layout_compose_session, resolve_page_plan_shells
 from src.ui.formatters import (
     format_page_plan_to_markdown,
@@ -679,7 +679,7 @@ def _planner_phase_prepare_node(state: PlannerPhaseState) -> dict[str, Any]:
     constraints = dict(state.get("generation_constraints") or {})
     user_constraints = dict(state.get("user_constraints") or {})
 
-    synced_assets = ensure_autopage_template_assets(
+    synced_assets = ensure_template_library_assets(
         project_root=PROJECT_ROOT,
         force=bool(constraints.get("force_template_sync")),
     )
